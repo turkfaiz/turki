@@ -46,8 +46,16 @@ function displayTitle(it) {
   return it.news_title_ar || "جارٍ إعداد النشرة الرسمية…";
 }
 
+function factItems(snippet) {
+  return String(snippet || "")
+    .split(/\n+/)
+    .flatMap((line) => line.split(/\s*[•📌·]\s*/))
+    .map((s) => s.replace(/^[•📌·]\s*/, "").trim())
+    .filter((s) => s.length >= 4);
+}
+
 function needsRetranslate(it) {
-  return it.trans_engine !== "brief-v2" && it.trans_engine !== "brief-llm";
+  return it.trans_engine !== "brief-radar" && it.trans_engine !== "brief-llm";
 }
 
 function originKey(value) {
@@ -179,6 +187,7 @@ function renderItems(items) {
       <button type="button" class="result ${it.id === state.selectedId ? "selected" : ""}" data-id="${it.id}">
         <p class="kicker">${escapeHtml(it.country_ar)} · ${escapeHtml(it.city_ar)} · ${escapeHtml(it.name_ar)}</p>
         <h3 class="headline">${escapeHtml(displayTitle(it))}</h3>
+        ${factItems(it.news_snippet_ar)[0] ? `<p class="fact-line">${escapeHtml(factItems(it.news_snippet_ar)[0])}</p>` : ""}
         <div class="meta">
           <span class="badge">${sourceLabel(it.source)}</span>
           ${it.publisher_tier === 0 || it.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
@@ -195,7 +204,7 @@ async function loadDetail(id) {
   state.selectedId = id;
   const { item } = await api(`/api/items/${id}`);
   const ar = item.news_title_ar || "جارٍ إعداد النشرة الرسمية…";
-  const snippet = item.news_snippet_ar || "";
+  const facts = factItems(item.news_snippet_ar);
   const excludeBox =
     item.status === "excluded"
       ? `<p class="meta">سبب الاستبعاد: ${escapeHtml(item.exclude_reason || "—")}</p>`
@@ -216,7 +225,8 @@ async function loadDetail(id) {
         <span class="badge">الرصد: ${escapeHtml(item.name_en)}</span>
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
       </div>
-      ${snippet ? `<p class="lede">${escapeHtml(snippet)}</p>` : ""}
+      ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+      <p class="source-line">المصدر: ${escapeHtml(item.publisher_domain || sourceLabel(item.source))}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
         <p>${escapeHtml(originDisplay(item))}</p>
@@ -319,7 +329,7 @@ $("search-form").addEventListener("submit", async (e) => {
     state.status = "inbox";
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
     await refreshAll();
-    $("detail").innerHTML = `<p class="placeholder">انتهى البحث (آخر 7 أيام بعد فتح المصدر). جديد: <b class="num">${num(result.found)}</b> · موجود مسبقاً: <b class="num">${num(result.held)}</b> · خارج الأسبوع: <b class="num">${num(result.skippedStale)}</b> · لم يُتحقق: <b class="num">${num(result.skippedUnverified)}</b> · خارج المنصب: <b class="num">${num(result.skippedUnrelated)}</b></p>`;
+    $("detail").innerHTML = `<p class="placeholder">انتهى البحث (آخر 7 أيام بعد فتح المصدر). جديد: <b class="num">${num(result.found)}</b> · موجود مسبقاً: <b class="num">${num(result.held)}</b> · دُمج نفس الحدث: <b class="num">${num(result.review?.duplicates || 0)}</b> · خارج الأسبوع: <b class="num">${num(result.skippedStale)}</b> · لم يُتحقق: <b class="num">${num(result.skippedUnverified)}</b> · خارج المنصب: <b class="num">${num(result.skippedUnrelated)}</b></p>`;
   } catch (err) {
     $("detail").innerHTML = `<p class="error">تعذر البحث: ${escapeHtml(err.message)}</p>`;
   } finally {

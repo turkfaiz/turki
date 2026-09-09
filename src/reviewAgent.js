@@ -1,4 +1,4 @@
-import { canonicalOriginal, detectTopic } from "./brief.js";
+import { canonicalOriginal, detectTopic, eventMarkers } from "./brief.js";
 import { tokenOverlap } from "./dedup.js";
 import { isAboutMayor, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
@@ -24,12 +24,24 @@ export function clusterInboxItems(items) {
   const groups = [];
   for (const item of items) {
     const seed = clusterText(item);
-    const topic = detectTopic(`${item.title} ${item.snippet || ""}`);
+    const blob = `${item.title} ${item.snippet || ""}`;
+    const topic = detectTopic(blob);
+    const markers = eventMarkers(item.title, item.snippet || "");
     let group = groups.find((g) => {
       if (g.mayor_id !== item.mayor_id) return false;
       const overlap = tokenOverlap(g.seed, seed);
       if (overlap >= 0.55) return true;
-      if (topic && g.topic_id === topic.id && overlap >= 0.32) return true;
+      if (g.place && markers.place && g.place === markers.place && overlap >= 0.22) return true;
+      if (
+        topic &&
+        g.topic_id === topic.id &&
+        g.action &&
+        markers.action &&
+        g.action === markers.action &&
+        overlap >= 0.42
+      ) {
+        return true;
+      }
       return false;
     });
     if (!group) {
@@ -37,12 +49,16 @@ export function clusterInboxItems(items) {
         mayor_id: item.mayor_id,
         seed,
         topic_id: topic?.id || null,
+        action: markers.action || topic?.id || "",
+        place: markers.place || "",
         members: [],
       };
       groups.push(group);
     }
     group.members.push(item);
     if (!group.topic_id && topic) group.topic_id = topic.id;
+    if (!group.place && markers.place) group.place = markers.place;
+    if (!group.action && markers.action) group.action = markers.action;
   }
   return groups;
 }

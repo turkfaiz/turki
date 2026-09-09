@@ -249,13 +249,39 @@ h1 {
 .brief-head strong { display: block; font-size: 12px; letter-spacing: 0.14em; color: var(--wine); }
 .brief-body { padding: 16px 18px 20px; }
 .brief-body h2.headline { font-size: 26px; margin-bottom: 10px; color: #111; }
-.lede {
+.fact-line {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.facts {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.facts li {
+  position: relative;
+  margin: 0 0 9px;
+  padding-inline-start: 14px;
   font-family: "Noto Naskh Arabic", serif;
   font-size: 16px;
-  line-height: 1.9;
+  line-height: 1.85;
   color: #1b1b1b;
-  margin: 12px 0 0;
-  white-space: pre-line;
+}
+.facts li::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0.7em;
+  width: 6px;
+  height: 6px;
+  background: var(--wine);
+}
+.source-line {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 .origin-block {
   margin-top: 22px;

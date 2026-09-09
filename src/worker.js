@@ -176,6 +176,13 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
+async function finishDesk(env, scanOpts) {
+  const result = await runScan(env, scanOpts);
+  const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
+  const translated = await translatePending(env, 80);
+  return { ...result, review, translated };
+}
+
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 }
@@ -321,7 +328,7 @@ async function handleApi(request, env) {
 
   if (path === "/api/search" && method === "POST") {
     const body = await readBody(request);
-    const result = await runScan(env, {
+    const result = await finishDesk(env, {
       type: "manual",
       query: body.q || "",
       mayorId: body.mayor_id || null,
@@ -330,7 +337,7 @@ async function handleApi(request, env) {
   }
 
   if (path === "/api/scan/weekly" && method === "POST") {
-    const result = await runScan(env, { type: "weekly", query: "", mayorId: null });
+    const result = await finishDesk(env, { type: "weekly", query: "", mayorId: null });
     return json({ ok: true, ...result });
   }
 
@@ -355,7 +362,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         await ensureDb(env);
-        await runScan(env, { type: "weekly", query: "", mayorId: null });
+        await finishDesk(env, { type: "weekly", query: "", mayorId: null });
       })(),
     );
   },

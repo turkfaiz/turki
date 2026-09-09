@@ -10,7 +10,7 @@ export async function translatePending(env, limit = 24) {
             mayors.title_ar, mayors.city_ar, mayors.city_en
      FROM items
      JOIN mayors ON mayors.id = items.mayor_id
-     WHERE items.trans_engine IS NULL OR items.trans_engine NOT IN ('brief-v2', 'brief-llm')
+     WHERE items.trans_engine IS NULL OR items.trans_engine NOT IN ('brief-radar', 'brief-llm')
      ORDER BY COALESCE(items.published_at, items.created_at) DESC
      LIMIT ?`,
   )
@@ -18,7 +18,7 @@ export async function translatePending(env, limit = 24) {
     .all();
   const rows = results || [];
   for (const row of rows) {
-    const brief = writeOfficialBrief(row, row.title, row.snippet);
+    const brief = writeOfficialBrief(row, row.title, row.snippet || "");
     await env.DB.prepare(
       `UPDATE items SET title_ar = ?, snippet_ar = ?, trans_engine = ? WHERE id = ?`,
     )

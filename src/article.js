@@ -261,7 +261,7 @@ export async function verifyCandidate(row, mayor) {
     row: {
       ...row,
       title: article.title || row.title,
-      snippet: (article.description || article.body || "").slice(0, 800),
+      snippet: [article.description, article.body].filter(Boolean).join(" ").slice(0, 1600),
       page_body: article.body,
       url: article.url,
       publisher_url: article.url,

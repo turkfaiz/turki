@@ -256,7 +256,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             normalizeTitle(row.title).slice(0, 400),
             row.url.slice(0, 1000),
             toIso(row.published_at),
-            (row.snippet || "").slice(0, 800),
+            (row.snippet || "").slice(0, 1600),
             row.language || null,
             verdict.confidence,
             verdict.status,
