@@ -251,3 +251,22 @@ export function relevanceTokens(mayor) {
     .map((t) => t.trim().toLowerCase())
     .filter((t) => t.length >= 3);
 }
+
+export function identityTokens(mayor) {
+  const phrases = [mayor.name_en, mayor.name_native, mayor.name_ar].filter(Boolean);
+  const tokens = [];
+  for (const phrase of phrases) {
+    const lower = String(phrase).toLowerCase();
+    if (lower.length >= 4) tokens.push(lower);
+    for (const part of lower.split(/[\s,."()]+/)) {
+      if (part.length >= 4) tokens.push(part);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
+export function isAboutMayor(text, mayor) {
+  const hay = String(text || "").toLowerCase();
+  if (!hay || !mayor) return false;
+  return identityTokens(mayor).some((token) => hay.includes(token));
+}

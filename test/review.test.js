@@ -84,7 +84,7 @@ test("google-wrapped allowlisted outlet is recovered from the title suffix", () 
     {
       id: "sole",
       mayor_id: "turin",
-      title: "Turin, clashes at the Askatasuna social centre rally - Il Sole 24 ORE",
+      title: "Turin, clashes at the Askatasuna social centre rally, Lo Russo - Il Sole 24 ORE",
       snippet: "",
       url: "https://news.google.com/rss/articles/CBMiabc",
       source: "google_news",

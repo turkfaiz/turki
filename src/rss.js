@@ -1,3 +1,5 @@
+import { withWeekQuery } from "./time.js";
+
 export function decodeXml(value) {
   return String(value || "")
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -44,6 +46,11 @@ export function parseRssItems(xml) {
 }
 
 export function googleNewsRssUrl(query, hl, gl) {
+  const q = withWeekQuery(query);
   const ceid = `${gl}:${hl}`;
-  return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${encodeURIComponent(hl)}&gl=${encodeURIComponent(gl)}&ceid=${encodeURIComponent(ceid)}`;
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=${encodeURIComponent(hl)}&gl=${encodeURIComponent(gl)}&ceid=${encodeURIComponent(ceid)}`;
+}
+
+export function bingNewsRssUrl(query) {
+  return `https://www.bing.com/news/search?q=${encodeURIComponent(query)}&qft=interval%3d%227%22&format=rss`;
 }

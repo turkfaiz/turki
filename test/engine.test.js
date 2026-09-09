@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildSearchQueries, MAYORS } from "../src/mayors.js";
-import { parseRssItems } from "../src/rss.js";
+import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
+import { isAboutMayor } from "../src/mayors.js";
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
@@ -45,6 +46,17 @@ test("relevance requires mayor tokens", () => {
   const tokens = ["oh", "se-hoon", "seoul", "오세훈"];
   assert.equal(isRelevant("Seoul mayor Oh Se-hoon budget", tokens), true);
   assert.equal(isRelevant("random sports score", tokens), false);
+});
+
+test("office match requires the mayor identity, not just the city", () => {
+  const seoul = MAYORS.find((m) => m.id === "seoul");
+  assert.equal(isAboutMayor("Oh Se-hoon announces housing plan", seoul), true);
+  assert.equal(isAboutMayor("Seoul mayor unveils a generic city budget", seoul), false);
+});
+
+test("google news search is limited to the last seven days", () => {
+  const url = googleNewsRssUrl('"Oh Se-hoon" Seoul', "ko", "KR");
+  assert.match(url, /when%3A7d/);
 });
 
 test("overlap detects near-duplicate titles", () => {

@@ -4,4 +4,5 @@ export const REASON = {
   UNRELATED: "غير متعلق بالعمدة المختار",
   DUPLICATE: "تكرار لنفس الحدث",
   REVIEW: "استبعاد آلي — مراجعة",
+  STALE: "خارج نافذة الأسبوع",
 };

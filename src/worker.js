@@ -72,6 +72,10 @@ const SCHEMA_STATEMENTS = [
     mayor_id TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_publishers_domain ON publishers(domain)`,
+  `CREATE TABLE IF NOT EXISTS meta (
+    k TEXT PRIMARY KEY,
+    v TEXT
+  )`,
 ];
 
 let ready = false;
@@ -140,7 +144,7 @@ async function migrateItems(env) {
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
-       AND IFNULL(exclude_reason, '') NOT IN (?, ?, ?, ?, ?)`,
+       AND IFNULL(exclude_reason, '') NOT IN (?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       REASON.MANUAL,
@@ -149,8 +153,19 @@ async function migrateItems(env) {
       REASON.UNRELATED,
       REASON.DUPLICATE,
       REASON.REVIEW,
+      REASON.STALE,
     )
     .run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`,
+  ).run();
+  const epoch = "week-verify-v1";
+  const current = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'data_epoch'`).first();
+  if (current?.v !== epoch) {
+    await env.DB.prepare(`DELETE FROM items`).run();
+    await env.DB.prepare(`DELETE FROM scans`).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('data_epoch', ?)`).bind(epoch).run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -195,9 +210,17 @@ async function stats(env) {
     `SELECT * FROM scans WHERE type = 'manual' ORDER BY started_at DESC LIMIT 1`,
   ).first();
   const weekDup = await env.DB.prepare(
-    `SELECT COALESCE(SUM(duplicate_count), 0) AS duplicates,
-            COALESCE(SUM(found_count), 0) AS found
-     FROM scans WHERE started_at >= datetime('now', '-7 days')`,
+    `SELECT COUNT(*) AS duplicates
+     FROM items
+     WHERE exclude_reason = ?
+       AND COALESCE(published_at, created_at) >= datetime('now', '-7 days')`,
+  )
+    .bind(REASON.DUPLICATE)
+    .first();
+  const weekFound = await env.DB.prepare(
+    `SELECT COUNT(*) AS found
+     FROM items
+     WHERE COALESCE(published_at, created_at) >= datetime('now', '-7 days')`,
   ).first();
   return {
     inbox: row?.inbox || 0,
@@ -207,7 +230,7 @@ async function stats(env) {
     byMayor: byMayor.results || [],
     lastWeekly,
     lastManual,
-    week: weekDup,
+    week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
     sources: sourceStatus(env),
   };
 }

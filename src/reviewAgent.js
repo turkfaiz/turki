@@ -1,6 +1,6 @@
 import { canonicalOriginal, detectTopic } from "./brief.js";
-import { isRelevant, tokenOverlap } from "./dedup.js";
-import { mayorById, relevanceTokens } from "./mayors.js";
+import { tokenOverlap } from "./dedup.js";
+import { isAboutMayor, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
 
@@ -102,8 +102,7 @@ export function planInboxReview(items) {
       continue;
     }
     const mayor = mayorById(raw.mayor_id);
-    const tokens = mayor ? relevanceTokens(mayor) : [];
-    if (mayor && !isRelevant(`${raw.title} ${raw.snippet || ""}`, tokens)) {
+    if (mayor && !isAboutMayor(`${raw.title} ${raw.snippet || ""}`, mayor)) {
       exclude.push({ id: raw.id, reason: REASON.UNRELATED });
       continue;
     }

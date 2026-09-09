@@ -1,7 +1,6 @@
-import { MAYORS } from "./mayors.js";
+import { MAYORS, isAboutMayor } from "./mayors.js";
 import { isAggregatorHost, publisherDomain, resolvePublisherDomain } from "./domain.js";
-import { isRelevant, pickConfidence } from "./dedup.js";
-import { relevanceTokens } from "./mayors.js";
+import { pickConfidence } from "./dedup.js";
 import { REASON } from "./reasons.js";
 import { splitHeadline } from "./text.js";
 
@@ -203,8 +202,7 @@ export function inferPublisher(row, mayor) {
 export function classifyItem(row, mayor) {
   const domain = resolvePublisherDomain(row);
   const pub = inferPublisher(row, mayor);
-  const tokens = relevanceTokens(mayor);
-  const relevant = isRelevant(`${row.title || ""} ${row.snippet || ""}`, tokens);
+  const relevant = isAboutMayor(`${row.title || ""} ${row.snippet || ""} ${row.page_body || ""}`, mayor);
 
   if (!pub) {
     return {

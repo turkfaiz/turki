@@ -52,7 +52,7 @@ test("google wrapper with allowlisted outlet suffix is trusted", () => {
   const turin = MAYORS.find((m) => m.id === "turin");
   const verdict = classifyItem(
     {
-      title: "Turin, clashes at the Askatasuna social centre rally - Il Sole 24 ORE",
+      title: "Turin, clashes at the Askatasuna social centre rally, Lo Russo - Il Sole 24 ORE",
       url: "https://news.google.com/rss/articles/CBMiabc",
       source: "google_news",
     },
