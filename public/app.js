@@ -320,6 +320,7 @@ function addScanTotals(total, result) {
     total[key] += Number(result[key]) || 0;
   }
   total.review.duplicates += Number(result.review?.duplicates) || 0;
+  total.sourceErrors += Array.isArray(result.errors) ? result.errors.length : 0;
 }
 
 async function runDeskSearch(query, mayorId) {
@@ -341,6 +342,7 @@ async function runDeskSearch(query, mayorId) {
     opened: 0,
     review: { duplicates: 0 },
     failedOffices: [],
+    sourceErrors: 0,
   };
   for (let i = 0; i < state.mayors.length; i += 1) {
     const mayor = state.mayors[i];
@@ -380,8 +382,10 @@ $("search-form").addEventListener("submit", async (e) => {
     const failed = result.failedOffices?.length
       ? ` · تعذر ${num(result.failedOffices.length)} مكتب`
       : "";
+    const sourceErrors = Number(result.sourceErrors) || (Array.isArray(result.errors) ? result.errors.length : 0);
+    const sourceWarning = sourceErrors ? ` · أخطاء مصادر ${num(sourceErrors)}` : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · فتح ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${failed}.`,
+      `اكتشف ${num(result.discovered)} · فتح ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);

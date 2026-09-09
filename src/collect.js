@@ -41,19 +41,11 @@ async function collectRss(url, sourceTag, language) {
 }
 
 async function collectGoogleNews(query, hl, gl) {
-  try {
-    return await collectRss(googleNewsRssUrl(query, hl, gl), "google_news", hl);
-  } catch {
-    return [];
-  }
+  return collectRss(googleNewsRssUrl(query, hl, gl), "google_news", hl);
 }
 
 async function collectBingNews(query, language) {
-  try {
-    return await collectRss(bingNewsRssUrl(query), "bing_news", language);
-  } catch {
-    return [];
-  }
+  return collectRss(bingNewsRssUrl(query), "bing_news", language);
 }
 
 export function parseSitemap(xml) {
@@ -177,11 +169,15 @@ async function collectGdelt(mayor) {
       : `("${mayor.name_en}" OR "${mayor.name_native}")`;
   const q = encodeURIComponent(names);
   const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${q}&mode=artlist&maxrecords=50&timespan=7d&format=json&sort=datedesc`;
-  try {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const res = await fetch(url, {
       headers: { "User-Agent": FETCH_HEADERS["User-Agent"], Accept: "application/json" },
     });
-    if (!res.ok) return [];
+    if (res.status === 429 && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5500));
+      continue;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return (data.articles || []).map((art) => ({
       title: art.title || "",
@@ -193,9 +189,8 @@ async function collectGdelt(mayor) {
       publisher_name: "",
       publisher_url: art.url || "",
     }));
-  } catch {
-    return [];
   }
+  return [];
 }
 
 export function sourceStatus(env) {
