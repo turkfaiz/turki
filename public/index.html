@@ -49,7 +49,7 @@
         </select>
         <button type="submit" class="btn-search" id="search-btn">بحث</button>
       </form>
-      <p class="rule-note">البحث اليدوي لا يعمل إلا بعد ضغط الزر. النشرة المجدولة تصدر الأحد 06:00.</p>
+      <p class="rule-note">البحث اليدوي لا يعمل إلا بعد ضغط الزر. المراجعة الكاملة تصفّي الوارد دفعة واحدة دون المواقع غير المعتمدة. الاستبعاد اليدوي سببه دائمًا: استبعاد يدوي. النشرة المجدولة تصدر الأحد 06:00.</p>
 
       <section class="kpis">
         <article><span>الوارد</span><b class="num" id="stat-inbox">0</b></article>
@@ -65,7 +65,10 @@
             <button type="button" class="tab" data-status="approved">المعتمد</button>
             <button type="button" class="tab" data-status="excluded">المستبعد</button>
           </nav>
-          <p class="index-meta">آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></p>
+          <p class="index-meta">
+            آخر رصد أسبوعي <b class="num" id="last-weekly">—</b>
+            <button type="button" class="btn-review" id="review-btn">مراجعة كاملة</button>
+          </p>
           <div id="list" class="list">جاري التحميل…</div>
         </div>
         <aside class="brief" id="detail">

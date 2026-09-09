@@ -2,9 +2,10 @@ import { MAYORS } from "./mayors.js";
 import { isAggregatorHost, resolvePublisherDomain } from "./domain.js";
 import { isRelevant, pickConfidence } from "./dedup.js";
 import { relevanceTokens } from "./mayors.js";
+import { REASON } from "./reasons.js";
 
-export const UNTRUSTED_REASON = "مصدر غير معتمد";
-export const UNRELATED_REASON = "غير متعلق بالعمدة المختار";
+export const UNTRUSTED_REASON = REASON.UNTRUSTED;
+export const UNRELATED_REASON = REASON.UNRELATED;
 
 const GLOBAL = [
   ["reuters.com", "Reuters"],

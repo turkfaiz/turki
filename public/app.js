@@ -47,7 +47,22 @@ function displayTitle(it) {
 }
 
 function needsRetranslate(it) {
-  return !it.trans_engine;
+  return it.trans_engine !== "brief" && it.trans_engine !== "brief-llm";
+}
+
+function originDisplay(item) {
+  const title = decodeEntities(item.title || "");
+  const snippet = decodeEntities(item.snippet || "");
+  if (!snippet || snippet === title) return title;
+  if (title.includes(snippet) || snippet.includes(title)) {
+    return title.length >= snippet.length ? title : snippet;
+  }
+  const a = title.toLowerCase();
+  const b = snippet.toLowerCase();
+  if (a.startsWith(b.slice(0, Math.min(40, b.length))) || b.startsWith(a.slice(0, Math.min(40, a.length)))) {
+    return title;
+  }
+  return title;
 }
 
 function decodeEntities(value) {
@@ -105,27 +120,40 @@ async function loadStats() {
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
 }
 
+function itemsQuery() {
+  const qs = new URLSearchParams({ status: state.status });
+  const mayorId = $("mayor_id")?.value;
+  if (mayorId) qs.set("mayor_id", mayorId);
+  return `/api/items?${qs.toString()}`;
+}
+
 async function loadItems() {
   $("list").innerHTML = `<div class="empty">جاري التحميل…</div>`;
-  const { items } = await api(`/api/items?status=${encodeURIComponent(state.status)}`);
+  const { items } = await api(itemsQuery());
   state.items = items;
   renderItems(items);
   if (items.some(needsRetranslate) && !state.translating) {
     state.translating = true;
-    api("/api/translate", { method: "POST", body: "{}" })
-      .then(async () => {
-        const again = await api(`/api/items?status=${encodeURIComponent(state.status)}`);
-        state.items = again.items;
-        renderItems(again.items);
-        if (state.selectedId) loadDetail(state.selectedId);
-        if ((again.items || []).some((it) => !it.trans_engine)) {
-          state.translating = false;
-          return loadItems();
+    (async () => {
+      try {
+        for (let i = 0; i < 8; i++) {
+          const r = await api("/api/translate", { method: "POST", body: "{}" });
+          const again = await api(itemsQuery());
+          state.items = again.items;
+          renderItems(again.items);
+          if (state.selectedId) {
+            try {
+              await loadDetail(state.selectedId);
+            } catch {
+              /* item may have moved during review */
+            }
+          }
+          if (!r.translated || !(again.items || []).some(needsRetranslate)) break;
         }
-      })
-      .finally(() => {
+      } finally {
         state.translating = false;
-      });
+      }
+    })();
   }
 }
 
@@ -179,15 +207,13 @@ async function loadDetail(id) {
       ${snippet ? `<p class="lede">${escapeHtml(snippet)}</p>` : ""}
       <div class="origin-block">
         <div class="label">الأصل</div>
-        <p>${escapeHtml(item.title)}</p>
-        ${item.snippet ? `<p style="margin-top:8px">${escapeHtml(item.snippet)}</p>` : ""}
+        <p>${escapeHtml(originDisplay(item))}</p>
       </div>
       <p><a href="${item.url}" target="_blank" rel="noopener">فتح المصدر</a></p>
       ${excludeBox}
-      ${item.status !== "excluded" ? `<label>سبب الاستبعاد<input id="exclude-reason" value="استبعاد يدوي من الموظف" /></label>` : ""}
       <div class="actions">
         ${item.status !== "approved" ? `<button type="button" class="btn-good" data-act="approved">اعتماد</button>` : ""}
-        ${item.status !== "excluded" ? `<button type="button" class="btn-bad" data-act="excluded">استبعاد</button>` : ""}
+        ${item.status !== "excluded" ? `<button type="button" class="btn-bad" data-act="excluded">استبعاد يدوي</button>` : ""}
         ${item.status === "excluded" ? `<button type="button" data-act="inbox">استرجاع للوارد</button>` : ""}
       </div>
     </div>
@@ -227,13 +253,40 @@ $("detail").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn || !state.selectedId) return;
   const status = btn.dataset.act;
-  const reasonInput = document.getElementById("exclude-reason");
-  const reason = status === "excluded" ? (reasonInput?.value.trim() || "استبعاد يدوي من الموظف") : null;
   await api(`/api/items/${state.selectedId}/status`, {
     method: "POST",
-    body: JSON.stringify({ status, reason }),
+    body: JSON.stringify({ status }),
   });
   await refreshAll();
+});
+
+$("mayor_id").addEventListener("change", () => {
+  loadItems();
+});
+
+$("review-btn").addEventListener("click", async () => {
+  if (state.busy) return;
+  state.busy = true;
+  const btn = $("review-btn");
+  btn.disabled = true;
+  btn.textContent = "جارٍ المراجعة…";
+  try {
+    const mayorId = $("mayor_id").value || null;
+    const result = await api("/api/review", {
+      method: "POST",
+      body: JSON.stringify({ mayor_id: mayorId }),
+    });
+    state.status = "inbox";
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
+    await refreshAll();
+    $("detail").innerHTML = `<p class="placeholder">المراجعة الكاملة: مجموعات <b class="num">${num(result.groups)}</b> · أُبقي <b class="num">${num(result.kept)}</b> · استُبعد <b class="num">${num(result.excluded)}</b> (غير معتمد ${num(result.untrusted)} · غير متعلق ${num(result.unrelated)} · تكرار ${num(result.duplicates)}). يمكن الاستعادة من المستبعد.</p>`;
+  } catch (err) {
+    $("detail").innerHTML = `<p class="error">تعذر المراجعة: ${escapeHtml(err.message)}</p>`;
+  } finally {
+    state.busy = false;
+    btn.disabled = false;
+    btn.textContent = "مراجعة كاملة";
+  }
 });
 
 $("search-form").addEventListener("submit", async (e) => {

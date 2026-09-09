@@ -2,6 +2,8 @@ import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import { translatePending } from "./translate.js";
 import { PUBLISHERS } from "./publishers.js";
+import { reviewInbox } from "./reviewAgent.js";
+import { REASON } from "./reasons.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -135,6 +137,20 @@ async function migrateItems(env) {
   if (!names.has("publisher_tier")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN publisher_tier INTEGER`).run();
   }
+  await env.DB.prepare(
+    `UPDATE items SET exclude_reason = ?
+     WHERE status = 'excluded'
+       AND IFNULL(exclude_reason, '') NOT IN (?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      REASON.MANUAL,
+      REASON.MANUAL,
+      REASON.UNTRUSTED,
+      REASON.UNRELATED,
+      REASON.DUPLICATE,
+      REASON.REVIEW,
+    )
+    .run();
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -261,15 +277,22 @@ async function handleApi(request, env) {
     if (!["inbox", "approved", "excluded"].includes(status)) {
       return json({ error: "bad_status" }, 400);
     }
-    const reason = status === "excluded" ? body.reason || "استبعاد يدوي من الموظف" : null;
+    const reason = status === "excluded" ? REASON.MANUAL : null;
     await env.DB.prepare(`UPDATE items SET status = ?, exclude_reason = ? WHERE id = ?`)
       .bind(status, reason, statusMatch[1])
       .run();
     return json({ ok: true });
   }
 
+  if (path === "/api/review" && method === "POST") {
+    const body = await readBody(request);
+    const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 200 });
+    const translated = await translatePending(env, 80);
+    return json({ ok: true, translated, ...result });
+  }
+
   if (path === "/api/translate" && method === "POST") {
-    const n = await translatePending(env, 10);
+    const n = await translatePending(env, 40);
     return json({ ok: true, translated: n });
   }
 

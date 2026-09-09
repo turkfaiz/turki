@@ -174,7 +174,21 @@ h1 {
   font-size: 12px;
   color: var(--muted);
   border-bottom: 1px solid var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
+.btn-review {
+  font: inherit;
+  border: 1px solid var(--navy);
+  background: var(--navy);
+  color: #f6f1e6;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-review:disabled { opacity: 0.6; cursor: wait; }
 .list { max-height: 640px; overflow: auto; }
 
 .result {
@@ -259,7 +273,7 @@ h1 {
   font-size: 13px;
 }
 .actions { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
-.actions button, .brief label input {
+.actions button {
   font: inherit;
   padding: 9px 12px;
   border: 1px solid var(--navy);
@@ -267,8 +281,6 @@ h1 {
   color: var(--ink);
   cursor: pointer;
 }
-.brief label { display: block; margin-top: 14px; color: var(--muted); font-size: 12px; }
-.brief label input { width: 100%; margin-top: 6px; cursor: text; }
 .btn-good { background: var(--good); color: #fff; border-color: var(--good); }
 .btn-bad { background: var(--bad); color: #fff; border-color: var(--bad); }
 .brief a { color: var(--wine); }
