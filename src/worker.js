@@ -1,5 +1,6 @@
 import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
+import { translatePending } from "./translate.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -43,6 +44,8 @@ const SCHEMA_STATEMENTS = [
     url TEXT NOT NULL,
     published_at TEXT,
     snippet TEXT,
+    title_ar TEXT,
+    snippet_ar TEXT,
     language TEXT,
     confidence TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'inbox',
@@ -89,8 +92,27 @@ async function ensureDb(env) {
     ),
   );
   await env.DB.batch(batch);
+  await migrateItems(env);
   ready = true;
 }
+
+async function migrateItems(env) {
+  const info = await env.DB.prepare(`PRAGMA table_info(items)`).all();
+  const names = new Set((info.results || []).map((col) => col.name));
+  if (!names.has("title_ar")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN title_ar TEXT`).run();
+  }
+  if (!names.has("snippet_ar")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN snippet_ar TEXT`).run();
+  }
+}
+
+const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
+  items.title_ar AS news_title_ar, items.snippet, items.snippet_ar AS news_snippet_ar,
+  items.title_normalized, items.url, items.published_at, items.language, items.confidence,
+  items.status, items.exclude_reason, items.fingerprint, items.created_at,
+  mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
+  mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
@@ -180,7 +202,7 @@ async function handleApi(request, env) {
       clauses.push("(title LIKE ? OR snippet LIKE ?)");
       binds.push(`%${q}%`, `%${q}%`);
     }
-    const sql = `SELECT items.*, mayors.name_ar, mayors.name_en, mayors.city_ar, mayors.country_ar, mayors.title_ar
+    const sql = `SELECT ${ITEM_FIELDS}
                  FROM items JOIN mayors ON mayors.id = items.mayor_id
                  WHERE ${clauses.join(" AND ")}
                  ORDER BY COALESCE(items.published_at, items.created_at) DESC
@@ -192,8 +214,7 @@ async function handleApi(request, env) {
   const itemMatch = path.match(/^\/api\/items\/([0-9a-f-]+)$/i);
   if (itemMatch && method === "GET") {
     const row = await env.DB.prepare(
-      `SELECT items.*, mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
-              mayors.title_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar
+      `SELECT ${ITEM_FIELDS}
        FROM items JOIN mayors ON mayors.id = items.mayor_id WHERE items.id = ?`,
     )
       .bind(itemMatch[1])
@@ -214,6 +235,11 @@ async function handleApi(request, env) {
       .bind(status, reason, statusMatch[1])
       .run();
     return json({ ok: true });
+  }
+
+  if (path === "/api/translate" && method === "POST") {
+    const n = await translatePending(env, 40);
+    return json({ ok: true, translated: n });
   }
 
   if (path === "/api/search" && method === "POST") {

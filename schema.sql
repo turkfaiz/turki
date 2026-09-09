@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS items (
   url TEXT NOT NULL,
   published_at TEXT,
   snippet TEXT,
+  title_ar TEXT,
+  snippet_ar TEXT,
   language TEXT,
   confidence TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'inbox',
