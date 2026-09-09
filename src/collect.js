@@ -330,7 +330,6 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
         if (preview.exclude_reason && preview.publisher_tier == null && row.source !== "official") {
           return { skip: "untrusted", row };
         }
-        opened += 1;
         return await verifyCandidate(row, mayor);
       } catch (err) {
         allErrors.push(`${mayor.id}: ${String(err.message || err)}`);
@@ -339,6 +338,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     });
 
     for (const result of verified) {
+      if (result?.pageRead) opened += 1;
       if (result?.skip === "untrusted") {
         skippedUntrusted += 1;
         continue;

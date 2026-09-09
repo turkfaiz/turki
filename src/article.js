@@ -246,24 +246,25 @@ export function articleIsAboutMayor(article, mayor) {
 export async function verifyCandidate(row, mayor) {
   const rssDate = parseDate(row.published_at);
   if (rssDate && isWithinWeek(rssDate) === false) {
-    return { ok: false, reason: "stale" };
+    return { ok: false, reason: "stale", pageRead: false };
   }
   const article = await readArticle(row.publisher_article_url || row.url);
   if (!article?.url || isAggregatorHost(article.domain)) {
-    return { ok: false, reason: "unverified" };
+    return { ok: false, reason: "unverified", pageRead: false };
   }
   const pageDate = parseDate(article.published_at) || rssDate;
   if (pageDate && isWithinWeek(pageDate) === false) {
-    return { ok: false, reason: "stale" };
+    return { ok: false, reason: "stale", pageRead: true };
   }
   if (!pageDate && !rssDate) {
-    return { ok: false, reason: "stale" };
+    return { ok: false, reason: "stale", pageRead: true };
   }
   if (!articleIsAboutMayor(article, mayor)) {
-    return { ok: false, reason: "unrelated" };
+    return { ok: false, reason: "unrelated", pageRead: true };
   }
   return {
     ok: true,
+    pageRead: true,
     row: {
       ...row,
       title: article.title || row.title,
