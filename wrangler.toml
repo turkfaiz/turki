@@ -1,6 +1,10 @@
 name = "mayor-watch"
 main = "src/worker.js"
 compatibility_date = "2026-01-15"
+account_id = "3b610858141e23b8b21c10aaf2387b67"
+
+[vars]
+GEMINI_MODEL = "gemini-3.8-flash"
 
 [assets]
 directory = "./public"
@@ -24,4 +28,4 @@ max_retries = 3
 [[d1_databases]]
 binding = "DB"
 database_name = "mayor-watch"
-database_id = "local-mayor-watch"
+database_id = "c14c54d4-1f5e-4353-8de0-65da24d7127d"
