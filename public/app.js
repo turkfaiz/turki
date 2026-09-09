@@ -50,8 +50,20 @@ function needsRetranslate(it) {
   return !it.trans_engine;
 }
 
-function escapeHtml(value) {
+function decodeEntities(value) {
   return String(value ?? "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtml(value) {
+  return decodeEntities(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
