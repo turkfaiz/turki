@@ -177,6 +177,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 /** مسار المكتب الوحيد: جمع → تحقق → نشرة عند الإدخال → دمج الحدث. */
+async function finishDesk(env, scanOpts) {
   const result = await runScan(env, scanOpts);
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
   const leftover = await translatePending(env, 40);
