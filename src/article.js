@@ -17,6 +17,19 @@ export function isGoogleNewsUrl(url) {
   }
 }
 
+export function isListingPageUrl(url) {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (path === "/" || !path) return true;
+    return (
+      /(?:^|\/)(?:index|list|search)\.(?:do|jsp|php|html?)$/.test(path) ||
+      /\/(?:news|notizie|actualidad|소식)\/?$/.test(path)
+    );
+  } catch {
+    return true;
+  }
+}
+
 function attr(html, names) {
   for (const name of names) {
     const a = html.match(
@@ -258,6 +271,9 @@ export async function verifyCandidate(row, mayor) {
   const article = await readArticle(row.publisher_article_url || row.url);
   if (!article?.url || isAggregatorHost(article.domain)) {
     return { ok: false, reason: "unverified", pageRead: false };
+  }
+  if (isListingPageUrl(article.url)) {
+    return { ok: false, reason: "unrelated", pageRead: true };
   }
   const articleDate = parseDate(article.published_at);
   const pageDate = articleDate || (row.date_is_discovery ? null : rssDate);

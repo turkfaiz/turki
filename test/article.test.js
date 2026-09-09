@@ -4,6 +4,7 @@ import {
   articleIsAboutMayor,
   extractArticle,
   extractJinaMarkdown,
+  isListingPageUrl,
   usableArticle,
 } from "../src/article.js";
 import { isWithinWeek, parseDate, withWeekQuery } from "../src/time.js";
@@ -110,5 +111,14 @@ test("a redirected home page is not accepted from the RSS headline alone", () =>
       turin,
     ),
     true,
+  );
+});
+
+test("home and listing urls are not event article pages", () => {
+  assert.equal(isListingPageUrl("https://www.seoul.go.kr/"), true);
+  assert.equal(isListingPageUrl("https://www.seoul.go.kr/realmnews/in/list.do"), true);
+  assert.equal(
+    isListingPageUrl("https://mayor.seoul.go.kr/oh/seoul/newsView.do?photoGallerySn=4636"),
+    false,
   );
 });

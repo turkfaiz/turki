@@ -4,6 +4,7 @@ import { isAboutMayor, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
 import { aiBriefEnabled, clusterWithGemini } from "./aiBrief.js";
+import { isListingPageUrl } from "./article.js";
 
 const MAX_SOURCE_TEXT = 80000;
 const MAX_MERGED_TEXT = 240000;
@@ -134,6 +135,10 @@ export function planInboxReview(items, groupsOverride = null) {
   const stamps = [];
 
   for (const raw of items) {
+    if (raw.url && isListingPageUrl(raw.url)) {
+      exclude.push({ id: raw.id, reason: REASON.UNRELATED });
+      continue;
+    }
     const judged = trustItem(raw);
     if (judged.stamp) stamps.push(judged.stamp);
     if (judged.status === "excluded" || judged.item.publisher_tier == null || Number(judged.item.publisher_tier) > 1) {
@@ -254,7 +259,7 @@ async function applyMerges(env, merges) {
     `UPDATE items
      SET article_text = ?, merged_sources = ?, source_count = ?,
          confidence = CASE WHEN source = 'official' THEN confidence ELSE ? END,
-         trans_engine = CASE WHEN source_count <> ? THEN 'brief-radar' ELSE trans_engine END,
+         trans_engine = CASE WHEN source_count <> ? THEN 'brief-pending' ELSE trans_engine END,
          brief_evidence = CASE WHEN source_count <> ? THEN NULL ELSE brief_evidence END,
          brief_error = NULL
      WHERE id = ?`,

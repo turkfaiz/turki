@@ -369,7 +369,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
            SET source = ?, title = ?, title_normalized = ?, url = ?, published_at = ?,
                snippet = ?, language = ?, confidence = ?, publisher_domain = ?,
                publisher_tier = ?, article_text = ?,
-               trans_engine = CASE WHEN status = 'inbox' THEN 'brief-radar' ELSE trans_engine END,
+               trans_engine = CASE WHEN status = 'inbox' THEN 'brief-pending' ELSE trans_engine END,
                brief_evidence = CASE WHEN status = 'inbox' THEN NULL ELSE brief_evidence END,
                brief_error = CASE WHEN status = 'inbox' THEN NULL ELSE brief_error END
            WHERE id = ?`,
