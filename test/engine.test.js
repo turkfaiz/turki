@@ -5,7 +5,7 @@ import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
 import { isAboutMayor } from "../src/mayors.js";
-import { stampBrief } from "../src/collect.js";
+import { parseSitemap, stampBrief } from "../src/collect.js";
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
@@ -91,4 +91,21 @@ test("inbox rows are briefed at insert so the desk never rewrites them later", (
   assert.match(stamped.title_ar, /فيا روما|افتتاح|يفتتح/);
   const skipped = stampBrief(turin, { title: "x", snippet: "" }, "excluded");
   assert.equal(skipped.trans_engine, null);
+});
+
+test("official sitemap discovery reads page urls and update dates", () => {
+  const parsed = parseSitemap(`<?xml version="1.0"?>
+    <urlset>
+      <url>
+        <loc>https://city.example/news/mayor-update</loc>
+        <lastmod>2026-09-09T10:00:00Z</lastmod>
+      </url>
+    </urlset>`);
+  assert.equal(parsed.index, false);
+  assert.deepEqual(parsed.rows, [
+    {
+      loc: "https://city.example/news/mayor-update",
+      lastmod: "2026-09-09T10:00:00Z",
+    },
+  ]);
 });

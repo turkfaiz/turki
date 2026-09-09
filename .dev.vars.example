@@ -5,5 +5,7 @@ INOREADER_APP_ID=
 INOREADER_APP_KEY=
 INOREADER_ACCESS_TOKEN=
 
-# اختياري — إن وُجد يُفضَّل على Yandex للترجمة الرسمية
-DEEPL_API_KEY=
+# يلزم لتفعيل قراءة الصفحة وتلخيصها بالذكاء الاصطناعي.
+# أنشئه من Google AI Studio، ثم ضعه في .dev.vars فقط.
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.8-flash

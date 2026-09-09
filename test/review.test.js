@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { planInboxReview, clusterInboxItems } from "../src/reviewAgent.js";
+import { planInboxReview, clusterInboxItems, mergeRecord } from "../src/reviewAgent.js";
 import { REASON } from "../src/reasons.js";
 
 test("review agent drops leftover untrusted hosts before clustering", () => {
@@ -115,4 +115,39 @@ test("cluster groups near-duplicate headlines for the same mayor", () => {
   const seoul = groups.filter((g) => g.mayor_id === "seoul");
   assert.equal(seoul.length, 1);
   assert.equal(seoul[0].members.length, 2);
+});
+
+test("same event from multiple platforms combines source pages before AI", () => {
+  const plan = planInboxReview([
+    {
+      id: "official",
+      mayor_id: "turin",
+      title: "Lo Russo inaugura la nuova Via Roma pedonale",
+      snippet: "Stefano Lo Russo apre Via Roma sabato",
+      article_text: "Testo completo della pagina ufficiale sulla inaugurazione.",
+      source: "official",
+      url: "https://www.comune.torino.it/via-roma",
+      publisher_domain: "comune.torino.it",
+      publisher_tier: 0,
+    },
+    {
+      id: "paper",
+      mayor_id: "turin",
+      title: "Nuova Via Roma pedonale, inaugurazione con Lo Russo",
+      snippet: "Stefano Lo Russo inaugura Via Roma sabato",
+      article_text: "Testo completo del giornale con dettagli diversi.",
+      source: "google_news",
+      url: "https://www.lastampa.it/via-roma",
+      publisher_domain: "lastampa.it",
+      publisher_tier: 1,
+    },
+  ]);
+  assert.equal(plan.merges.length, 1);
+  const merged = mergeRecord(plan.merges[0]);
+  assert.equal(merged.id, "official");
+  assert.equal(merged.sourceCount, 2);
+  assert.match(merged.articleText, /pagina ufficiale/);
+  assert.match(merged.articleText, /giornale/);
+  assert.match(merged.mergedSources, /comune\.torino\.it/);
+  assert.match(merged.mergedSources, /lastampa\.it/);
 });

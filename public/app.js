@@ -28,7 +28,13 @@ function fmtDate(value) {
 }
 
 function sourceLabel(source) {
-  return { google_news: "Google News", official: "Official", inoreader: "Inoreader", gdelt: "GDELT" }[source] || source;
+  return {
+    google_news: "Google News",
+    bing_news: "Bing News",
+    official: "Official",
+    inoreader: "Inoreader",
+    gdelt: "GDELT",
+  }[source] || source;
 }
 
 function confidenceLabel(c) {
@@ -51,6 +57,16 @@ function factItems(snippet) {
     .flatMap((line) => line.split(/\s*[•📌·]\s*/))
     .map((s) => s.replace(/^[•📌·]\s*/, "").trim())
     .filter((s) => s.length >= 4);
+}
+
+function mergedSources(item) {
+  try {
+    const rows = JSON.parse(item.merged_sources || "[]");
+    if (Array.isArray(rows) && rows.length) return rows;
+  } catch {
+    /* use the primary source below */
+  }
+  return [{ domain: item.publisher_domain, url: item.url, title: item.title }];
 }
 
 function originKey(value) {
@@ -150,6 +166,8 @@ async function loadStats() {
   applyPlatform(s.sources.inoreader === "ready" || s.sources.inoreader?.on, "led-inoreader", "src-inoreader");
   applyPlatform(s.sources.google_news === "ready" || s.sources.google_news?.on !== false, "led-google", "src-google");
   applyPlatform(s.sources.official === "ready" || s.sources.official?.on !== false, "led-official", "src-official");
+  applyPlatform(s.sources.ai_brief === "ready", "led-ai", "src-ai");
+  $("src-ai").textContent = s.sources.ai_brief === "ready" ? "يقرأ الصفحة" : "غير مربوط";
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
 }
 
@@ -182,6 +200,8 @@ function renderItems(items) {
           <span class="badge">${sourceLabel(it.source)}</span>
           ${it.publisher_tier === 0 || it.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
           ${it.publisher_domain ? `<span class="badge">${escapeHtml(it.publisher_domain)}</span>` : ""}
+          ${Number(it.source_count) > 1 ? `<span class="badge">${num(it.source_count)} مصادر مدمجة</span>` : ""}
+          ${String(it.trans_engine || "").startsWith("brief-ai-") ? `<span class="badge official">ملخص AI</span>` : ""}
           ${it.exclude_reason ? `<span class="badge">${escapeHtml(it.exclude_reason)}</span>` : ""}
           <span class="badge">${confidenceLabel(it.confidence)}</span>
           <span class="num">${fmtDate(it.published_at || it.created_at)}</span>
@@ -195,6 +215,7 @@ async function loadDetail(id) {
   const { item } = await api(`/api/items/${id}`);
   const ar = item.news_title_ar || item.title || "—";
   const facts = factItems(item.news_snippet_ar);
+  const sources = mergedSources(item);
   const excludeBox =
     item.status === "excluded"
       ? `<p class="meta">سبب الاستبعاد: ${escapeHtml(item.exclude_reason || "—")}</p>`
@@ -211,12 +232,14 @@ async function loadDetail(id) {
         <span class="badge">${sourceLabel(item.source)}</span>
         ${item.publisher_tier === 0 || item.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
         ${item.publisher_domain ? `<span class="badge">${escapeHtml(item.publisher_domain)}</span>` : ""}
+        ${sources.length > 1 ? `<span class="badge">${num(sources.length)} مصادر مدمجة</span>` : ""}
+        ${String(item.trans_engine || "").startsWith("brief-ai-") ? `<span class="badge official">AI قرأ نص الصفحة</span>` : `<span class="badge">ملخص احتياطي</span>`}
         <span class="badge">${confidenceLabel(item.confidence)}</span>
         <span class="badge">الرصد: ${escapeHtml(item.name_en)}</span>
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
-      <p class="source-line">المصدر: ${escapeHtml(item.publisher_domain || sourceLabel(item.source))}</p>
+      <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
         <p>${escapeHtml(originDisplay(item))}</p>
@@ -291,6 +314,8 @@ function addScanTotals(total, result) {
     "skippedUnverified",
     "skippedUnrelated",
     "skippedUntrusted",
+    "discovered",
+    "opened",
   ]) {
     total[key] += Number(result[key]) || 0;
   }
@@ -312,6 +337,8 @@ async function runDeskSearch(query, mayorId) {
     skippedUnverified: 0,
     skippedUnrelated: 0,
     skippedUntrusted: 0,
+    discovered: 0,
+    opened: 0,
     review: { duplicates: 0 },
     failedOffices: [],
   };
@@ -354,7 +381,7 @@ $("search-form").addEventListener("submit", async (e) => {
       ? ` · تعذر ${num(result.failedOffices.length)} مكتب`
       : "";
     setDeskStatus(
-      `اكتمل المسار. جديد ${num(result.found)} · كان موجودًا ${num(result.held)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${failed}.`,
+      `اكتشف ${num(result.discovered)} · فتح ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);

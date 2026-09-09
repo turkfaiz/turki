@@ -83,6 +83,7 @@ function trustItem(item) {
       url: item.url,
       publisher_url: item.publisher_url,
       source: item.source || "google_news",
+      page_body: item.article_text,
     },
     mayor,
   );
@@ -118,7 +119,7 @@ export function planInboxReview(items) {
       continue;
     }
     const mayor = mayorById(raw.mayor_id);
-    if (mayor && !isAboutMayor(`${raw.title} ${raw.snippet || ""}`, mayor)) {
+    if (mayor && !isAboutMayor(`${raw.title} ${raw.snippet || ""} ${raw.article_text || ""}`, mayor)) {
       exclude.push({ id: raw.id, reason: REASON.UNRELATED });
       continue;
     }
@@ -127,9 +128,11 @@ export function planInboxReview(items) {
 
   const groups = clusterInboxItems(trusted);
   const kept = [];
+  const merges = [];
   for (const group of groups) {
     const winner = group.members.reduce(betterItem);
     kept.push(winner.id);
+    merges.push({ winnerId: winner.id, members: group.members });
     for (const member of group.members) {
       if (member.id !== winner.id) {
         exclude.push({ id: member.id, reason: REASON.DUPLICATE });
@@ -142,6 +145,7 @@ export function planInboxReview(items) {
     groups: groups.length,
     kept: kept.length,
     exclude,
+    merges,
     stamps,
     excluded: exclude.length,
     untrusted: exclude.filter((x) => x.reason === REASON.UNTRUSTED).length,
@@ -170,6 +174,87 @@ async function applyStamps(env, stamps) {
   }
 }
 
+function sourceRows(item) {
+  let rows = [];
+  try {
+    const parsed = JSON.parse(item.merged_sources || "[]");
+    if (Array.isArray(parsed)) rows = parsed;
+  } catch {
+    rows = [];
+  }
+  if (!rows.length) {
+    rows.push({
+      source: item.source,
+      domain: item.publisher_domain,
+      url: item.url,
+      title: item.title,
+      published_at: item.published_at,
+    });
+  }
+  return rows;
+}
+
+export function mergeRecord(group) {
+  const winner = group.members.find((item) => item.id === group.winnerId);
+  const sources = [];
+  const sourceKeys = new Set();
+  const textSections = [];
+  const textKeys = new Set();
+
+  for (const item of group.members) {
+    for (const source of sourceRows(item)) {
+      const key = source.url || `${source.domain || ""}|${source.title || ""}`;
+      if (!key || sourceKeys.has(key)) continue;
+      sourceKeys.add(key);
+      sources.push(source);
+    }
+    const text = String(item.article_text || item.snippet || "").replace(/\s+/g, " ").trim();
+    const key = text.slice(0, 160).toLowerCase();
+    if (!text || textKeys.has(key)) continue;
+    textKeys.add(key);
+    textSections.push(
+      `[${item.publisher_domain || item.source || "source"}] ${item.title}\n${text.slice(0, 20000)}`,
+    );
+  }
+
+  return {
+    id: winner.id,
+    articleText: textSections.join("\n\n").slice(0, 60000),
+    mergedSources: JSON.stringify(sources.slice(0, 20)),
+    sourceCount: sources.length || 1,
+  };
+}
+
+async function applyMerges(env, merges) {
+  if (!merges.length) return;
+  const stmt = env.DB.prepare(
+    `UPDATE items
+     SET article_text = ?, merged_sources = ?, source_count = ?,
+         confidence = CASE WHEN source = 'official' THEN confidence ELSE ? END,
+         trans_engine = CASE WHEN source_count <> ? THEN 'brief-radar' ELSE trans_engine END,
+         brief_evidence = CASE WHEN source_count <> ? THEN NULL ELSE brief_evidence END,
+         brief_error = NULL
+     WHERE id = ?`,
+  );
+  const records = merges.map(mergeRecord);
+  for (let i = 0; i < records.length; i += 30) {
+    const chunk = records.slice(i, i + 30);
+    await env.DB.batch(
+      chunk.map((row) =>
+        stmt.bind(
+          row.articleText,
+          row.mergedSources,
+          row.sourceCount,
+          row.sourceCount > 1 ? "merged" : "raw",
+          row.sourceCount,
+          row.sourceCount,
+          row.id,
+        ),
+      ),
+    );
+  }
+}
+
 export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
   const clauses = ["status = 'inbox'"];
   const binds = [];
@@ -179,8 +264,8 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
   }
   binds.push(limit);
   const { results } = await env.DB.prepare(
-    `SELECT id, mayor_id, title, snippet, source, url, publisher_tier, publisher_domain,
-            published_at, created_at
+    `SELECT id, mayor_id, title, snippet, article_text, merged_sources, source_count,
+            source, url, publisher_tier, publisher_domain, published_at, created_at
      FROM items WHERE ${clauses.join(" AND ")}
      ORDER BY COALESCE(published_at, created_at) DESC
      LIMIT ?`,
@@ -190,6 +275,7 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
 
   const plan = planInboxReview(results || []);
   await applyStamps(env, plan.stamps);
+  await applyMerges(env, plan.merges);
   await applyExclusions(env, plan.exclude);
   return {
     reviewed: plan.reviewed,

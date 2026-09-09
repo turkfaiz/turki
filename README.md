@@ -8,7 +8,8 @@
 - **رصد مجدول:** كل أحد الساعة 06:00 بتوقيت الرياض
 - **مفاتيح الرصد:** الاسم الإنجليزي + لغة أم الدولة
 - **العربي:** لغة صفحة الموظف، والاسم العربي للعرض النهائي فقط
-- **المصادر:** Google News (يعمل بدون مفتاح) + نطاقات رسمية + Inoreader عند ربطه
+- **المصادر:** Google News + Bing News + GDELT + النطاقات الرسمية + Inoreader عند ربطه
+- **النشرة:** تُقرأ صفحة المصدر، وتُدمج صفحات الحدث من المنصات المختلفة، ثم يلخصها Gemini
 
 ## التشغيل المحلي
 
@@ -22,15 +23,24 @@ npm run dev
 
 ## المفاتيح
 
-لا تضع المفاتيح في الشات. انسخ `.dev.vars.example` إلى `.dev.vars` إذا أردت ربط Inoreader لاحقًا.
+لا تضع المفاتيح في الشات. انسخ `.dev.vars.example` إلى `.dev.vars`.
 
 ```
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.8-flash
 INOREADER_APP_ID=
 INOREADER_APP_KEY=
 INOREADER_ACCESS_TOKEN=
 ```
 
-Google News لا يحتاج رقم API.
+محليًا يوضع مفتاح Gemini في `.dev.vars`. في Cloudflare يوضع كمتغير سرّي:
+
+```bash
+npx wrangler secret put GEMINI_API_KEY
+```
+
+Google News وBing News وGDELT لا تحتاج مفاتيح. إذا لم يوجد مفتاح Gemini يبقى الملخص
+الاحتياطي ظاهرًا، ولا يُوسم الخبر بأنه «ملخص AI».
 
 ## الجدول
 

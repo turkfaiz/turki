@@ -57,6 +57,11 @@ const SCHEMA_STATEMENTS = [
     trans_engine TEXT,
     publisher_domain TEXT,
     publisher_tier INTEGER,
+    article_text TEXT,
+    merged_sources TEXT,
+    source_count INTEGER DEFAULT 1,
+    brief_evidence TEXT,
+    brief_error TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -141,6 +146,21 @@ async function migrateItems(env) {
   if (!names.has("publisher_tier")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN publisher_tier INTEGER`).run();
   }
+  if (!names.has("article_text")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN article_text TEXT`).run();
+  }
+  if (!names.has("merged_sources")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN merged_sources TEXT`).run();
+  }
+  if (!names.has("source_count")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN source_count INTEGER DEFAULT 1`).run();
+  }
+  if (!names.has("brief_evidence")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_evidence TEXT`).run();
+  }
+  if (!names.has("brief_error")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_error TEXT`).run();
+  }
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -172,16 +192,17 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.title_ar AS news_title_ar, items.snippet, items.snippet_ar AS news_snippet_ar,
   items.title_normalized, items.url, items.published_at, items.language, items.confidence,
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
-  items.publisher_domain, items.publisher_tier,
+  items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
+  items.brief_evidence, items.brief_error,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
-/** مسار المكتب الوحيد: جمع → تحقق → نشرة عند الإدخال → دمج الحدث. */
+/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
 async function finishDesk(env, scanOpts) {
   const result = await runScan(env, scanOpts);
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
-  const leftover = await translatePending(env, 40);
-  return { ...result, review, leftover };
+  const summarized = await translatePending(env, 40, scanOpts.mayorId || null);
+  return { ...result, review, summarized };
 }
 
 function json(data, status = 200) {
@@ -240,7 +261,10 @@ async function stats(env) {
     lastWeekly,
     lastManual,
     week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
-    sources: sourceStatus(env),
+    sources: {
+      ...sourceStatus(env),
+      ai_brief: env.GEMINI_API_KEY ? "ready" : "unconfigured",
+    },
   };
 }
 
@@ -319,7 +343,7 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 500 });
-    const translated = await translatePending(env, 80);
+    const translated = await translatePending(env, 80, body.mayor_id || null);
     return json({ ok: true, translated, ...result });
   }
 

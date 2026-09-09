@@ -65,11 +65,11 @@ function bodyText(html) {
   const parts = [];
   const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
   let m;
-  while ((m = re.exec(cleaned)) && parts.join(" ").length < 4500) {
+  while ((m = re.exec(cleaned)) && parts.join(" ").length < 22000) {
     const text = decodeEntities(m[1]);
     if (text.length > 40) parts.push(text);
   }
-  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 4000);
+  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 20000);
 }
 
 export function extractArticle(html, url = "") {
@@ -117,7 +117,7 @@ export function extractJinaMarkdown(md, fallbackUrl = "") {
   return {
     title: decodeEntities(title).trim(),
     description: body.slice(0, 400),
-    body: body.slice(0, 4000),
+    body: body.slice(0, 20000),
     published_at: toIso(published),
     url: source || fallbackUrl,
     domain: publisherDomain(source || fallbackUrl),

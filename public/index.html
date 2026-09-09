@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=desk2" />
+    <link rel="stylesheet" href="/styles.css?v=ai1" />
   </head>
   <body>
     <div class="sheet">
@@ -34,6 +34,11 @@
             <span>Official</span>
             <small id="src-official">يعمل</small>
           </div>
+          <div class="platform">
+            <span class="led led-off" id="led-ai"></span>
+            <span>AI التلخيص</span>
+            <small id="src-ai">غير مربوط</small>
+          </div>
         </div>
         <div class="mast-stamp">
           <span>الجدول</span>
@@ -45,7 +50,7 @@
       <ol class="path" aria-label="مسار المكتب">
         <li><b>1</b> اختر النطاق</li>
         <li><b>2</b> ابحث</li>
-        <li class="sys"><b>3 النظام</b> تحقق · دمج · نشرة</li>
+        <li class="sys"><b>3 النظام</b> تحقق · دمج · قراءة AI</li>
         <li><b>4 قرارك</b> اعتماد أو استبعاد</li>
       </ol>
 
@@ -56,7 +61,7 @@
         </select>
         <button type="submit" class="btn-search" id="search-btn">بحث</button>
       </form>
-      <p class="rule-note">مسار واحد ثابت. ابحث في كل المكاتب أو اختر مكتبًا واحدًا. النظام يكمل التحقق والدمج والنشرة قبل ظهور الوارد؛ ولا تُعاد مراجعة الأخبار بعد البحث. الأحد 06:00 نفس المسار تلقائيًا.</p>
+      <p class="rule-note">مسار واحد ثابت. ابحث في كل المكاتب أو اختر مكتبًا واحدًا. النظام يفتح الصفحات ويقرأ نصها، يدمج مصادر الحدث، ثم يكتب AI الزبدة قبل ظهور الوارد. الأحد 06:00 نفس المسار تلقائيًا.</p>
 
       <section class="kpis">
         <article><span>بانتظار القرار</span><b class="num" id="stat-inbox">0</b></article>
@@ -83,6 +88,6 @@
         </aside>
       </section>
     </div>
-    <script src="/app.js?v=desk2"></script>
+    <script src="/app.js?v=ai1"></script>
   </body>
 </html>
