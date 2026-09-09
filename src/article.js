@@ -98,7 +98,9 @@ export function extractArticle(html, url = "") {
   } catch {
     canonical = url;
   }
-  const body = bodyText(html);
+  const paragraphBody = bodyText(html);
+  const structuredBody = decodeEntities(news.articleBody || "").slice(0, 20000);
+  const body = structuredBody.length > paragraphBody.length ? structuredBody : paragraphBody;
   return {
     title: title.replace(/\s+/g, " ").trim(),
     description: description.replace(/\s+/g, " ").trim(),

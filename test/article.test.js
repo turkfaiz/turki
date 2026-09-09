@@ -33,6 +33,23 @@ test("extractArticle reads og title, canonical, published time and paragraphs", 
   assert.match(art.body, /blackout/);
 });
 
+test("extractArticle prefers a complete JSON-LD article body over a short paragraph", () => {
+  const html = `<html><head>
+    <script type="application/ld+json">
+      {
+        "@type": "NewsArticle",
+        "headline": "Stefano Lo Russo presenta il progetto",
+        "datePublished": "2026-09-09T08:00:00Z",
+        "articleBody": "Stefano Lo Russo presenta il progetto completo. Dettaglio uno. Dettaglio due. Questa è la parte finale della pagina."
+      }
+    </script>
+  </head><body>
+    <p>Stefano Lo Russo presenta una breve introduzione che non contiene tutti i dettagli.</p>
+  </body></html>`;
+  const article = extractArticle(html, "https://www.comune.torino.it/progetto");
+  assert.match(article.body, /parte finale della pagina/);
+});
+
 test("jina markdown extractor keeps the source url", () => {
   const md = `Title: Lo Russo on the grid\nURL Source: https://www.lastampa.it/a\nPublished Time: 2026-09-08T10:00:00Z\n\nMarkdown Content:\nThe mayor spoke about rete vecchia.`;
   const art = extractJinaMarkdown(md, "https://example.com");
