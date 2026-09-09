@@ -62,6 +62,8 @@ const SCHEMA_STATEMENTS = [
     source_count INTEGER DEFAULT 1,
     brief_evidence TEXT,
     brief_error TEXT,
+    brief_attempted_at TEXT,
+    brief_attempts INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -85,19 +87,28 @@ const SCHEMA_STATEMENTS = [
 
 let ready = false;
 
+async function upsertRows(env, prefix, rows, width, chunkSize) {
+  const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await env.DB.prepare(`${prefix} VALUES ${chunk.map(() => tuple).join(", ")}`)
+      .bind(...chunk.flat())
+      .run();
+  }
+}
+
 async function ensureDb(env) {
   if (ready) return;
   for (const sql of SCHEMA_STATEMENTS) {
     await env.DB.prepare(sql).run();
   }
-  const stmt = env.DB.prepare(
+  await upsertRows(
+    env,
     `INSERT OR REPLACE INTO mayors (
       id, country_ar, city_ar, city_en, title_ar, title_en, name_en, name_native, name_ar,
       native_lang, native_lang_ar, country_code, gn_hl, gn_gl, official_host
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  const batch = MAYORS.map((m) =>
-    stmt.bind(
+    )`,
+    MAYORS.map((m) => [
       m.id,
       m.country_ar,
       m.city_ar,
@@ -113,16 +124,23 @@ async function ensureDb(env) {
       m.gn_hl,
       m.gn_gl,
       m.official_host,
-    ),
+    ]),
+    15,
+    6,
   );
-  await env.DB.batch(batch);
-  const pubStmt = env.DB.prepare(
-    `INSERT OR REPLACE INTO publishers (id, domain, name, tier, country_code, mayor_id) VALUES (?, ?, ?, ?, ?, ?)`,
-  );
-  await env.DB.batch(
-    PUBLISHERS.map((p) =>
-      pubStmt.bind(p.id, p.domain, p.name, p.tier, p.country_code, p.mayor_id),
-    ),
+  await upsertRows(
+    env,
+    `INSERT OR REPLACE INTO publishers (id, domain, name, tier, country_code, mayor_id)`,
+    PUBLISHERS.map((p) => [
+      p.id,
+      p.domain,
+      p.name,
+      p.tier,
+      p.country_code,
+      p.mayor_id,
+    ]),
+    6,
+    15,
   );
   await migrateItems(env);
   ready = true;
@@ -161,6 +179,12 @@ async function migrateItems(env) {
   if (!names.has("brief_error")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_error TEXT`).run();
   }
+  if (!names.has("brief_attempted_at")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_attempted_at TEXT`).run();
+  }
+  if (!names.has("brief_attempts")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_attempts INTEGER DEFAULT 0`).run();
+  }
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -182,9 +206,23 @@ async function migrateItems(env) {
   const epoch = "week-verify-v1";
   const current = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'data_epoch'`).first();
   if (current?.v !== epoch) {
-    await env.DB.prepare(`DELETE FROM items`).run();
-    await env.DB.prepare(`DELETE FROM scans`).run();
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('data_epoch', ?)`).bind(epoch).run();
+  }
+  const briefEpoch = "grounded-ai-v2";
+  const currentBrief = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'brief_epoch'`).first();
+  if (currentBrief?.v !== briefEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = '', trans_engine = 'brief-pending',
+           brief_evidence = NULL, brief_error = NULL
+       WHERE status IN ('inbox', 'approved')
+         AND IFNULL(trans_engine, '') NOT LIKE 'brief-ai-gemini:%'`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('brief_epoch', ?)`)
+      .bind(briefEpoch)
+      .run();
   }
 }
 
@@ -193,7 +231,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.title_normalized, items.url, items.published_at, items.language, items.confidence,
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
-  items.brief_evidence, items.brief_error,
+  items.brief_evidence, items.brief_error, items.brief_attempted_at, items.brief_attempts,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
@@ -201,12 +239,67 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
 async function finishDesk(env, scanOpts) {
   const result = await runScan(env, scanOpts);
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
-  const summarized = await translatePending(env, 40, scanOpts.mayorId || null);
+  const summarized = await translatePending(env, 120, scanOpts.mayorId || null);
   return { ...result, review, summarized };
+}
+
+async function finishAllOffices(env, type = "weekly") {
+  const results = [];
+  const errors = [];
+  for (let i = 0; i < MAYORS.length; i += 2) {
+    const chunk = MAYORS.slice(i, i + 2);
+    const settled = await Promise.allSettled(
+      chunk.map((mayor) =>
+        finishDesk(env, { type, query: "", mayorId: mayor.id }),
+      ),
+    );
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        results.push({ mayorId: chunk[index].id, ...result.value });
+      } else {
+        errors.push(`${chunk[index].id}: ${String(result.reason?.message || result.reason)}`);
+      }
+    });
+  }
+  return { offices: results.length, failed: errors.length, errors, results };
+}
+
+async function enqueueAllOffices(env, type = "weekly") {
+  if (!env.SCAN_QUEUE) return finishAllOffices(env, type);
+  await env.SCAN_QUEUE.sendBatch(
+    MAYORS.map((mayor) => ({
+      body: { type, mayorId: mayor.id },
+      contentType: "json",
+    })),
+  );
+  return { queued: MAYORS.length, type };
 }
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+export function authorized(request, env) {
+  if (!env.DASHBOARD_PASSWORD) return true;
+  const header = request.headers.get("Authorization") || "";
+  if (!header.startsWith("Basic ")) return false;
+  try {
+    const decoded = atob(header.slice(6));
+    const user = env.DASHBOARD_USER || "mayorwatch";
+    return decoded === `${user}:${env.DASHBOARD_PASSWORD}`;
+  } catch {
+    return false;
+  }
+}
+
+function authRequired() {
+  return new Response("Authentication required", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": 'Basic realm="MayorWatch"',
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 async function readBody(request) {
@@ -343,13 +436,8 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 500 });
-    const translated = await translatePending(env, 80, body.mayor_id || null);
+    const translated = await translatePending(env, 120, body.mayor_id || null);
     return json({ ok: true, translated, ...result });
-  }
-
-  if (path === "/api/translate" && method === "POST") {
-    const n = await translatePending(env, 40);
-    return json({ ok: true, translated: n });
   }
 
   if (path === "/api/search" && method === "POST") {
@@ -367,7 +455,7 @@ async function handleApi(request, env) {
   }
 
   if (path === "/api/scan/weekly" && method === "POST") {
-    const result = await finishDesk(env, { type: "weekly", query: "", mayorId: null });
+    const result = await enqueueAllOffices(env);
     return json({ ok: true, ...result });
   }
 
@@ -376,6 +464,7 @@ async function handleApi(request, env) {
 
 export default {
   async fetch(request, env) {
+    if (!authorized(request, env)) return authRequired();
     await ensureDb(env);
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
@@ -389,11 +478,28 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(
-      (async () => {
-        await ensureDb(env);
-        await finishDesk(env, { type: "weekly", query: "", mayorId: null });
-      })(),
-    );
+    ctx.waitUntil(enqueueAllOffices(env));
+  },
+
+  async queue(batch, env) {
+    await ensureDb(env);
+    for (const message of batch.messages) {
+      try {
+        const body = message.body || {};
+        const mayorId = body.mayorId;
+        if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
+          message.ack();
+          continue;
+        }
+        await finishDesk(env, {
+          type: body.type || "weekly",
+          query: "",
+          mayorId,
+        });
+        message.ack();
+      } catch {
+        message.retry();
+      }
+    }
   },
 };

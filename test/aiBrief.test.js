@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import {
   aiBriefEnabled,
   buildAiBriefPrompt,
+  clusterWithGemini,
+  pendingAiBrief,
   summarizeWithGemini,
   validateAiBrief,
 } from "../src/aiBrief.js";
 import { MAYORS } from "../src/mayors.js";
 
 const turin = MAYORS.find((mayor) => mayor.id === "turin");
+const seoul = MAYORS.find((mayor) => mayor.id === "seoul");
 const article = {
   title: "Via Roma: inaugurazione della nuova via pedonale",
   snippet: "Stefano Lo Russo presenta la riqualificazione.",
@@ -23,6 +26,17 @@ test("AI briefing is enabled only with a secret key", () => {
   assert.equal(aiBriefEnabled({ GEMINI_API_KEY: "test" }), true);
 });
 
+test("pending and failed AI states never invent a news claim", () => {
+  const pending = pendingAiBrief(turin);
+  const failed = pendingAiBrief(turin, true);
+  assert.equal(pending.engine, "brief-pending");
+  assert.match(pending.title_ar, /بانتظار/);
+  assert.equal(pending.snippet_ar, "");
+  assert.equal(failed.engine, "brief-ai-error");
+  assert.match(failed.title_ar, /تعذر/);
+  assert.equal(failed.snippet_ar, "");
+});
+
 test("AI prompt contains the fetched page body, not only its headline", () => {
   const longArticle = {
     ...article,
@@ -35,9 +49,11 @@ test("AI prompt contains the fetched page body, not only its headline", () => {
 });
 
 test("Gemini brief accepts only facts backed by exact page quotes", async () => {
-  let requestBody;
+  const requestBodies = [];
+  let call = 0;
   const fetcher = async (_url, options) => {
-    requestBody = JSON.parse(options.body);
+    requestBodies.push(JSON.parse(options.body));
+    call += 1;
     return {
       ok: true,
       status: 200,
@@ -49,18 +65,25 @@ test("Gemini brief accepts only facts backed by exact page quotes", async () => 
               content: [
                 {
                   type: "text",
-                  text: JSON.stringify({
-                    headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
-                    headline_evidence:
-                      "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
-                    facts: [
-                      {
-                        fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
-                        evidence: "La festa è prevista sabato 12 settembre.",
-                      },
-                    ],
-                    topic_ar: "افتتاح شارع للمشاة",
-                  }),
+                  text: JSON.stringify(
+                    call === 1
+                      ? {
+                          headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
+                          headline_evidence:
+                            "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
+                          facts: [
+                            {
+                              fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
+                              evidence: "La festa è prevista sabato 12 settembre.",
+                            },
+                          ],
+                          topic_ar: "افتتاح شارع للمشاة",
+                        }
+                      : {
+                          headline_supported: true,
+                          facts: [{ index: 0, supported: true }],
+                        },
+                  ),
                 },
               ],
             },
@@ -80,8 +103,9 @@ test("Gemini brief accepts only facts backed by exact page quotes", async () => 
   assert.match(brief.title_ar, /ستيفانو لو روسو/);
   assert.match(brief.snippet_ar, /12 سبتمبر/);
   assert.match(brief.evidence, /La festa è prevista/);
-  assert.equal(requestBody.store, false);
-  assert.equal(requestBody.response_format.mime_type, "application/json");
+  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].store, false);
+  assert.equal(requestBodies[0].response_format.mime_type, "application/json");
 });
 
 test("AI brief rejects a headline whose evidence is absent from the page", () => {
@@ -104,5 +128,159 @@ test("AI brief rejects a headline whose evidence is absent from the page", () =>
         "brief-ai-test",
       ),
     /ai_ungrounded_headline/,
+  );
+});
+
+test("AI brief requires the mayor in the Arabic headline and an exact quote", () => {
+  const source =
+    "Stefano Lo Russo: non è un'emergenza. La rete sarà controllata domani.";
+  const base = {
+    headline_ar: "إعلان حالة طوارئ في تورينو",
+    headline_evidence: "Stefano Lo Russo: non è un'emergenza.",
+    facts: [
+      {
+        fact_ar: "ستُفحص الشبكة غدًا.",
+        evidence: "La rete sarà controllata domani.",
+      },
+    ],
+    topic_ar: "الكهرباء",
+  };
+  assert.throws(
+    () => validateAiBrief(base, source, turin, "brief-ai-test"),
+    /ai_ungrounded_headline/,
+  );
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          ...base,
+          headline_ar: "ستيفانو لو روسو يعلن حالة طوارئ في تورينو",
+          headline_evidence: "Stefano Lo Russo non è un'emergenza.",
+        },
+        source,
+        turin,
+        "brief-ai-test",
+      ),
+    /ai_ungrounded_headline/,
+  );
+});
+
+test("a second AI pass rejects a claim contradicted by its quote", async () => {
+  let call = 0;
+  const fetcher = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      call += 1;
+      const payload =
+        call === 1
+          ? {
+              headline_ar: "ستيفانو لو روسو يعلن حالة طوارئ في تورينو",
+              headline_evidence: "Stefano Lo Russo: non è un'emergenza.",
+              facts: [
+                {
+                  fact_ar: "ستُفحص الشبكة غدًا.",
+                  evidence: "La rete sarà controllata domani.",
+                },
+              ],
+              topic_ar: "الكهرباء",
+            }
+          : {
+              headline_supported: false,
+              facts: [{ index: 0, supported: true }],
+            };
+      return {
+        steps: [
+          {
+            type: "model_output",
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ],
+      };
+    },
+  });
+  await assert.rejects(
+    summarizeWithGemini(
+      { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+      {
+        ...article,
+        title: "Stefano Lo Russo: non è un'emergenza",
+        article_text:
+          "Stefano Lo Russo: non è un'emergenza. La rete sarà controllata domani.",
+      },
+      turin,
+      fetcher,
+    ),
+    /ai_headline_not_supported/,
+  );
+});
+
+test("AI clustering can merge one event reported in different scripts", async () => {
+  const items = [
+    {
+      id: "en",
+      mayor_id: "seoul",
+      source: "google_news",
+      publisher_domain: "koreaherald.com",
+      published_at: "2026-09-09T09:00:00Z",
+      title: "Oh Se-hoon opens 120-home youth housing complex in Seoul",
+      snippet: "The mayor opened the project on Wednesday.",
+    },
+    {
+      id: "ko",
+      mayor_id: "seoul",
+      source: "official",
+      publisher_domain: "seoul.go.kr",
+      published_at: "2026-09-09T08:00:00Z",
+      title: "오세훈 서울 청년주택 120가구 개관",
+      snippet: "수요일 청년주택 문을 열었다.",
+    },
+  ];
+  const fetcher = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        steps: [
+          {
+            type: "model_output",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  groups: [
+                    {
+                      item_ids: ["en", "ko"],
+                      event_ar: "افتتاح مشروع إسكان للشباب",
+                      evidence: [
+                        {
+                          item_id: "en",
+                          quote: "opens 120-home youth housing complex",
+                        },
+                        {
+                          item_id: "ko",
+                          quote: "서울 청년주택 120가구 개관",
+                        },
+                      ],
+                    },
+                  ],
+                }),
+              },
+            ],
+          },
+        ],
+      };
+    },
+  });
+  const groups = await clusterWithGemini(
+    { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+    items,
+    seoul,
+    fetcher,
+  );
+  assert.equal(groups.length, 1);
+  assert.deepEqual(
+    groups[0].members.map((item) => item.id).sort(),
+    ["en", "ko"],
   );
 });

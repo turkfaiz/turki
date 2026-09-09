@@ -84,7 +84,7 @@ export function extractArticle(html, url = "") {
     attr(html, ["og:description", "twitter:description", "description"]) ||
     decodeEntities(news.description || "");
   const published =
-    attr(html, ["article:published_time", "og:updated_time", "pubdate", "date"]) ||
+    attr(html, ["article:published_time", "pubdate", "date"]) ||
     news.datePublished ||
     news.dateCreated ||
     "";
@@ -125,6 +125,10 @@ export function extractJinaMarkdown(md, fallbackUrl = "") {
     url: source || fallbackUrl,
     domain: publisherDomain(source || fallbackUrl),
   };
+}
+
+export function usableArticle(article) {
+  return Boolean(article?.title && String(article.body || "").trim().length > 80);
 }
 
 async function fetchResponse(url, timeoutMs = 12000, extra = {}) {
@@ -225,7 +229,7 @@ export async function readArticle(startUrl) {
     if (res.ok) {
       const html = await res.text();
       const extracted = extractArticle(html, res.url || url);
-      if (extracted.title && (extracted.body.length > 80 || extracted.description)) {
+      if (usableArticle(extracted)) {
         return extracted;
       }
     }
@@ -233,10 +237,12 @@ export async function readArticle(startUrl) {
     /* try reader */
   }
   try {
-    return await readViaJina(url);
+    const reader = await readViaJina(url);
+    if (usableArticle(reader)) return reader;
   } catch {
-    return null;
+    /* fail closed below */
   }
+  return null;
 }
 
 export function articleIsAboutMayor(article, mayor) {
@@ -253,11 +259,12 @@ export async function verifyCandidate(row, mayor) {
   if (!article?.url || isAggregatorHost(article.domain)) {
     return { ok: false, reason: "unverified", pageRead: false };
   }
-  const pageDate = parseDate(article.published_at) || rssDate;
+  const articleDate = parseDate(article.published_at);
+  const pageDate = articleDate || (row.date_is_discovery ? null : rssDate);
   if (pageDate && isWithinWeek(pageDate) === false) {
     return { ok: false, reason: "stale", pageRead: true };
   }
-  if (!pageDate && !rssDate) {
+  if (!pageDate) {
     return { ok: false, reason: "stale", pageRead: true };
   }
   if (!articleIsAboutMayor(article, mayor)) {

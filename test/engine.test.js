@@ -55,6 +55,13 @@ test("office match requires the mayor identity, not just the city", () => {
   assert.equal(isAboutMayor("Seoul mayor unveils a generic city budget", seoul), false);
 });
 
+test("a common given name is not enough to identify a mayor", () => {
+  const madrid = MAYORS.find((m) => m.id === "madrid");
+  const turin = MAYORS.find((m) => m.id === "turin");
+  assert.equal(isAboutMayor("Luis presenta un progetto culturale a Madrid", madrid), false);
+  assert.equal(isAboutMayor("Il sindaco Russo presenta il progetto a Torino", turin), true);
+});
+
 test("google news search is limited to the last seven days", () => {
   const url = googleNewsRssUrl('"Oh Se-hoon" Seoul', "ko", "KR");
   assert.match(url, /when%3A7d/);
@@ -77,7 +84,7 @@ test("splitHeadline pulls outlet off a wire title", () => {
   assert.equal(s.outlet, "Korea Herald");
 });
 
-test("inbox rows are briefed at insert so the desk never rewrites them later", () => {
+test("inbox rows wait for AI instead of receiving an unsafe rule-based brief", () => {
   const turin = MAYORS.find((m) => m.id === "turin");
   const stamped = stampBrief(
     turin,
@@ -87,8 +94,8 @@ test("inbox rows are briefed at insert so the desk never rewrites them later", (
     },
     "inbox",
   );
-  assert.equal(stamped.trans_engine, "brief-radar");
-  assert.match(stamped.title_ar, /فيا روما|افتتاح|يفتتح/);
+  assert.equal(stamped.trans_engine, "brief-pending");
+  assert.match(stamped.title_ar, /بانتظار قراءة الذكاء الاصطناعي/);
   const skipped = stampBrief(turin, { title: "x", snippet: "" }, "excluded");
   assert.equal(skipped.trans_engine, null);
 });

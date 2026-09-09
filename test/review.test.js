@@ -151,3 +151,44 @@ test("same event from multiple platforms combines source pages before AI", () =>
   assert.match(merged.mergedSources, /comune\.torino\.it/);
   assert.match(merged.mergedSources, /lastampa\.it/);
 });
+
+test("similar policy headlines with conflicting numbers stay separate events", () => {
+  const groups = clusterInboxItems([
+    {
+      id: "120",
+      mayor_id: "seoul",
+      title: "Oh Se-hoon unveils housing plan for 120 homes in Seoul",
+    },
+    {
+      id: "300",
+      mayor_id: "seoul",
+      title: "Oh Se-hoon unveils housing plan for 300 homes in Seoul",
+    },
+  ]);
+  assert.equal(groups.length, 2);
+});
+
+test("an approved event remains the winner when a new platform copy arrives", () => {
+  const plan = planInboxReview([
+    {
+      id: "approved",
+      mayor_id: "turin",
+      status: "approved",
+      title: "Stefano Lo Russo inaugura Via Roma pedonale sabato",
+      snippet: "",
+      source: "official",
+      publisher_tier: 0,
+    },
+    {
+      id: "new-copy",
+      mayor_id: "turin",
+      status: "inbox",
+      title: "Lo Russo inaugura Via Roma pedonale sabato a Torino",
+      snippet: "Stefano Lo Russo",
+      source: "google_news",
+      publisher_tier: 1,
+    },
+  ]);
+  assert.equal(plan.merges[0].winnerId, "approved");
+  assert.equal(plan.exclude.find((row) => row.id === "new-copy")?.reason, REASON.DUPLICATE);
+});

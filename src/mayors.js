@@ -253,20 +253,58 @@ export function relevanceTokens(mayor) {
 }
 
 export function identityTokens(mayor) {
-  const phrases = [mayor.name_en, mayor.name_native, mayor.name_ar].filter(Boolean);
-  const tokens = [];
-  for (const phrase of phrases) {
-    const lower = String(phrase).toLowerCase();
-    if (lower.length >= 4) tokens.push(lower);
-    for (const part of lower.split(/[\s,."()]+/)) {
-      if (part.length >= 4) tokens.push(part);
-    }
-  }
-  return [...new Set(tokens)];
+  return [...new Set([mayor.name_en, mayor.name_native, mayor.name_ar].filter(Boolean))];
+}
+
+function identityText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f\u064b-\u065f]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function containsIdentity(text, phrase) {
+  const hay = identityText(text);
+  const needle = identityText(phrase);
+  if (!hay || !needle) return false;
+  return ` ${hay} `.includes(` ${needle} `);
 }
 
 export function isAboutMayor(text, mayor) {
-  const hay = String(text || "").toLowerCase();
-  if (!hay || !mayor) return false;
-  return identityTokens(mayor).some((token) => hay.includes(token));
+  if (!text || !mayor) return false;
+  const names = identityTokens(mayor);
+  if (names.some((name) => containsIdentity(text, name))) return true;
+
+  const englishParts = identityText(mayor.name_en).split(" ").filter(Boolean);
+  const nativeParts = identityText(mayor.name_native).split(" ").filter(Boolean);
+  const arabicParts = identityText(mayor.name_ar).split(" ").filter(Boolean);
+  const surnamePhrases = [englishParts, nativeParts, arabicParts]
+    .filter((parts) => parts.length >= 2)
+    .map((parts) => parts.slice(-2).join(" "))
+    .filter((phrase) => phrase.length >= 6);
+  if (surnamePhrases.some((phrase) => containsIdentity(text, phrase))) return true;
+
+  const surnames = [englishParts.at(-1), nativeParts.at(-1), arabicParts.at(-1)]
+    .filter((part) => part && part.length >= 4);
+  const hasSurname = [...new Set(surnames)].some((surname) => containsIdentity(text, surname));
+  if (!hasSurname) return false;
+
+  const officeContext = [
+    mayor.city_en,
+    mayor.city_ar,
+    mayor.title_en,
+    mayor.title_ar,
+    "mayor",
+    "sindaco",
+    "alcalde",
+    "δήμαρχος",
+    "시장",
+    "市長",
+    "عمدة",
+    "أمين",
+  ];
+  return officeContext.some((phrase) => containsIdentity(text, phrase));
 }

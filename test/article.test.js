@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { articleIsAboutMayor, extractArticle, extractJinaMarkdown } from "../src/article.js";
+import {
+  articleIsAboutMayor,
+  extractArticle,
+  extractJinaMarkdown,
+  usableArticle,
+} from "../src/article.js";
 import { isWithinWeek, parseDate, withWeekQuery } from "../src/time.js";
 import { MAYORS } from "../src/mayors.js";
 
@@ -48,6 +53,30 @@ test("extractArticle prefers a complete JSON-LD article body over a short paragr
   </body></html>`;
   const article = extractArticle(html, "https://www.comune.torino.it/progetto");
   assert.match(article.body, /parte finale della pagina/);
+});
+
+test("an OG description without an article body is not a readable page", () => {
+  const article = extractArticle(
+    `<html><head>
+      <meta property="og:title" content="Stefano Lo Russo update">
+      <meta property="og:description" content="A short search-card description only">
+    </head><body></body></html>`,
+    "https://example.com/update",
+  );
+  assert.equal(usableArticle(article), false);
+});
+
+test("an updated timestamp is not treated as the original publication date", () => {
+  const article = extractArticle(
+    `<html><head>
+      <meta property="og:title" content="Old page">
+      <meta property="og:updated_time" content="2026-09-09T08:00:00Z">
+    </head><body>
+      <p>This is a sufficiently long article paragraph whose update time must not become its publication date.</p>
+    </body></html>`,
+    "https://example.com/old-page",
+  );
+  assert.equal(article.published_at, null);
 });
 
 test("jina markdown extractor keeps the source url", () => {

@@ -9,3 +9,7 @@ INOREADER_ACCESS_TOKEN=
 # أنشئه من Google AI Studio، ثم ضعه في .dev.vars فقط.
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3.8-flash
+
+# اختياري محليًا، وموصى به في الإنتاج لحماية الصفحة وكل العمليات.
+DASHBOARD_USER=mayorwatch
+DASHBOARD_PASSWORD=

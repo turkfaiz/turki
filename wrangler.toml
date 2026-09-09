@@ -11,6 +11,16 @@ run_worker_first = true
 [triggers]
 crons = ["0 3 * * 0"]
 
+[[queues.producers]]
+binding = "SCAN_QUEUE"
+queue = "mayor-watch-scans"
+
+[[queues.consumers]]
+queue = "mayor-watch-scans"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+
 [[d1_databases]]
 binding = "DB"
 database_name = "mayor-watch"

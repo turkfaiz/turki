@@ -4,18 +4,18 @@ import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
 import { isWithinWeek, toIso } from "./time.js";
 import { mapLimit, MAX_ARTICLE_CHARS, verifyCandidate } from "./article.js";
-import { writeOfficialBrief } from "./brief.js";
+import { pendingAiBrief } from "./aiBrief.js";
 
 const FETCH_HEADERS = {
   "User-Agent": "MayorWatch/0.2 (municipal briefing desk)",
   Accept: "application/rss+xml, application/xml, text/xml, */*",
 };
 
-export function stampBrief(mayor, row, status) {
+export function stampBrief(mayor, _row, status) {
   if (status !== "inbox") {
     return { title_ar: null, snippet_ar: null, trans_engine: null };
   }
-  const brief = writeOfficialBrief(mayor, row.title || "", row.snippet || "", row.page_body || "");
+  const brief = pendingAiBrief(mayor);
   return {
     title_ar: brief.title_ar,
     snippet_ar: brief.snippet_ar,
@@ -125,6 +125,7 @@ async function collectOfficialSitemap(mayor) {
         ?.replace(/[-_]+/g, " ") || mayor.name_en,
       url: row.loc,
       published_at: row.lastmod,
+      date_is_discovery: true,
       snippet: "",
       source: "official",
       language: mayor.native_lang,
@@ -162,12 +163,13 @@ async function collectInoreader(env, query) {
   }));
 }
 
-async function collectGdelt(mayor) {
+async function collectGdelt(mayor, extraQuery = "") {
   const names =
     mayor.name_en === mayor.name_native
       ? `"${mayor.name_en}"`
       : `("${mayor.name_en}" OR "${mayor.name_native}")`;
-  const q = encodeURIComponent(names);
+  const extra = String(extraQuery || "").trim().replace(/"/g, " ");
+  const q = encodeURIComponent(extra ? `${names} "${extra}"` : names);
   const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${q}&mode=artlist&maxrecords=50&timespan=7d&format=json&sort=datedesc`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const res = await fetch(url, {
@@ -183,6 +185,7 @@ async function collectGdelt(mayor) {
       title: art.title || "",
       url: art.url || "",
       published_at: art.seendate || null,
+      date_is_discovery: true,
       snippet: art.title || "",
       source: "gdelt",
       language: "und",
@@ -213,11 +216,13 @@ async function gatherForMayor(env, mayor, extraQuery) {
   const errors = [];
   const buckets = [];
   const jobs = [
-    ["official_direct", collectOfficialSitemap(mayor)],
     ["google_news", collectGoogleNews(q.native, mayor.gn_hl, mayor.gn_gl)],
     ["google_news_en", collectGoogleNews(q.english, "en", "US")],
     ["bing_news", collectBingNews(q.native, mayor.gn_hl)],
   ];
+  if (!String(extraQuery || "").trim()) {
+    jobs.unshift(["official_direct", collectOfficialSitemap(mayor)]);
+  }
   if (q.official) {
     jobs.push(
       [
@@ -230,7 +235,7 @@ async function gatherForMayor(env, mayor, extraQuery) {
   }
   jobs.push(
     ["inoreader", collectInoreader(env, q.native)],
-    ["gdelt", collectGdelt(mayor)],
+    ["gdelt", collectGdelt(mayor, extraQuery)],
   );
   const settled = await Promise.all(
     jobs.map(async ([label, promise]) => {

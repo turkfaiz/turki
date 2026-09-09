@@ -10,6 +10,8 @@
 - **العربي:** لغة صفحة الموظف، والاسم العربي للعرض النهائي فقط
 - **المصادر:** Google News + Bing News + GDELT + النطاقات الرسمية + Inoreader عند ربطه
 - **النشرة:** يُقرأ جسم المقال المنظف (حتى 80 ألف حرف لكل مصدر)، وتُدمج صفحات الحدث، ثم يلخصها Gemini
+- **التدقيق:** يراجع Gemini كل ادعاء في مرور مستقل، ولا يُقبل دون اقتباس حرفي من المصدر
+- **الجدولة:** يوزع Queue رصد الأحد إلى مهمة مستقلة لكل مكتب حتى لا تسقط الدفعة كلها
 
 ## التشغيل المحلي
 
@@ -37,10 +39,21 @@ INOREADER_ACCESS_TOKEN=
 
 ```bash
 npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put DASHBOARD_PASSWORD
 ```
 
 Google News وBing News وGDELT لا تحتاج مفاتيح. إذا لم يوجد مفتاح Gemini يبقى الملخص
-الاحتياطي ظاهرًا، ولا يُوسم الخبر بأنه «ملخص AI».
+في حالة «بانتظار AI» بدل نشر ملخص آلي غير موثوق.
+
+قبل أول نشر أنشئ طابور Cloudflare المعرّف في `wrangler.toml`:
+
+```bash
+npx wrangler queues create mayor-watch-scans
+```
+
+عند ضبط `DASHBOARD_PASSWORD` يحمي Worker الصفحة وكل واجهات التعديل بمصادقة المتصفح
+الأساسية. اسم المستخدم الافتراضي `mayorwatch` ويمكن تغييره عبر `DASHBOARD_USER`.
+يمكن استخدام Cloudflare Access بدلًا منها في النشر المؤسسي.
 
 ## الجدول
 

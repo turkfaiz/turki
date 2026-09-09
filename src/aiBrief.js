@@ -1,5 +1,6 @@
 import { arabicRatio, decodeEntities } from "./text.js";
 import { tokenOverlap } from "./dedup.js";
+import { identityTokens } from "./mayors.js";
 
 const DEFAULT_MODEL = "gemini-3.8-flash";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -44,12 +45,85 @@ const OUTPUT_SCHEMA = {
   required: ["headline_ar", "headline_evidence", "facts", "topic_ar"],
 };
 
+const CLUSTER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    groups: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          item_ids: {
+            type: "array",
+            minItems: 2,
+            items: { type: "string" },
+          },
+          event_ar: {
+            type: "string",
+            description: "وصف عربي قصير للحدث المشترك.",
+          },
+          evidence: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                item_id: { type: "string" },
+                quote: {
+                  type: "string",
+                  description: "اقتباس حرفي من عنوان أو مقتطف العنصر يثبت الحدث.",
+                },
+              },
+              required: ["item_id", "quote"],
+            },
+          },
+        },
+        required: ["item_ids", "event_ar", "evidence"],
+      },
+    },
+  },
+  required: ["groups"],
+};
+
+const SUPPORT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    headline_supported: { type: "boolean" },
+    facts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          index: { type: "integer" },
+          supported: { type: "boolean" },
+        },
+        required: ["index", "supported"],
+      },
+    },
+  },
+  required: ["headline_supported", "facts"],
+};
+
 export function aiBriefEnabled(env) {
   return Boolean(env?.GEMINI_API_KEY);
 }
 
 export function aiBriefEngine(env) {
   return `brief-ai-gemini:${env?.GEMINI_MODEL || DEFAULT_MODEL}`;
+}
+
+export function pendingAiBrief(mayor, failed = false) {
+  return {
+    title_ar: failed
+      ? `تعذر تلخيص الصفحة بالذكاء الاصطناعي — ${mayor.name_ar}`
+      : `بانتظار قراءة الذكاء الاصطناعي — ${mayor.name_ar}`,
+    snippet_ar: "",
+    engine: failed ? "brief-ai-error" : "brief-pending",
+  };
 }
 
 function compact(value, max = 8000) {
@@ -60,7 +134,6 @@ function evidenceKey(value) {
   return compact(value, 260000)
     .toLocaleLowerCase()
     .normalize("NFKC")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -69,6 +142,14 @@ function evidenceExists(source, quote) {
   const hay = evidenceKey(source);
   const needle = evidenceKey(quote);
   return needle.length >= 10 && hay.includes(needle);
+}
+
+function evidenceMentionsMayor(evidence, mayor) {
+  const hay = evidenceKey(evidence);
+  const names = identityTokens(mayor).map(evidenceKey);
+  if (names.some((name) => name && hay.includes(name))) return true;
+  const surname = evidenceKey(mayor.name_en).split(" ").at(-1);
+  return Boolean(surname && surname.length >= 5 && hay.includes(surname));
 }
 
 function cleanArabic(value, max) {
@@ -88,6 +169,45 @@ function responseText(data) {
     .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => part.text);
   return blocks.join("").trim();
+}
+
+async function callGemini(env, input, schema, fetcher) {
+  const model = env.GEMINI_MODEL || DEFAULT_MODEL;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 35000);
+  let response;
+  try {
+    response = await fetcher(GEMINI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": env.GEMINI_API_KEY,
+        "Api-Revision": "2026-05-20",
+      },
+      body: JSON.stringify({
+        model,
+        store: false,
+        input,
+        response_format: {
+          type: "text",
+          mime_type: "application/json",
+          schema,
+        },
+      }),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response?.ok) throw new Error(`ai_http_${response?.status || "failed"}`);
+  const data = await response.json();
+  const text = responseText(data);
+  if (!text) throw new Error("ai_empty_response");
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("ai_invalid_json");
+  }
 }
 
 export function buildAiBriefPrompt(item, mayor) {
@@ -114,7 +234,12 @@ export function buildAiBriefPrompt(item, mayor) {
 
 export function validateAiBrief(payload, sourceText, mayor, engine) {
   const headline = cleanArabic(payload?.headline_ar, 180);
-  if (!headline || !evidenceExists(sourceText, payload?.headline_evidence)) {
+  if (
+    !headline ||
+    !headline.includes(mayor.name_ar) ||
+    !evidenceExists(sourceText, payload?.headline_evidence) ||
+    !evidenceMentionsMayor(payload?.headline_evidence, mayor)
+  ) {
     throw new Error("ai_ungrounded_headline");
   }
 
@@ -130,11 +255,8 @@ export function validateAiBrief(payload, sourceText, mayor, engine) {
   }
   if (!facts.length) throw new Error("ai_has_no_grounded_facts");
 
-  const namedHeadline = headline.includes(mayor.name_ar)
-    ? headline
-    : `${mayor.name_ar}: ${headline}`.slice(0, 180);
   return {
-    title_ar: namedHeadline,
+    title_ar: headline,
     snippet_ar: facts.map((row) => row.fact_ar).join("\n"),
     evidence: JSON.stringify({
       headline: compact(payload.headline_evidence, 500),
@@ -145,49 +267,129 @@ export function validateAiBrief(payload, sourceText, mayor, engine) {
   };
 }
 
+async function verifySemanticSupport(env, brief, fetcher) {
+  const evidence = JSON.parse(brief.evidence);
+  const facts = brief.snippet_ar.split("\n").filter(Boolean);
+  const checks = facts.map((fact, index) => ({
+    index,
+    claim_ar: fact,
+    source_quote: evidence.facts[index],
+  }));
+  const prompt = [
+    "أنت مدقق حقائق مستقل. قرر هل كل ادعاء عربي مدعوم دلاليًا بالاقتباس الأصلي المقابل فقط.",
+    "ارفض الادعاء عند اختلاف الفاعل أو الفعل أو النفي أو الرقم أو التاريخ أو المكان. وجود الكلمات في الاقتباس لا يكفي.",
+    "لا تستخدم معرفة خارجية. أعد supported=false عند أي شك.",
+    JSON.stringify({
+      headline: {
+        claim_ar: brief.title_ar,
+        source_quote: evidence.headline,
+      },
+      facts: checks,
+    }),
+  ].join("\n");
+  const verdict = await callGemini(env, prompt, SUPPORT_SCHEMA, fetcher);
+  if (verdict?.headline_supported !== true) throw new Error("ai_headline_not_supported");
+  const supported = new Set(
+    (Array.isArray(verdict?.facts) ? verdict.facts : [])
+      .filter((row) => row?.supported === true && Number.isInteger(row.index))
+      .map((row) => row.index),
+  );
+  const keptFacts = checks.filter((row) => supported.has(row.index));
+  if (!keptFacts.length) throw new Error("ai_facts_not_supported");
+  return {
+    ...brief,
+    snippet_ar: keptFacts.map((row) => row.claim_ar).join("\n"),
+    evidence: JSON.stringify({
+      ...evidence,
+      facts: keptFacts.map((row) => row.source_quote),
+    }),
+  };
+}
+
 export async function summarizeWithGemini(env, item, mayor, fetcher = fetch) {
   if (!aiBriefEnabled(env)) throw new Error("ai_not_configured");
-  const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   const engine = aiBriefEngine(env);
   const sourceText = [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n");
   if (compact(sourceText).length < 80) throw new Error("article_text_too_short");
 
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 35000);
-  let response;
-  try {
-    response = await fetcher(GEMINI_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": env.GEMINI_API_KEY,
-        "Api-Revision": "2026-05-20",
-      },
-      body: JSON.stringify({
-        model,
-        store: false,
-        input: buildAiBriefPrompt(item, mayor),
-        response_format: {
-          type: "text",
-          mime_type: "application/json",
-          schema: OUTPUT_SCHEMA,
-        },
-      }),
-      signal: ctrl.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!response?.ok) throw new Error(`ai_http_${response?.status || "failed"}`);
+  const payload = await callGemini(
+    env,
+    buildAiBriefPrompt(item, mayor),
+    OUTPUT_SCHEMA,
+    fetcher,
+  );
+  const grounded = validateAiBrief(payload, sourceText, mayor, engine);
+  return verifySemanticSupport(env, grounded, fetcher);
+}
 
-  const data = await response.json();
-  const text = responseText(data);
-  if (!text) throw new Error("ai_empty_response");
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new Error("ai_invalid_json");
+function itemEvidenceText(item) {
+  return [item.title, item.snippet].filter(Boolean).join("\n");
+}
+
+function compatibleEventNumbers(items) {
+  const sets = items
+    .map((item) => new Set(String(item.title || "").match(/\b\d+\b/g) || []))
+    .filter((set) => set.size);
+  if (sets.length < 2) return true;
+  return [...sets[0]].some((number) => sets.every((set) => set.has(number)));
+}
+
+function closePublicationDates(items) {
+  const dates = items
+    .map((item) => Date.parse(item.published_at || ""))
+    .filter(Number.isFinite);
+  if (dates.length < 2) return true;
+  return Math.max(...dates) - Math.min(...dates) <= 3 * 86400000;
+}
+
+export async function clusterWithGemini(env, items, mayor, fetcher = fetch) {
+  if (!aiBriefEnabled(env) || items.length < 2) return null;
+  const inputItems = items.slice(0, 80).map((item) => ({
+    id: item.id,
+    platform: item.source,
+    domain: item.publisher_domain,
+    published_at: item.published_at,
+    title: compact(item.title, 500),
+    excerpt: compact(item.snippet, 900),
+  }));
+  const prompt = [
+    "أنت مسؤول دمج أحداث في مكتب رصد. اجمع فقط العناصر التي تصف الحدث الواقعي نفسه للعمدة نفسه، حتى لو اختلفت اللغة أو المنصة.",
+    `العمدة: ${mayor.name_ar} (${mayor.name_en}) — ${mayor.city_ar}.`,
+    "التشابه في الموضوع وحده لا يكفي. يجب تطابق الفعل والشيء أو المكان والزمن. خطتان للإسكان ليستا حدثًا واحدًا لمجرد أنهما إسكان.",
+    "إذا شككت فاترك العنصر بلا مجموعة. لا تضع العنصر في أكثر من مجموعة.",
+    "لكل عنصر داخل مجموعة أعد اقتباسًا حرفيًا متصلًا من عنوانه أو مقتطفه يثبت الحدث. لا تعِد صياغة الاقتباس.",
+    "العناصر:",
+    JSON.stringify(inputItems),
+  ].join("\n");
+  const payload = await callGemini(env, prompt, CLUSTER_SCHEMA, fetcher);
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const used = new Set();
+  const groups = [];
+
+  for (const candidate of Array.isArray(payload?.groups) ? payload.groups : []) {
+    const ids = [...new Set(candidate?.item_ids || [])].filter(
+      (id) => byId.has(id) && !used.has(id),
+    );
+    if (ids.length < 2) continue;
+    const members = ids.map((id) => byId.get(id));
+    if (!compatibleEventNumbers(members) || !closePublicationDates(members)) continue;
+    const quotes = new Map(
+      (Array.isArray(candidate.evidence) ? candidate.evidence : [])
+        .filter((row) => ids.includes(row?.item_id))
+        .map((row) => [row.item_id, row.quote]),
+    );
+    if (
+      ids.some(
+        (id) => !quotes.has(id) || !evidenceExists(itemEvidenceText(byId.get(id)), quotes.get(id)),
+      )
+    ) {
+      continue;
+    }
+    ids.forEach((id) => used.add(id));
+    groups.push({ members });
   }
-  return validateAiBrief(payload, sourceText, mayor, engine);
+  for (const item of items) {
+    if (!used.has(item.id)) groups.push({ members: [item] });
+  }
+  return groups;
 }

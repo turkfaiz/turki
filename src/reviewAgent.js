@@ -3,6 +3,7 @@ import { tokenOverlap } from "./dedup.js";
 import { isAboutMayor, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
+import { aiBriefEnabled, clusterWithGemini } from "./aiBrief.js";
 
 const MAX_SOURCE_TEXT = 80000;
 const MAX_MERGED_TEXT = 240000;
@@ -12,6 +13,9 @@ function clusterText(item) {
 }
 
 function betterItem(a, b) {
+  if ((a.status === "approved") !== (b.status === "approved")) {
+    return a.status === "approved" ? a : b;
+  }
   const tierA = a.publisher_tier == null ? 9 : Number(a.publisher_tier);
   const tierB = b.publisher_tier == null ? 9 : Number(b.publisher_tier);
   if (tierA !== tierB) return tierA < tierB ? a : b;
@@ -23,6 +27,17 @@ function betterItem(a, b) {
     : a;
 }
 
+function eventNumbers(text) {
+  return new Set(String(text || "").match(/\b\d+\b/g) || []);
+}
+
+function compatibleNumbers(a, b) {
+  const left = eventNumbers(a);
+  const right = eventNumbers(b);
+  if (!left.size || !right.size) return true;
+  return [...left].some((number) => right.has(number));
+}
+
 export function clusterInboxItems(items) {
   const groups = [];
   for (const item of items) {
@@ -32,16 +47,18 @@ export function clusterInboxItems(items) {
     const markers = eventMarkers(item.title, item.snippet || "");
     let group = groups.find((g) => {
       if (g.mayor_id !== item.mayor_id) return false;
+      if (item.url && g.urls.has(item.url)) return true;
       const overlap = tokenOverlap(g.seed, seed);
-      if (overlap >= 0.55) return true;
-      if (g.place && markers.place && g.place === markers.place && overlap >= 0.22) return true;
+      if (!compatibleNumbers(g.seed, seed)) return false;
+      if (overlap >= 0.68) return true;
+      if (g.place && markers.place && g.place === markers.place && overlap >= 0.55) return true;
       if (
         topic &&
         g.topic_id === topic.id &&
         g.action &&
         markers.action &&
         g.action === markers.action &&
-        overlap >= 0.42
+        overlap >= 0.58
       ) {
         return true;
       }
@@ -54,11 +71,13 @@ export function clusterInboxItems(items) {
         topic_id: topic?.id || null,
         action: markers.action || topic?.id || "",
         place: markers.place || "",
+        urls: new Set(item.url ? [item.url] : []),
         members: [],
       };
       groups.push(group);
     }
     group.members.push(item);
+    if (item.url) group.urls.add(item.url);
     if (!group.topic_id && topic) group.topic_id = topic.id;
     if (!group.place && markers.place) group.place = markers.place;
     if (!group.action && markers.action) group.action = markers.action;
@@ -109,7 +128,7 @@ function trustItem(item) {
  * 2) not about the selected mayor → غير متعلق بالعمدة المختار
  * 3) same event cluster → keep best publisher, rest تكرار لنفس الحدث
  */
-export function planInboxReview(items) {
+export function planInboxReview(items, groupsOverride = null) {
   const exclude = [];
   const trusted = [];
   const stamps = [];
@@ -129,7 +148,7 @@ export function planInboxReview(items) {
     trusted.push(judged.item);
   }
 
-  const groups = clusterInboxItems(trusted);
+  const groups = groupsOverride || clusterInboxItems(trusted);
   const kept = [];
   const merges = [];
   for (const group of groups) {
@@ -150,6 +169,7 @@ export function planInboxReview(items) {
     exclude,
     merges,
     stamps,
+    trusted,
     excluded: exclude.length,
     untrusted: exclude.filter((x) => x.reason === REASON.UNTRUSTED).length,
     unrelated: exclude.filter((x) => x.reason === REASON.UNRELATED).length,
@@ -259,7 +279,7 @@ async function applyMerges(env, merges) {
 }
 
 export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
-  const clauses = ["status = 'inbox'"];
+  const clauses = ["status IN ('inbox', 'approved')"];
   const binds = [];
   if (mayorId) {
     clauses.push("mayor_id = ?");
@@ -267,7 +287,7 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
   }
   binds.push(limit);
   const { results } = await env.DB.prepare(
-    `SELECT id, mayor_id, title, snippet, article_text, merged_sources, source_count,
+    `SELECT id, mayor_id, title, snippet, article_text, merged_sources, source_count, status,
             source, url, publisher_tier, publisher_domain, published_at, created_at
      FROM items WHERE ${clauses.join(" AND ")}
      ORDER BY COALESCE(published_at, created_at) DESC
@@ -276,7 +296,27 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
     .bind(...binds)
     .all();
 
-  const plan = planInboxReview(results || []);
+  let plan = planInboxReview(results || []);
+  if (aiBriefEnabled(env) && plan.trusted.length > 1) {
+    const byMayor = new Map();
+    for (const item of plan.trusted) {
+      if (!byMayor.has(item.mayor_id)) byMayor.set(item.mayor_id, []);
+      byMayor.get(item.mayor_id).push(item);
+    }
+    const groups = [];
+    for (const [id, items] of byMayor) {
+      if (items.length < 2) {
+        groups.push({ members: items });
+        continue;
+      }
+      try {
+        groups.push(...((await clusterWithGemini(env, items, mayorById(id))) || clusterInboxItems(items)));
+      } catch {
+        groups.push(...clusterInboxItems(items));
+      }
+    }
+    plan = planInboxReview(results || [], groups);
+  }
   await applyStamps(env, plan.stamps);
   await applyMerges(env, plan.merges);
   await applyExclusions(env, plan.exclude);

@@ -51,6 +51,13 @@ function displayTitle(it) {
   return it.news_title_ar || it.title || "—";
 }
 
+function briefBadge(item) {
+  const engine = String(item.trans_engine || "");
+  if (engine.startsWith("brief-ai-gemini:")) return "ملخص AI موثّق";
+  if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
+  return "بانتظار AI";
+}
+
 function factItems(snippet) {
   return String(snippet || "")
     .split(/\n+/)
@@ -201,7 +208,7 @@ function renderItems(items) {
           ${it.publisher_tier === 0 || it.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
           ${it.publisher_domain ? `<span class="badge">${escapeHtml(it.publisher_domain)}</span>` : ""}
           ${Number(it.source_count) > 1 ? `<span class="badge">${num(it.source_count)} مصادر مدمجة</span>` : ""}
-          ${String(it.trans_engine || "").startsWith("brief-ai-") ? `<span class="badge official">ملخص AI</span>` : ""}
+          <span class="badge ${String(it.trans_engine || "").startsWith("brief-ai-gemini:") ? "official" : ""}">${briefBadge(it)}</span>
           ${it.exclude_reason ? `<span class="badge">${escapeHtml(it.exclude_reason)}</span>` : ""}
           <span class="badge">${confidenceLabel(it.confidence)}</span>
           <span class="num">${fmtDate(it.published_at || it.created_at)}</span>
@@ -233,7 +240,7 @@ async function loadDetail(id) {
         ${item.publisher_tier === 0 || item.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
         ${item.publisher_domain ? `<span class="badge">${escapeHtml(item.publisher_domain)}</span>` : ""}
         ${sources.length > 1 ? `<span class="badge">${num(sources.length)} مصادر مدمجة</span>` : ""}
-        ${String(item.trans_engine || "").startsWith("brief-ai-") ? `<span class="badge official">AI قرأ نص الصفحة</span>` : `<span class="badge">ملخص احتياطي</span>`}
+        <span class="badge ${String(item.trans_engine || "").startsWith("brief-ai-gemini:") ? "official" : ""}">${briefBadge(item)}</span>
         <span class="badge">${confidenceLabel(item.confidence)}</span>
         <span class="badge">الرصد: ${escapeHtml(item.name_en)}</span>
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
