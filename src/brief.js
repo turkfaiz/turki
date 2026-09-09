@@ -55,7 +55,7 @@ export const TOPICS = [
   {
     id: "security",
     ar: "الأمن والسلامة العامة",
-    keys: ["police", "crime", "security", "emergenc", "emergenza", "طوارئ", "incendio"],
+    keys: ["police", "crime", "security", "emergenc", "emergenza", "طوارئ", "incendio", "clash", "clashes", "rally", "corteo", "protest", "scontri"],
   },
   {
     id: "health",

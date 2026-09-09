@@ -286,7 +286,7 @@ async function handleApi(request, env) {
 
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
-    const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 200 });
+    const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 500 });
     const translated = await translatePending(env, 80);
     return json({ ok: true, translated, ...result });
   }

@@ -48,6 +48,34 @@ test("trusted yonhap reaches inbox for seoul", () => {
   assert.equal(verdict.exclude_reason, null);
 });
 
+test("google wrapper with allowlisted outlet suffix is trusted", () => {
+  const turin = MAYORS.find((m) => m.id === "turin");
+  const verdict = classifyItem(
+    {
+      title: "Turin, clashes at the Askatasuna social centre rally - Il Sole 24 ORE",
+      url: "https://news.google.com/rss/articles/CBMiabc",
+      source: "google_news",
+    },
+    turin,
+  );
+  assert.equal(verdict.status, "inbox");
+  assert.equal(verdict.publisher_domain, "ilsole24ore.com");
+});
+
+test("turin local paper in the title suffix is trusted", () => {
+  const turin = MAYORS.find((m) => m.id === "turin");
+  const verdict = classifyItem(
+    {
+      title: 'Torino al buio, blackout a catena. Lo Russo: “È un’emergenza, rete vecchia” - Quotidiano Piemontese',
+      url: "https://news.google.com/rss/articles/CBMiblackout",
+      source: "google_news",
+    },
+    turin,
+  );
+  assert.equal(verdict.status, "inbox");
+  assert.equal(verdict.publisher_domain, "quotidianopiemontese.it");
+});
+
 test("unknown click-farm is excluded as untrusted", () => {
   const seoul = MAYORS.find((m) => m.id === "seoul");
   const verdict = classifyItem(

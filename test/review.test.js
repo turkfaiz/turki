@@ -79,6 +79,33 @@ test("unrelated trusted copy is excluded with the unified unrelated reason", () 
   assert.equal(plan.exclude[0].reason, REASON.UNRELATED);
 });
 
+test("google-wrapped allowlisted outlet is recovered from the title suffix", () => {
+  const plan = planInboxReview([
+    {
+      id: "sole",
+      mayor_id: "turin",
+      title: "Turin, clashes at the Askatasuna social centre rally - Il Sole 24 ORE",
+      snippet: "",
+      url: "https://news.google.com/rss/articles/CBMiabc",
+      source: "google_news",
+      publisher_tier: null,
+    },
+    {
+      id: "farm",
+      mayor_id: "turin",
+      title: "Stefano Lo Russo blackout clickbait - DailyViral24",
+      snippet: "",
+      url: "https://news.google.com/rss/articles/CBMifarm",
+      source: "google_news",
+      publisher_tier: null,
+    },
+  ]);
+  assert.equal(plan.kept, 1);
+  assert.equal(plan.untrusted, 1);
+  assert.ok(plan.exclude.every((x) => x.id !== "sole"));
+  assert.equal(plan.exclude.find((x) => x.id === "farm").reason, REASON.UNTRUSTED);
+});
+
 test("cluster groups near-duplicate headlines for the same mayor", () => {
   const groups = clusterInboxItems([
     { id: "1", mayor_id: "seoul", title: "Oh Se-hoon unveils housing plan in Seoul" },

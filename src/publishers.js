@@ -1,8 +1,9 @@
 import { MAYORS } from "./mayors.js";
-import { isAggregatorHost, resolvePublisherDomain } from "./domain.js";
+import { isAggregatorHost, publisherDomain, resolvePublisherDomain } from "./domain.js";
 import { isRelevant, pickConfidence } from "./dedup.js";
 import { relevanceTokens } from "./mayors.js";
 import { REASON } from "./reasons.js";
+import { splitHeadline } from "./text.js";
 
 export const UNTRUSTED_REASON = REASON.UNTRUSTED;
 export const UNRELATED_REASON = REASON.UNRELATED;
@@ -83,6 +84,8 @@ const BY_COUNTRY = {
     ["lastampa.it", "La Stampa"],
     ["rainews.it", "Rai News"],
     ["ilsole24ore.com", "Il Sole 24 Ore"],
+    ["torinotoday.it", "TorinoToday"],
+    ["quotidianopiemontese.it", "Quotidiano Piemontese"],
   ],
   JP: [
     ["nhk.or.jp", "NHK"],
@@ -166,9 +169,40 @@ export function matchPublisher(domain, mayor) {
   return hits[0];
 }
 
+function outletMatchesPublisher(outlet, pub) {
+  const hay = String(outlet || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!hay) return false;
+  const name = String(pub.name || "").toLowerCase();
+  if (hay === name) return true;
+  if (name.length >= 5 && hay.includes(name)) return true;
+  if (hay.length >= 5 && name.includes(hay)) return true;
+  return false;
+}
+
+export function inferPublisher(row, mayor) {
+  const domain = resolvePublisherDomain(row);
+  const matched = matchPublisher(domain, mayor);
+  if (matched) return matched;
+  const { outlet } = splitHeadline(row.title || "");
+  if (!outlet) return null;
+  const asHost = publisherDomain(/^https?:/i.test(outlet) ? outlet : `https://${outlet}`);
+  const byHost = matchPublisher(asHost, mayor);
+  if (byHost) return byHost;
+  const hits = PUBLISHERS.filter((p) => {
+    if (p.mayor_id && p.mayor_id !== mayor.id) return false;
+    if (p.country_code && p.country_code !== mayor.country_code) return false;
+    return outletMatchesPublisher(outlet, p);
+  });
+  hits.sort((a, b) => a.tier - b.tier || b.name.length - a.name.length);
+  return hits[0] || null;
+}
+
 export function classifyItem(row, mayor) {
   const domain = resolvePublisherDomain(row);
-  const pub = matchPublisher(domain, mayor);
+  const pub = inferPublisher(row, mayor);
   const tokens = relevanceTokens(mayor);
   const relevant = isRelevant(`${row.title || ""} ${row.snippet || ""}`, tokens);
 
