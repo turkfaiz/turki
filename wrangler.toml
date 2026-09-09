@@ -1,0 +1,31 @@
+name = "mayor-watch"
+main = "src/worker.js"
+compatibility_date = "2026-01-15"
+account_id = "3b610858141e23b8b21c10aaf2387b67"
+
+[vars]
+GEMINI_MODEL = "gemini-3.8-flash"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+# Sunday 06:00 Asia/Riyadh = Sunday 03:00 UTC
+[triggers]
+crons = ["0 3 * * 0"]
+
+[[queues.producers]]
+binding = "SCAN_QUEUE"
+queue = "mayor-watch-scans"
+
+[[queues.consumers]]
+queue = "mayor-watch-scans"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mayor-watch"
+database_id = "c14c54d4-1f5e-4353-8de0-65da24d7127d"

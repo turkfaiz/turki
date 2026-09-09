@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>نشرة الرصد الدولي — MayorWatch</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css?v=ai4" />
+  </head>
+  <body>
+    <div class="sheet">
+      <header class="mast">
+        <div class="mast-right">
+          <p class="gazette">نشرة الرصد الدولي</p>
+          <h1>مكتب متابعة عمداء المدن</h1>
+          <p class="sub">International Mayoral Briefing · Phase 1 · 12 selected offices</p>
+        </div>
+        <div class="platforms" aria-label="حالة المنصات">
+          <div class="platform">
+            <span class="led led-off" id="led-inoreader"></span>
+            <span>Inoreader</span>
+            <small id="src-inoreader">متوقف</small>
+          </div>
+          <div class="platform">
+            <span class="led led-on" id="led-google"></span>
+            <span>Google News</span>
+            <small id="src-google">يعمل</small>
+          </div>
+          <div class="platform">
+            <span class="led led-on" id="led-official"></span>
+            <span>Official</span>
+            <small id="src-official">يعمل</small>
+          </div>
+          <div class="platform">
+            <span class="led led-off" id="led-ai"></span>
+            <span>AI التلخيص</span>
+            <small id="src-ai">غير مربوط</small>
+          </div>
+        </div>
+        <div class="mast-stamp">
+          <span>الجدول</span>
+          <b class="num">Sunday 06:00</b>
+          <span>Asia/Riyadh</span>
+        </div>
+      </header>
+
+      <ol class="path" aria-label="مسار المكتب">
+        <li><b>1</b> اختر النطاق</li>
+        <li><b>2</b> ابحث</li>
+        <li class="sys"><b>3 النظام</b> تحقق · دمج · قراءة AI</li>
+        <li><b>4 قرارك</b> اعتماد أو استبعاد</li>
+      </ol>
+
+      <form id="search-form" class="command">
+        <input id="q" name="q" type="search" placeholder="موضوع إضافي اختياري — اتركه فارغًا للرصد المعتاد" />
+        <select id="mayor_id" name="mayor_id">
+          <option value="">كل المكاتب (12)</option>
+        </select>
+        <button type="submit" class="btn-search" id="search-btn">بحث</button>
+      </form>
+      <p class="rule-note">مسار واحد ثابت. ابحث في كل المكاتب أو اختر مكتبًا واحدًا. النظام يفتح الصفحات ويقرأ نصها، يدمج مصادر الحدث، ثم يكتب AI الزبدة قبل ظهور الوارد. الأحد 06:00 نفس المسار تلقائيًا.</p>
+
+      <section class="kpis">
+        <article><span>بانتظار القرار</span><b class="num" id="stat-inbox">0</b></article>
+        <article><span>المعتمد</span><b class="num" id="stat-approved">0</b></article>
+        <article><span>المستبعد</span><b class="num" id="stat-excluded">0</b></article>
+        <article><span>دُمج هذا الأسبوع</span><b class="num" id="stat-dup">0</b></article>
+      </section>
+
+      <section class="desk">
+        <div class="index">
+          <nav class="tabs" role="tablist">
+            <button type="button" class="tab on" data-status="inbox">بانتظار القرار</button>
+            <button type="button" class="tab" data-status="approved">المعتمد</button>
+            <button type="button" class="tab" data-status="excluded">المستبعد</button>
+          </nav>
+          <p class="index-meta">
+            <span id="desk-status">النطاق الحالي: كل المكاتب. الوارد يخرج نشرة جاهزة.</span>
+            <span>آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></span>
+          </p>
+          <div id="list" class="list">جاري التحميل…</div>
+        </div>
+        <aside class="brief" id="detail">
+          <p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>
+        </aside>
+      </section>
+    </div>
+    <script src="/app.js?v=ai4"></script>
+  </body>
+</html>

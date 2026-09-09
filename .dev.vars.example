@@ -1,0 +1,15 @@
+# انسخ هذا الملف إلى .dev.vars محليًا. لا ترسل المفاتيح في الشات.
+# Inoreader اختياري في المرحلة 1 — النظام يعمل على Google News بدون مفاتيح.
+
+INOREADER_APP_ID=
+INOREADER_APP_KEY=
+INOREADER_ACCESS_TOKEN=
+
+# يلزم لتفعيل قراءة الصفحة وتلخيصها بالذكاء الاصطناعي.
+# أنشئه من Google AI Studio، ثم ضعه في .dev.vars فقط.
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.8-flash
+
+# اختياري محليًا، وموصى به في الإنتاج لحماية الصفحة وكل العمليات.
+DASHBOARD_USER=mayorwatch
+DASHBOARD_PASSWORD=
