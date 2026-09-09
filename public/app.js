@@ -107,7 +107,7 @@ function selectedMayorId() {
 function syncSearchEnabled() {
   const btn = $("search-btn");
   if (!btn) return;
-  btn.disabled = state.busy || !selectedMayorId();
+  btn.disabled = state.busy;
 }
 
 function setDeskStatus(text) {
@@ -129,7 +129,7 @@ async function loadMayors() {
   const { mayors } = await api("/api/mayors");
   state.mayors = mayors;
   $("mayor_id").innerHTML =
-    `<option value="">اختر مكتب العمدة</option>` +
+    `<option value="">كل المكاتب (${mayors.length})</option>` +
     mayors.map((m) => `<option value="${m.id}">${m.name_ar} — ${m.city_ar}</option>`).join("");
   syncSearchEnabled();
 }
@@ -161,11 +161,6 @@ function itemsQuery() {
 }
 
 async function loadItems() {
-  if (!selectedMayorId()) {
-    state.items = [];
-    renderItems([]);
-    return;
-  }
   $("list").innerHTML = `<div class="empty">جاري التحميل…</div>`;
   const { items } = await api(itemsQuery());
   state.items = items;
@@ -174,10 +169,7 @@ async function loadItems() {
 
 function renderItems(items) {
   if (!items.length) {
-    const waitingMayor = !selectedMayorId();
-    $("list").innerHTML = waitingMayor
-      ? `<div class="empty">اختر مكتب العمدة ثم اضغط بحث. النظام يفتح المصدر ويدمج الحدث ويكتب النشرة قبل أن يظهر هنا.</div>`
-      : `<div class="empty">لا توجد بطاقات في هذا القسم.</div>`;
+    $("list").innerHTML = `<div class="empty">لا توجد بطاقات في هذا القسم. اضغط بحث لتشغيل المسار على النطاق الحالي.</div>`;
     return;
   }
   $("list").innerHTML = items
@@ -286,37 +278,83 @@ $("mayor_id").addEventListener("change", () => {
   syncSearchEnabled();
   state.selectedId = null;
   $("detail").innerHTML = `<p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>`;
-  loadItems();
+  const mayor = state.mayors.find((m) => m.id === selectedMayorId());
+  setDeskStatus(mayor ? `النطاق الحالي: ${mayor.name_ar} — ${mayor.city_ar}.` : "النطاق الحالي: كل المكاتب.");
+  refreshAll();
 });
+
+function addScanTotals(total, result) {
+  for (const key of [
+    "found",
+    "held",
+    "skippedStale",
+    "skippedUnverified",
+    "skippedUnrelated",
+    "skippedUntrusted",
+  ]) {
+    total[key] += Number(result[key]) || 0;
+  }
+  total.review.duplicates += Number(result.review?.duplicates) || 0;
+}
+
+async function runDeskSearch(query, mayorId) {
+  if (mayorId) {
+    return api("/api/search", {
+      method: "POST",
+      body: JSON.stringify({ q: query, mayor_id: mayorId }),
+    });
+  }
+
+  const total = {
+    found: 0,
+    held: 0,
+    skippedStale: 0,
+    skippedUnverified: 0,
+    skippedUnrelated: 0,
+    skippedUntrusted: 0,
+    review: { duplicates: 0 },
+    failedOffices: [],
+  };
+  for (let i = 0; i < state.mayors.length; i += 1) {
+    const mayor = state.mayors[i];
+    setDeskStatus(`بحث كل المكاتب: ${i + 1}/${state.mayors.length} — ${mayor.name_ar}…`);
+    try {
+      const result = await api("/api/search", {
+        method: "POST",
+        body: JSON.stringify({ q: query, mayor_id: mayor.id }),
+      });
+      addScanTotals(total, result);
+    } catch {
+      total.failedOffices.push(mayor.name_ar);
+    }
+  }
+  if (total.failedOffices.length === state.mayors.length) {
+    throw new Error("تعذر رصد جميع المكاتب.");
+  }
+  return total;
+}
 
 $("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (state.busy) return;
   const mayorId = selectedMayorId();
-  if (!mayorId) {
-    setDeskStatus("اختر مكتب العمدة أولًا. البحث لمكتب واحد.");
-    return;
-  }
   state.busy = true;
   syncSearchEnabled();
   const btn = $("search-btn");
   btn.textContent = "جارٍ المسار…";
-  setDeskStatus("النظام يفتح المصدر ويدمج الحدث ويكتب النشرة…");
+  setDeskStatus(mayorId ? "النظام يفتح المصدر ويدمج الحدث ويكتب النشرة…" : "بدء البحث في كل المكاتب…");
   try {
-    const result = await api("/api/search", {
-      method: "POST",
-      body: JSON.stringify({
-        q: $("q").value.trim(),
-        mayor_id: mayorId,
-      }),
-    });
+    const result = await runDeskSearch($("q").value.trim(), mayorId);
     state.status = "inbox";
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
     state.selectedId = null;
     await refreshAll();
     const ready = (state.items || []).length;
+    const failed = result.failedOffices?.length
+      ? ` · تعذر ${num(result.failedOffices.length)} مكتب`
+      : "";
     setDeskStatus(
-      `اكتمل المسار. جديد ${num(result.found)} · كان موجودًا ${num(result.held)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}.`,
+      `اكتمل المسار. جديد ${num(result.found)} · كان موجودًا ${num(result.held)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);
@@ -325,7 +363,7 @@ $("search-form").addEventListener("submit", async (e) => {
     }
   } catch (err) {
     $("detail").innerHTML = `<p class="error">تعذر إكمال المسار: ${escapeHtml(err.message)}</p>`;
-    setDeskStatus("تعذر إكمال المسار. أعد المحاولة على المكتب نفسه.");
+    setDeskStatus("تعذر إكمال المسار. أعد المحاولة على النطاق نفسه.");
   } finally {
     state.busy = false;
     btn.textContent = "بحث";
