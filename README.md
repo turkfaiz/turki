@@ -60,4 +60,4 @@ npx wrangler queues create mayor-watch-scans
 
 ## الجدول
 
-Cron على Cloudflare: `0 3 * * 0` = الأحد 03:00 UTC = الأحد 06:00 في الرياض.
+Cron على Cloudflare: `0 3 * * SUN` = الأحد 03:00 UTC = الأحد 06:00 في الرياض.

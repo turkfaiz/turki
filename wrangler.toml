@@ -13,7 +13,7 @@ run_worker_first = true
 
 # Sunday 06:00 Asia/Riyadh = Sunday 03:00 UTC
 [triggers]
-crons = ["0 3 * * 0"]
+crons = ["0 3 * * SUN"]
 
 [[queues.producers]]
 binding = "SCAN_QUEUE"
