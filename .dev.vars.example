@@ -1,0 +1,6 @@
+# انسخ هذا الملف إلى .dev.vars محليًا. لا ترسل المفاتيح في الشات.
+# Inoreader اختياري في المرحلة 1 — النظام يعمل على Google News بدون مفاتيح.
+
+INOREADER_APP_ID=
+INOREADER_APP_KEY=
+INOREADER_ACCESS_TOKEN=

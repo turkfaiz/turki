@@ -1,0 +1,17 @@
+name = "mayor-watch"
+main = "src/worker.js"
+compatibility_date = "2026-01-15"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+# Sunday 06:00 Asia/Riyadh = Sunday 03:00 UTC
+[triggers]
+crons = ["0 3 * * 0"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mayor-watch"
+database_id = "local-mayor-watch"

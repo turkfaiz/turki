@@ -1,0 +1,14 @@
+{
+  "name": "mayor-watch",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "test": "node --test test/*.test.js",
+    "db:init": "wrangler d1 execute mayor-watch --local --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.37.1"
+  }
+}
