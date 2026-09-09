@@ -51,6 +51,7 @@ const SCHEMA_STATEMENTS = [
     status TEXT NOT NULL DEFAULT 'inbox',
     exclude_reason TEXT,
     fingerprint TEXT NOT NULL,
+    trans_engine TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -105,12 +106,15 @@ async function migrateItems(env) {
   if (!names.has("snippet_ar")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN snippet_ar TEXT`).run();
   }
+  if (!names.has("trans_engine")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN trans_engine TEXT`).run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
   items.title_ar AS news_title_ar, items.snippet, items.snippet_ar AS news_snippet_ar,
   items.title_normalized, items.url, items.published_at, items.language, items.confidence,
-  items.status, items.exclude_reason, items.fingerprint, items.created_at,
+  items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
@@ -238,7 +242,7 @@ async function handleApi(request, env) {
   }
 
   if (path === "/api/translate" && method === "POST") {
-    const n = await translatePending(env, 40);
+    const n = await translatePending(env, 10);
     return json({ ok: true, translated: n });
   }
 

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildSearchQueries, MAYORS } from "../src/mayors.js";
 import { parseRssItems } from "../src/rss.js";
-import { arabicRatio } from "../src/translate.js";
+import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
 
 test("phase-1 list has 12 mayors", () => {
@@ -56,4 +56,10 @@ test("overlap detects near-duplicate titles", () => {
 test("arabic ratio detects native arabic text", () => {
   assert.ok(arabicRatio("يوسف الشواربة يعتمد ميزانية عمان") > 0.5);
   assert.ok(arabicRatio("Oh Se-hoon housing plan") < 0.1);
+});
+
+test("splitHeadline pulls outlet off a wire title", () => {
+  const s = splitHeadline("Oh Se-hoon announces plan - Korea Herald");
+  assert.equal(s.headline, "Oh Se-hoon announces plan");
+  assert.equal(s.outlet, "Korea Herald");
 });

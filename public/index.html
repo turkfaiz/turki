@@ -3,85 +3,76 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MayorWatch — محرك رصد العمداء</title>
+    <title>نشرة الرصد الدولي — MayorWatch</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header class="mast">
-      <div class="brand">
-        <span class="mark">MW</span>
-        <div>
-          <strong>MayorWatch</strong>
-          <span>محرك رصد دولي · 12 عمدة</span>
+    <div class="sheet">
+      <header class="mast">
+        <div class="mast-right">
+          <p class="gazette">نشرة الرصد الدولي</p>
+          <h1>مكتب متابعة عمداء المدن</h1>
+          <p class="sub">International Mayoral Briefing · Phase 1 · 12 selected offices</p>
         </div>
-      </div>
-      <div class="platforms" id="platforms" aria-label="حالة المنصات">
-        <div class="platform" data-source="inoreader">
-          <span class="led led-off" id="led-inoreader"></span>
-          <div>
-            <b>Inoreader</b>
+        <div class="platforms" aria-label="حالة المنصات">
+          <div class="platform">
+            <span class="led led-off" id="led-inoreader"></span>
+            <span>Inoreader</span>
             <small id="src-inoreader">متوقف</small>
           </div>
-        </div>
-        <div class="platform" data-source="google_news">
-          <span class="led led-on" id="led-google"></span>
-          <div>
-            <b>Google News</b>
+          <div class="platform">
+            <span class="led led-on" id="led-google"></span>
+            <span>Google News</span>
             <small id="src-google">يعمل</small>
           </div>
-        </div>
-        <div class="platform" data-source="official">
-          <span class="led led-on" id="led-official"></span>
-          <div>
-            <b>Official</b>
+          <div class="platform">
+            <span class="led led-on" id="led-official"></span>
+            <span>Official</span>
             <small id="src-official">يعمل</small>
           </div>
         </div>
-      </div>
-      <div class="mast-meta">
-        <span>Cron</span>
-        <b class="num" id="next-cron">Sunday 06:00 Riyadh</b>
-      </div>
-    </header>
+        <div class="mast-stamp">
+          <span>الجدول</span>
+          <b class="num">Sunday 06:00</b>
+          <span>Asia/Riyadh</span>
+        </div>
+      </header>
 
-    <section class="hero">
-      <form id="search-form" class="searchbar">
-        <label class="sr-only" for="q">شريط البحث</label>
-        <input id="q" name="q" type="search" placeholder="ابحث في أخبار العمداء... موضوع اختياري أو اتركه فارغًا" />
+      <form id="search-form" class="command">
+        <input id="q" name="q" type="search" placeholder="موضوع إضافي اختياري — اتركه فارغًا لرصد العمدة بمفاتيحه" />
         <select id="mayor_id" name="mayor_id">
           <option value="">كل العمداء</option>
         </select>
         <button type="submit" class="btn-search" id="search-btn">بحث</button>
       </form>
-      <p class="hint">البحث اليدوي يعمل فقط بعد ضغط الزر · الرصد التلقائي الأحد 06:00 بتوقيت الرياض</p>
-    </section>
+      <p class="rule-note">البحث اليدوي لا يعمل إلا بعد ضغط الزر. النشرة المجدولة تصدر الأحد 06:00.</p>
 
-    <section class="kpis">
-      <article><span>وارد</span><b class="num" id="stat-inbox">0</b></article>
-      <article><span>معتمد</span><b class="num" id="stat-approved">0</b></article>
-      <article><span>مستبعد</span><b class="num" id="stat-excluded">0</b></article>
-      <article><span>تكرار ممنوع</span><b class="num" id="stat-dup">0</b></article>
-    </section>
+      <section class="kpis">
+        <article><span>الوارد</span><b class="num" id="stat-inbox">0</b></article>
+        <article><span>المعتمد</span><b class="num" id="stat-approved">0</b></article>
+        <article><span>المستبعد</span><b class="num" id="stat-excluded">0</b></article>
+        <article><span>تكرار ممنوع</span><b class="num" id="stat-dup">0</b></article>
+      </section>
 
-    <section class="desk">
-      <div class="serp">
-        <nav class="tabs" role="tablist">
-          <button type="button" class="tab on" data-status="inbox">الوارد</button>
-          <button type="button" class="tab" data-status="approved">المعتمد</button>
-          <button type="button" class="tab" data-status="excluded">المستبعد</button>
-        </nav>
-        <p class="last-scan">آخر رصد أسبوعي: <b class="num" id="last-weekly">—</b></p>
-        <div id="list" class="list">جاري التحميل…</div>
-      </div>
-      <aside class="inspector" id="detail">
-        <p class="muted">اختر خبرًا لعرض الترجمة والتفاصيل.</p>
-      </aside>
-    </section>
-
+      <section class="desk">
+        <div class="index">
+          <nav class="tabs" role="tablist">
+            <button type="button" class="tab on" data-status="inbox">الوارد</button>
+            <button type="button" class="tab" data-status="approved">المعتمد</button>
+            <button type="button" class="tab" data-status="excluded">المستبعد</button>
+          </nav>
+          <p class="index-meta">آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></p>
+          <div id="list" class="list">جاري التحميل…</div>
+        </div>
+        <aside class="brief" id="detail">
+          <p class="placeholder">اختر خبرًا لعرض النشرة الرسمية ثم الأصل.</p>
+        </aside>
+      </section>
+    </div>
     <script src="/app.js"></script>
   </body>
 </html>

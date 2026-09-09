@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS items (
   status TEXT NOT NULL DEFAULT 'inbox',
   exclude_reason TEXT,
   fingerprint TEXT NOT NULL,
+  trans_engine TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

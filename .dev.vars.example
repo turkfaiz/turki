@@ -4,3 +4,6 @@
 INOREADER_APP_ID=
 INOREADER_APP_KEY=
 INOREADER_ACCESS_TOKEN=
+
+# اختياري — إن وُجد يُفضَّل على Yandex للترجمة الرسمية
+DEEPL_API_KEY=
