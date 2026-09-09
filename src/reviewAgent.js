@@ -5,9 +5,11 @@ import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
 import { aiBriefEnabled, clusterWithGemini } from "./aiBrief.js";
 import { isListingPageUrl } from "./article.js";
-
-const MAX_SOURCE_TEXT = 80000;
-const MAX_MERGED_TEXT = 240000;
+import {
+  mergeSourceDocuments,
+  renderSourceDocuments,
+  sourceMetadata,
+} from "./sourceDocuments.js";
 
 function clusterText(item) {
   return canonicalOriginal(item.title, item.snippet || "").headline;
@@ -203,54 +205,16 @@ async function applyStamps(env, stamps) {
   }
 }
 
-function sourceRows(item) {
-  let rows = [];
-  try {
-    const parsed = JSON.parse(item.merged_sources || "[]");
-    if (Array.isArray(parsed)) rows = parsed;
-  } catch {
-    rows = [];
-  }
-  if (!rows.length) {
-    rows.push({
-      source: item.source,
-      domain: item.publisher_domain,
-      url: item.url,
-      title: item.title,
-      published_at: item.published_at,
-    });
-  }
-  return rows;
-}
-
 export function mergeRecord(group) {
   const winner = group.members.find((item) => item.id === group.winnerId);
-  const sources = [];
-  const sourceKeys = new Set();
-  const textSections = [];
-  const textKeys = new Set();
-
-  for (const item of group.members) {
-    for (const source of sourceRows(item)) {
-      const key = source.url || `${source.domain || ""}|${source.title || ""}`;
-      if (!key || sourceKeys.has(key)) continue;
-      sourceKeys.add(key);
-      sources.push(source);
-    }
-    const text = String(item.article_text || item.snippet || "").replace(/\s+/g, " ").trim();
-    const key = text.slice(0, 160).toLowerCase();
-    if (!text || textKeys.has(key)) continue;
-    textKeys.add(key);
-    textSections.push(
-      `[${item.publisher_domain || item.source || "source"}] ${item.title}\n${text.slice(0, MAX_SOURCE_TEXT)}`,
-    );
-  }
+  const documents = mergeSourceDocuments(group.members);
 
   return {
     id: winner.id,
-    articleText: textSections.join("\n\n").slice(0, MAX_MERGED_TEXT),
-    mergedSources: JSON.stringify(sources.slice(0, 20)),
-    sourceCount: sources.length || 1,
+    articleText: renderSourceDocuments(documents),
+    sourceDocuments: JSON.stringify(documents),
+    mergedSources: JSON.stringify(sourceMetadata(documents)),
+    sourceCount: documents.length || 1,
   };
 }
 
@@ -258,7 +222,7 @@ async function applyMerges(env, merges) {
   if (!merges.length) return;
   const stmt = env.DB.prepare(
     `UPDATE items
-     SET article_text = ?, merged_sources = ?, source_count = ?,
+     SET article_text = ?, source_documents = ?, merged_sources = ?, source_count = ?,
          confidence = CASE WHEN source = 'official' THEN confidence ELSE ? END,
          trans_engine = CASE WHEN source_count <> ? THEN 'brief-pending' ELSE trans_engine END,
          brief_evidence = CASE WHEN source_count <> ? THEN NULL ELSE brief_evidence END,
@@ -273,6 +237,7 @@ async function applyMerges(env, merges) {
       chunk.map((row) =>
         stmt.bind(
           row.articleText,
+          row.sourceDocuments,
           row.mergedSources,
           row.sourceCount,
           row.sourceCount > 1 ? "merged" : "raw",
@@ -296,7 +261,8 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
   }
   binds.push(limit);
   const { results } = await env.DB.prepare(
-    `SELECT id, mayor_id, title, snippet, article_text, merged_sources, source_count, status,
+    `SELECT id, mayor_id, title, snippet, article_text, source_documents,
+            merged_sources, source_count, status,
             source, url, publisher_tier, publisher_domain, published_at, created_at
      FROM items WHERE ${clauses.join(" AND ")}
      ORDER BY COALESCE(published_at, created_at) DESC

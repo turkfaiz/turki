@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { planInboxReview, clusterInboxItems, mergeRecord } from "../src/reviewAgent.js";
 import { REASON } from "../src/reasons.js";
+import { refreshSourceDocuments } from "../src/sourceDocuments.js";
 
 test("review agent drops leftover untrusted hosts before clustering", () => {
   const plan = planInboxReview([
@@ -207,4 +208,47 @@ test("an approved event remains the winner when a new platform copy arrives", ()
   ]);
   assert.equal(plan.merges[0].winnerId, "approved");
   assert.equal(plan.exclude.find((row) => row.id === "new-copy")?.reason, REASON.DUPLICATE);
+});
+
+test("unchanged rediscovery preserves all merged source bodies without resetting AI", () => {
+  const official = {
+    id: "official",
+    mayor_id: "turin",
+    title: "Lo Russo inaugura la nuova Via Roma pedonale",
+    snippet: "Stefano Lo Russo apre Via Roma sabato",
+    article_text: "Testo completo della pagina ufficiale sulla inaugurazione.",
+    source: "official",
+    url: "https://www.comune.torino.it/via-roma",
+    publisher_domain: "comune.torino.it",
+    publisher_tier: 0,
+  };
+  const paper = {
+    id: "paper",
+    mayor_id: "turin",
+    title: "Nuova Via Roma pedonale, inaugurazione con Lo Russo",
+    snippet: "Stefano Lo Russo inaugura Via Roma sabato",
+    article_text: "Testo completo del giornale con dettagli diversi.",
+    source: "google_news",
+    url: "https://www.lastampa.it/via-roma",
+    publisher_domain: "lastampa.it",
+    publisher_tier: 1,
+  };
+  const merged = mergeRecord({ winnerId: "official", members: [official, paper] });
+  const refreshed = refreshSourceDocuments(
+    {
+      ...official,
+      article_text: merged.articleText,
+      source_documents: merged.sourceDocuments,
+      merged_sources: merged.mergedSources,
+    },
+    {
+      ...official,
+      page_body: official.article_text,
+    },
+    "comune.torino.it",
+  );
+  assert.equal(refreshed.changed, false);
+  assert.equal(refreshed.documents.length, 2);
+  assert.match(refreshed.articleText, /pagina ufficiale/);
+  assert.match(refreshed.articleText, /giornale/);
 });

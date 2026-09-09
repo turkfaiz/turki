@@ -58,6 +58,7 @@ const SCHEMA_STATEMENTS = [
     publisher_domain TEXT,
     publisher_tier INTEGER,
     article_text TEXT,
+    source_documents TEXT,
     merged_sources TEXT,
     source_count INTEGER DEFAULT 1,
     brief_evidence TEXT,
@@ -86,7 +87,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
-const BOOTSTRAP_VERSION = "bootstrap-v4";
+const BOOTSTRAP_VERSION = "bootstrap-v5";
 
 async function upsertRows(env, prefix, rows, width, chunkSize) {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -176,6 +177,9 @@ async function migrateItems(env) {
   }
   if (!names.has("article_text")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN article_text TEXT`).run();
+  }
+  if (!names.has("source_documents")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN source_documents TEXT`).run();
   }
   if (!names.has("merged_sources")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN merged_sources TEXT`).run();

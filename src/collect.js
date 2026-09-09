@@ -3,8 +3,14 @@ import { bingNewsRssUrl, decodeXml, googleNewsRssUrl, parseRssItems } from "./rs
 import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
 import { isWithinWeek, toIso } from "./time.js";
-import { mapLimit, MAX_ARTICLE_CHARS, verifyCandidate } from "./article.js";
+import { mapLimit, verifyCandidate } from "./article.js";
 import { pendingAiBrief } from "./aiBrief.js";
+import {
+  refreshSourceDocuments,
+  renderSourceDocuments,
+  sourceDocument,
+  sourceMetadata,
+} from "./sourceDocuments.js";
 
 const FETCH_HEADERS = {
   "User-Agent": "MayorWatch/0.2 (municipal briefing desk)",
@@ -372,30 +378,36 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
         continue;
       }
       seen.add(fp);
-      const existing = await env.DB.prepare(`SELECT id, source, status FROM items WHERE fingerprint = ?`)
+      const existing = await env.DB.prepare(
+        `SELECT id, source, status, title, snippet, url, published_at, publisher_domain,
+                article_text, merged_sources, source_documents
+         FROM items WHERE fingerprint = ?`,
+      )
         .bind(fp)
         .first();
       if (existing) {
         held += 1;
         const source =
           row.source === "official" || existing.source === "official" ? "official" : existing.source;
-        const articleText = (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS);
+        const refreshed = refreshSourceDocuments(existing, row, verdict.publisher_domain);
+        const changed = refreshed.changed ? 1 : 0;
         await env.DB.prepare(
           `UPDATE items
            SET source = ?, title = ?, title_normalized = ?, url = ?, published_at = ?,
                snippet = ?, language = ?, confidence = ?, publisher_domain = ?,
-               publisher_tier = ?, article_text = ?,
+               publisher_tier = ?, article_text = ?, source_documents = ?,
+               merged_sources = ?, source_count = ?,
                trans_engine = CASE
-                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                 WHEN status IN ('inbox', 'approved') AND ? = 1
                    THEN 'brief-pending' ELSE trans_engine END,
                brief_evidence = CASE
-                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                 WHEN status IN ('inbox', 'approved') AND ? = 1
                    THEN NULL ELSE brief_evidence END,
                brief_error = CASE
-                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                 WHEN status IN ('inbox', 'approved') AND ? = 1
                    THEN NULL ELSE brief_error END,
                brief_attempted_at = CASE
-                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                 WHEN status IN ('inbox', 'approved') AND ? = 1
                    THEN NULL ELSE brief_attempted_at END
            WHERE id = ?`,
         )
@@ -410,11 +422,14 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             source === "official" ? "official" : verdict.confidence,
             verdict.publisher_domain,
             verdict.publisher_tier,
-            articleText,
-            articleText,
-            articleText,
-            articleText,
-            articleText,
+            refreshed.articleText,
+            JSON.stringify(refreshed.documents),
+            JSON.stringify(refreshed.metadata),
+            refreshed.documents.length,
+            changed,
+            changed,
+            changed,
+            changed,
             existing.id,
           )
           .run();
@@ -422,15 +437,21 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
       }
 
       const brief = stampBrief(mayor, row, verdict.status);
+      const initialDocuments = [
+        sourceDocument(
+          { ...row, published_at: toIso(row.published_at) },
+          verdict.publisher_domain,
+        ),
+      ];
       const id = crypto.randomUUID();
       try {
         await env.DB.prepare(
           `INSERT INTO items (
             id, mayor_id, scan_id, source, title, title_normalized, url, published_at,
             snippet, language, confidence, status, exclude_reason, fingerprint,
-            publisher_domain, publisher_tier, article_text, merged_sources, source_count,
-            title_ar, snippet_ar, trans_engine
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            publisher_domain, publisher_tier, article_text, source_documents,
+            merged_sources, source_count, title_ar, snippet_ar, trans_engine
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             id,
@@ -449,16 +470,9 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             fp,
             verdict.publisher_domain,
             verdict.publisher_tier,
-            (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS),
-            JSON.stringify([
-              {
-                source: row.source,
-                domain: verdict.publisher_domain,
-                url: row.url,
-                title: row.title,
-                published_at: toIso(row.published_at),
-              },
-            ]),
+            renderSourceDocuments(initialDocuments),
+            JSON.stringify(initialDocuments),
+            JSON.stringify(sourceMetadata(initialDocuments)),
             1,
             brief.title_ar,
             brief.snippet_ar,
