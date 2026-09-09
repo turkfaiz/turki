@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractArticle, extractJinaMarkdown } from "../src/article.js";
+import { articleIsAboutMayor, extractArticle, extractJinaMarkdown } from "../src/article.js";
 import { isWithinWeek, parseDate, withWeekQuery } from "../src/time.js";
+import { MAYORS } from "../src/mayors.js";
 
 test("week window rejects 2023 and keeps yesterday", () => {
   const now = Date.parse("2026-09-09T12:00:00Z");
@@ -38,4 +39,30 @@ test("jina markdown extractor keeps the source url", () => {
   assert.equal(art.title, "Lo Russo on the grid");
   assert.equal(art.url, "https://www.lastampa.it/a");
   assert.ok(parseDate(art.published_at));
+});
+
+test("a redirected home page is not accepted from the RSS headline alone", () => {
+  const turin = MAYORS.find((mayor) => mayor.id === "turin");
+  assert.equal(
+    articleIsAboutMayor(
+      {
+        title: "Home | Città di Torino",
+        description: "Servizi e informazioni della città",
+        body: "Benvenuti nel sito istituzionale della città.",
+      },
+      turin,
+    ),
+    false,
+  );
+  assert.equal(
+    articleIsAboutMayor(
+      {
+        title: "Via Roma riapre ai pedoni",
+        description: "",
+        body: "Il sindaco Stefano Lo Russo presenta i lavori completati.",
+      },
+      turin,
+    ),
+    true,
+  );
 });

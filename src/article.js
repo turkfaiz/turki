@@ -236,6 +236,11 @@ export async function readArticle(startUrl) {
   }
 }
 
+export function articleIsAboutMayor(article, mayor) {
+  const pageText = `${article?.title || ""} ${article?.description || ""} ${article?.body || ""}`;
+  return isAboutMayor(pageText, mayor);
+}
+
 export async function verifyCandidate(row, mayor) {
   const rssDate = parseDate(row.published_at);
   if (rssDate && isWithinWeek(rssDate) === false) {
@@ -252,8 +257,7 @@ export async function verifyCandidate(row, mayor) {
   if (!pageDate && !rssDate) {
     return { ok: false, reason: "stale" };
   }
-  const blob = `${article.title} ${article.description} ${article.body} ${row.title || ""}`;
-  if (!isAboutMayor(blob, mayor)) {
+  if (!articleIsAboutMayor(article, mayor)) {
     return { ok: false, reason: "unrelated" };
   }
   return {

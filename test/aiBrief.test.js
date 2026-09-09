@@ -24,7 +24,11 @@ test("AI briefing is enabled only with a secret key", () => {
 });
 
 test("AI prompt contains the fetched page body, not only its headline", () => {
-  const prompt = buildAiBriefPrompt(article, turin);
+  const longArticle = {
+    ...article,
+    article_text: `${"contenuto completo ".repeat(900)} FINE-PAGINA-VERIFICATA`,
+  };
+  const prompt = buildAiBriefPrompt(longArticle, turin);
   assert.match(prompt, /FINE-PAGINA-VERIFICATA/);
   assert.match(prompt, /استخرج الزبدة من نص الصفحة/);
   assert.match(prompt, /اقتباسًا حرفيًا/);
