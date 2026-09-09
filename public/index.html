@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=brief2" />
   </head>
   <body>
     <div class="sheet">
@@ -48,6 +48,7 @@
           <option value="">كل العمداء</option>
         </select>
         <button type="submit" class="btn-search" id="search-btn">بحث</button>
+        <button type="button" class="btn-review" id="review-btn">مراجعة كاملة</button>
       </form>
       <p class="rule-note">البحث اليدوي لا يعمل إلا بعد ضغط الزر. المراجعة الكاملة تصفّي الوارد دفعة واحدة دون المواقع غير المعتمدة. الاستبعاد اليدوي سببه دائمًا: استبعاد يدوي. النشرة المجدولة تصدر الأحد 06:00.</p>
 
@@ -65,10 +66,7 @@
             <button type="button" class="tab" data-status="approved">المعتمد</button>
             <button type="button" class="tab" data-status="excluded">المستبعد</button>
           </nav>
-          <p class="index-meta">
-            آخر رصد أسبوعي <b class="num" id="last-weekly">—</b>
-            <button type="button" class="btn-review" id="review-btn">مراجعة كاملة</button>
-          </p>
+          <p class="index-meta">آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></p>
           <div id="list" class="list">جاري التحميل…</div>
         </div>
         <aside class="brief" id="detail">
@@ -76,6 +74,6 @@
         </aside>
       </section>
     </div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=brief2"></script>
   </body>
 </html>

@@ -7,6 +7,8 @@ export function arabicRatio(text) {
 export function decodeEntities(value) {
   return String(value || "")
     .replace(/&nbsp;/gi, " ")
+    .replace(/&#160;/gi, " ")
+    .replace(/&#x0*a0;/gi, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")

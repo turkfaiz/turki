@@ -47,19 +47,29 @@ function displayTitle(it) {
 }
 
 function needsRetranslate(it) {
-  return it.trans_engine !== "brief" && it.trans_engine !== "brief-llm";
+  return it.trans_engine !== "brief-v2" && it.trans_engine !== "brief-llm";
+}
+
+function originKey(value) {
+  return decodeEntities(value)
+    .replace(/\s*[-–—|]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function originDisplay(item) {
   const title = decodeEntities(item.title || "");
   const snippet = decodeEntities(item.snippet || "");
-  if (!snippet || snippet === title) return title;
+  if (!snippet) return title;
+  if (originKey(snippet) === originKey(title)) return title;
   if (title.includes(snippet) || snippet.includes(title)) {
     return title.length >= snippet.length ? title : snippet;
   }
-  const a = title.toLowerCase();
-  const b = snippet.toLowerCase();
-  if (a.startsWith(b.slice(0, Math.min(40, b.length))) || b.startsWith(a.slice(0, Math.min(40, a.length)))) {
+  const a = originKey(title);
+  const b = originKey(snippet);
+  if (!a || !b) return title;
+  if (a.startsWith(b.slice(0, Math.min(48, b.length))) || b.startsWith(a.slice(0, Math.min(48, a.length)))) {
     return title;
   }
   return title;
@@ -68,6 +78,8 @@ function originDisplay(item) {
 function decodeEntities(value) {
   return String(value ?? "")
     .replace(/&nbsp;/gi, " ")
+    .replace(/&#160;/gi, " ")
+    .replace(/&#x0*a0;/gi, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")

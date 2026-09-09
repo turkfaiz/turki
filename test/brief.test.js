@@ -17,7 +17,7 @@ test("official brief names the person and the actual subject, not machine-transl
   assert.match(brief.snippet_ar, /الشخص: ستيفانو لو روسو/);
   assert.match(brief.snippet_ar, /عمدة تورينو/);
   assert.equal(brief.original.extra, "");
-  assert.equal(brief.engine, "brief");
+  assert.equal(brief.engine, "brief-v2");
 });
 
 test("canonical original drops duplicated snippet", () => {

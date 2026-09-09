@@ -10,7 +10,7 @@ export async function translatePending(env, limit = 24) {
             mayors.title_ar, mayors.city_ar, mayors.city_en
      FROM items
      JOIN mayors ON mayors.id = items.mayor_id
-     WHERE items.trans_engine IS NULL OR items.trans_engine NOT IN ('brief', 'brief-llm')
+     WHERE items.trans_engine IS NULL OR items.trans_engine NOT IN ('brief-v2', 'brief-llm')
      ORDER BY COALESCE(items.published_at, items.created_at) DESC
      LIMIT ?`,
   )

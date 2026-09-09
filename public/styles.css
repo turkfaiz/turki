@@ -98,7 +98,7 @@ h1 {
 
 .command {
   display: grid;
-  grid-template-columns: 1fr 230px 120px;
+  grid-template-columns: 1fr 230px 100px 150px;
   gap: 0;
   margin: 0 24px;
   border: 1px solid var(--navy);
@@ -181,10 +181,12 @@ h1 {
 }
 .btn-review {
   font: inherit;
-  border: 1px solid var(--navy);
-  background: var(--navy);
+  border: 0;
+  border-inline-start: 1px solid var(--navy);
+  background: var(--wine);
   color: #f6f1e6;
-  padding: 6px 10px;
+  font-weight: 700;
+  padding: 12px 14px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -253,6 +255,7 @@ h1 {
   line-height: 1.9;
   color: #1b1b1b;
   margin: 12px 0 0;
+  white-space: pre-line;
 }
 .origin-block {
   margin-top: 22px;
@@ -271,6 +274,7 @@ h1 {
   color: #3f3f3f;
   line-height: 1.55;
   font-size: 13px;
+  white-space: pre-wrap;
 }
 .actions { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
 .actions button {

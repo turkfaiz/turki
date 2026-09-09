@@ -139,9 +139,9 @@ export function writeOfficialBrief(mayor, title, snippet) {
   if (!what) what = "متابعة خبر مرتبط بالمنصب";
   return {
     title_ar: `${mayor.name_ar}: ${what}`,
-    snippet_ar: `الشخص: ${mayor.name_ar}. المنصب: ${office}. المدينة: ${mayor.city_ar}. الموضوع: ${what}.`,
+    snippet_ar: `الشخص: ${mayor.name_ar}\nالمنصب: ${office}\nالمدينة: ${mayor.city_ar}\nالموضوع: ${what}.`,
     topic_id: topic?.id || "other",
     original,
-    engine: "brief",
+    engine: "brief-v2",
   };
 }
