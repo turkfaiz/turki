@@ -141,9 +141,11 @@ function applyPlatform(on, ledId, textId) {
 
 async function loadStats() {
   const s = await api("/api/stats");
-  $("stat-inbox").textContent = num(s.inbox);
-  $("stat-approved").textContent = num(s.approved);
-  $("stat-excluded").textContent = num(s.excluded);
+  const mayorId = selectedMayorId();
+  const row = mayorId ? (s.byMayor || []).find((m) => m.mayor_id === mayorId) : null;
+  $("stat-inbox").textContent = num(mayorId ? row?.inbox || 0 : s.inbox);
+  $("stat-approved").textContent = num(mayorId ? row?.approved || 0 : s.approved);
+  $("stat-excluded").textContent = num(mayorId ? row?.excluded || 0 : s.excluded);
   $("stat-dup").textContent = num(s.week?.duplicates);
   applyPlatform(s.sources.inoreader === "ready" || s.sources.inoreader?.on, "led-inoreader", "src-inoreader");
   applyPlatform(s.sources.google_news === "ready" || s.sources.google_news?.on !== false, "led-google", "src-google");

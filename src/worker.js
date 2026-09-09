@@ -208,6 +208,7 @@ async function stats(env) {
   const byMayor = await env.DB.prepare(
     `SELECT mayor_id, COUNT(*) AS total,
             SUM(CASE WHEN status = 'inbox' THEN 1 ELSE 0 END) AS inbox,
+            SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
             SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded
      FROM items GROUP BY mayor_id`,
   ).all();
