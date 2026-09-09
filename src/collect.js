@@ -156,7 +156,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     await env.DB.prepare(`UPDATE scans SET finished_at = ?, error_count = 1, notes = ? WHERE id = ?`)
       .bind(new Date().toISOString(), "mayor_not_found", scanId)
       .run();
-    return { scanId, found: 0, duplicates: 0, excluded: 0, skippedStale: 0, skippedUnverified: 0, held: 0, errors: ["mayor_not_found"] };
+    return { scanId, found: 0, duplicates: 0, excluded: 0, skippedStale: 0, skippedUnverified: 0, skippedUnrelated: 0, skippedUntrusted: 0, held: 0, errors: ["mayor_not_found"] };
   }
 
   let found = 0;
@@ -165,6 +165,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
   let skippedStale = 0;
   let skippedUnverified = 0;
   let skippedUnrelated = 0;
+  let skippedUntrusted = 0;
   let held = 0;
   const allErrors = [];
   const seen = new Set();
@@ -207,7 +208,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
 
     for (const result of verified) {
       if (result?.skip === "untrusted") {
-        excluded += 1;
+        skippedUntrusted += 1;
         continue;
       }
       if (!result?.ok) {
@@ -284,7 +285,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
       excluded,
       allErrors.length,
       allErrors.slice(0, 12).join(" | ") ||
-        `stale=${skippedStale};unverified=${skippedUnverified};unrelated=${skippedUnrelated};held=${held}`,
+        `stale=${skippedStale};unverified=${skippedUnverified};unrelated=${skippedUnrelated};untrusted=${skippedUntrusted};held=${held}`,
       scanId,
     )
     .run();
@@ -297,6 +298,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     skippedStale,
     skippedUnverified,
     skippedUnrelated,
+    skippedUntrusted,
     held,
     errors: allErrors,
   };

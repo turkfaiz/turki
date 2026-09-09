@@ -319,7 +319,7 @@ $("search-form").addEventListener("submit", async (e) => {
     state.status = "inbox";
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
     await refreshAll();
-    $("detail").innerHTML = `<p class="placeholder">انتهى البحث (آخر 7 أيام بعد فتح المصدر). جديد: <b class="num">${num(result.found)}</b> · موجود مسبقاً: <b class="num">${num(result.held)}</b> · خارج الأسبوع: <b class="num">${num(result.skippedStale)}</b> · لم يُتحقق: <b class="num">${num(result.skippedUnverified)}</b> · خارج المنصب: <b class="num">${num(result.skippedUnrelated)}</b> · مستبعد: <b class="num">${num(result.excluded)}</b></p>`;
+    $("detail").innerHTML = `<p class="placeholder">انتهى البحث (آخر 7 أيام بعد فتح المصدر). جديد: <b class="num">${num(result.found)}</b> · موجود مسبقاً: <b class="num">${num(result.held)}</b> · خارج الأسبوع: <b class="num">${num(result.skippedStale)}</b> · لم يُتحقق: <b class="num">${num(result.skippedUnverified)}</b> · خارج المنصب: <b class="num">${num(result.skippedUnrelated)}</b></p>`;
   } catch (err) {
     $("detail").innerHTML = `<p class="error">تعذر البحث: ${escapeHtml(err.message)}</p>`;
   } finally {
