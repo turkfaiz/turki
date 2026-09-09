@@ -86,6 +86,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
+const BOOTSTRAP_VERSION = "bootstrap-v4";
 
 async function upsertRows(env, prefix, rows, width, chunkSize) {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -99,6 +100,12 @@ async function upsertRows(env, prefix, rows, width, chunkSize) {
 
 async function ensureDb(env) {
   if (ready) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
+  const bootstrapped = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
+  if (bootstrapped?.v === BOOTSTRAP_VERSION) {
+    ready = true;
+    return;
+  }
   for (const sql of SCHEMA_STATEMENTS) {
     await env.DB.prepare(sql).run();
   }
@@ -143,6 +150,9 @@ async function ensureDb(env) {
     15,
   );
   await migrateItems(env);
+  await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
+    .bind(BOOTSTRAP_VERSION)
+    .run();
   ready = true;
 }
 
@@ -208,7 +218,7 @@ async function migrateItems(env) {
   if (current?.v !== epoch) {
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('data_epoch', ?)`).bind(epoch).run();
   }
-  const briefEpoch = "grounded-ai-v2";
+  const briefEpoch = "grounded-ai-v3";
   const currentBrief = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'brief_epoch'`).first();
   if (currentBrief?.v !== briefEpoch) {
     await env.DB.prepare(
@@ -218,7 +228,7 @@ async function migrateItems(env) {
            snippet_ar = '', trans_engine = 'brief-pending',
            brief_evidence = NULL, brief_error = NULL
        WHERE status IN ('inbox', 'approved')
-         AND IFNULL(trans_engine, '') NOT LIKE 'brief-ai-gemini:%'`,
+         AND IFNULL(trans_engine, '') NOT LIKE 'brief-ai-gemini-v2:%'`,
     ).run();
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('brief_epoch', ?)`)
       .bind(briefEpoch)
@@ -239,7 +249,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
 async function finishDesk(env, scanOpts) {
   const result = await runScan(env, scanOpts);
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
-  const summarized = await translatePending(env, 120, scanOpts.mayorId || null);
+  const summarized = await translatePending(env, 12, scanOpts.mayorId || null);
   return { ...result, review, summarized };
 }
 
@@ -280,7 +290,7 @@ function json(data, status = 200) {
 }
 
 export function authorized(request, env) {
-  if (!env.DASHBOARD_PASSWORD) return true;
+  if (!env.DASHBOARD_PASSWORD) return !env.GEMINI_API_KEY;
   const header = request.headers.get("Authorization") || "";
   if (!header.startsWith("Basic ")) return false;
   try {
@@ -436,7 +446,7 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 500 });
-    const translated = await translatePending(env, 120, body.mayor_id || null);
+    const translated = await translatePending(env, 12, body.mayor_id || null);
     return json({ ok: true, translated, ...result });
   }
 

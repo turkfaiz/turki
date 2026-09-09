@@ -53,7 +53,10 @@ npx wrangler queues create mayor-watch-scans
 
 عند ضبط `DASHBOARD_PASSWORD` يحمي Worker الصفحة وكل واجهات التعديل بمصادقة المتصفح
 الأساسية. اسم المستخدم الافتراضي `mayorwatch` ويمكن تغييره عبر `DASHBOARD_USER`.
-يمكن استخدام Cloudflare Access بدلًا منها في النشر المؤسسي.
+يمكن وضع Cloudflare Access أمامها كطبقة إضافية في النشر المؤسسي.
+
+حماية الصفحة إلزامية عند وجود `GEMINI_API_KEY`: إذا ضُبط مفتاح Gemini دون
+`DASHBOARD_PASSWORD` يرفض Worker طلبات الويب حتى لا تصبح التكلفة وقرارات الاعتماد عامة.
 
 ## الجدول
 

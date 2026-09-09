@@ -51,6 +51,7 @@ export function clusterInboxItems(items) {
       if (item.url && g.urls.has(item.url)) return true;
       const overlap = tokenOverlap(g.seed, seed);
       if (!compatibleNumbers(g.seed, seed)) return false;
+      if (topic && g.topic_id && topic.id !== g.topic_id) return false;
       if (overlap >= 0.68) return true;
       if (g.place && markers.place && g.place === markers.place && overlap >= 0.55) return true;
       if (
@@ -261,7 +262,8 @@ async function applyMerges(env, merges) {
          confidence = CASE WHEN source = 'official' THEN confidence ELSE ? END,
          trans_engine = CASE WHEN source_count <> ? THEN 'brief-pending' ELSE trans_engine END,
          brief_evidence = CASE WHEN source_count <> ? THEN NULL ELSE brief_evidence END,
-         brief_error = NULL
+         brief_error = CASE WHEN source_count <> ? THEN NULL ELSE brief_error END,
+         brief_attempted_at = CASE WHEN source_count <> ? THEN NULL ELSE brief_attempted_at END
      WHERE id = ?`,
   );
   const records = merges.map(mergeRecord);
@@ -274,6 +276,8 @@ async function applyMerges(env, merges) {
           row.mergedSources,
           row.sourceCount,
           row.sourceCount > 1 ? "merged" : "raw",
+          row.sourceCount,
+          row.sourceCount,
           row.sourceCount,
           row.sourceCount,
           row.id,

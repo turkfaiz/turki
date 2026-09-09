@@ -23,7 +23,7 @@ async function mapLimit(items, concurrency, fn) {
   return results;
 }
 
-export async function translatePending(env, limit = 100, mayorId = null) {
+export async function translatePending(env, limit = 12, mayorId = null) {
   const aiReady = aiBriefEnabled(env);
   if (!aiReady) return 0;
   const targetEngine = aiBriefEngine(env);
@@ -49,6 +49,7 @@ export async function translatePending(env, limit = 100, mayorId = null) {
      JOIN mayors ON mayors.id = items.mayor_id
      WHERE ${clauses.join(" AND ")}
      ORDER BY CASE WHEN items.brief_error IS NULL THEN 0 ELSE 1 END,
+              COALESCE(items.brief_attempted_at, '1970-01-01') ASC,
               COALESCE(items.published_at, items.created_at) DESC
      LIMIT ?`,
   )

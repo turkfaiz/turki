@@ -3,6 +3,7 @@ import { tokenOverlap } from "./dedup.js";
 import { identityTokens } from "./mayors.js";
 
 const DEFAULT_MODEL = "gemini-3.8-flash";
+const BRIEF_VERSION = "v2";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
 const OUTPUT_SCHEMA = {
@@ -108,12 +109,32 @@ const SUPPORT_SCHEMA = {
   required: ["headline_supported", "facts"],
 };
 
+const CLUSTER_SUPPORT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    groups: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          index: { type: "integer" },
+          same_event: { type: "boolean" },
+        },
+        required: ["index", "same_event"],
+      },
+    },
+  },
+  required: ["groups"],
+};
+
 export function aiBriefEnabled(env) {
   return Boolean(env?.GEMINI_API_KEY);
 }
 
 export function aiBriefEngine(env) {
-  return `brief-ai-gemini:${env?.GEMINI_MODEL || DEFAULT_MODEL}`;
+  return `brief-ai-gemini-${BRIEF_VERSION}:${env?.GEMINI_MODEL || DEFAULT_MODEL}`;
 }
 
 export function pendingAiBrief(mayor, failed = false) {
@@ -363,13 +384,10 @@ export async function clusterWithGemini(env, items, mayor, fetcher = fetch) {
   ].join("\n");
   const payload = await callGemini(env, prompt, CLUSTER_SCHEMA, fetcher);
   const byId = new Map(items.map((item) => [item.id, item]));
-  const used = new Set();
-  const groups = [];
+  const candidates = [];
 
   for (const candidate of Array.isArray(payload?.groups) ? payload.groups : []) {
-    const ids = [...new Set(candidate?.item_ids || [])].filter(
-      (id) => byId.has(id) && !used.has(id),
-    );
+    const ids = [...new Set(candidate?.item_ids || [])].filter((id) => byId.has(id));
     if (ids.length < 2) continue;
     const members = ids.map((id) => byId.get(id));
     if (!compatibleEventNumbers(members) || !closePublicationDates(members)) continue;
@@ -385,9 +403,46 @@ export async function clusterWithGemini(env, items, mayor, fetcher = fetch) {
     ) {
       continue;
     }
-    ids.forEach((id) => used.add(id));
-    groups.push({ members });
+    candidates.push({
+      event_ar: cleanArabic(candidate.event_ar, 160),
+      members,
+      evidence: ids.map((id) => ({ id, quote: quotes.get(id) })),
+    });
   }
+
+  let accepted = new Set();
+  if (candidates.length) {
+    const verification = await callGemini(
+      env,
+      [
+        "أنت مدقق دمج مستقل. قرر هل اقتباسات كل مجموعة تصف الحدث الواقعي نفسه فعلًا.",
+        "يجب أن يتطابق الفعل والشيء أو القرار أو المكان والزمن. الموضوع أو الشخص المشترك وحدهما لا يكفيان.",
+        "ارفض عند الشك، وعند اختلاف مشروعين أو قرارين أو مناسبتين حتى لو كان المجال واحدًا.",
+        JSON.stringify(
+          candidates.map((candidate, index) => ({
+            index,
+            proposed_event_ar: candidate.event_ar,
+            evidence: candidate.evidence,
+          })),
+        ),
+      ].join("\n"),
+      CLUSTER_SUPPORT_SCHEMA,
+      fetcher,
+    );
+    accepted = new Set(
+      (Array.isArray(verification?.groups) ? verification.groups : [])
+        .filter((row) => row?.same_event === true && Number.isInteger(row.index))
+        .map((row) => row.index),
+    );
+  }
+
+  const used = new Set();
+  const groups = [];
+  candidates.forEach((candidate, index) => {
+    if (!accepted.has(index) || candidate.members.some((item) => used.has(item.id))) return;
+    candidate.members.forEach((item) => used.add(item.id));
+    groups.push({ members: candidate.members });
+  });
   for (const item of items) {
     if (!used.has(item.id)) groups.push({ members: [item] });
   }

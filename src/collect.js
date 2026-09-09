@@ -86,9 +86,12 @@ async function collectOfficialSitemap(mayor) {
   }
 
   const pages = [];
+  let fetchedSitemaps = 0;
+  const failures = [];
   for (const sitemapUrl of [...sitemapUrls].slice(0, 3)) {
     try {
       const parsed = parseSitemap(await fetchText(sitemapUrl, 10000));
+      fetchedSitemaps += 1;
       if (!parsed.index) {
         pages.push(...parsed.rows);
         continue;
@@ -97,14 +100,18 @@ async function collectOfficialSitemap(mayor) {
       for (const child of children.slice(0, 4)) {
         try {
           const nested = parseSitemap(await fetchText(child.loc, 10000));
+          fetchedSitemaps += 1;
           if (!nested.index) pages.push(...nested.rows);
-        } catch {
-          /* try the next child sitemap */
+        } catch (error) {
+          failures.push(String(error.message || error));
         }
       }
-    } catch {
-      /* try the next declared sitemap */
+    } catch (error) {
+      failures.push(String(error.message || error));
     }
+  }
+  if (!fetchedSitemaps) {
+    throw new Error(`sitemap unavailable${failures[0] ? `: ${failures[0]}` : ""}`);
   }
 
   const seen = new Set();
@@ -118,11 +125,19 @@ async function collectOfficialSitemap(mayor) {
     })
     .slice(0, 30)
     .map((row) => ({
-      title: decodeURIComponent(new URL(row.loc).pathname)
-        .split("/")
-        .filter(Boolean)
-        .pop()
-        ?.replace(/[-_]+/g, " ") || mayor.name_en,
+      title: (() => {
+        try {
+          return (
+            decodeURIComponent(new URL(row.loc).pathname)
+              .split("/")
+              .filter(Boolean)
+              .pop()
+              ?.replace(/[-_]+/g, " ") || mayor.name_en
+          );
+        } catch {
+          return mayor.name_en;
+        }
+      })(),
       url: row.loc,
       published_at: row.lastmod,
       date_is_discovery: true,
@@ -364,14 +379,24 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
         held += 1;
         const source =
           row.source === "official" || existing.source === "official" ? "official" : existing.source;
+        const articleText = (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS);
         await env.DB.prepare(
           `UPDATE items
            SET source = ?, title = ?, title_normalized = ?, url = ?, published_at = ?,
                snippet = ?, language = ?, confidence = ?, publisher_domain = ?,
                publisher_tier = ?, article_text = ?,
-               trans_engine = CASE WHEN status = 'inbox' THEN 'brief-pending' ELSE trans_engine END,
-               brief_evidence = CASE WHEN status = 'inbox' THEN NULL ELSE brief_evidence END,
-               brief_error = CASE WHEN status = 'inbox' THEN NULL ELSE brief_error END
+               trans_engine = CASE
+                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                   THEN 'brief-pending' ELSE trans_engine END,
+               brief_evidence = CASE
+                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                   THEN NULL ELSE brief_evidence END,
+               brief_error = CASE
+                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                   THEN NULL ELSE brief_error END,
+               brief_attempted_at = CASE
+                 WHEN status IN ('inbox', 'approved') AND IFNULL(article_text, '') <> ?
+                   THEN NULL ELSE brief_attempted_at END
            WHERE id = ?`,
         )
           .bind(
@@ -385,7 +410,11 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             source === "official" ? "official" : verdict.confidence,
             verdict.publisher_domain,
             verdict.publisher_tier,
-            (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS),
+            articleText,
+            articleText,
+            articleText,
+            articleText,
+            articleText,
             existing.id,
           )
           .run();

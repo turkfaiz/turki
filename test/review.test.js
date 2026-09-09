@@ -168,6 +168,22 @@ test("similar policy headlines with conflicting numbers stay separate events", (
   assert.equal(groups.length, 2);
 });
 
+test("different policy topics stay separate despite shared mayor and plan wording", () => {
+  const groups = clusterInboxItems([
+    {
+      id: "housing",
+      mayor_id: "seoul",
+      title: "Oh Se-hoon unveils a housing plan for Seoul",
+    },
+    {
+      id: "budget",
+      mayor_id: "seoul",
+      title: "Oh Se-hoon unveils a budget plan for Seoul",
+    },
+  ]);
+  assert.equal(groups.length, 2);
+});
+
 test("an approved event remains the winner when a new platform copy arrives", () => {
   const plan = planInboxReview([
     {

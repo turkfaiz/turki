@@ -99,7 +99,7 @@ test("Gemini brief accepts only facts backed by exact page quotes", async () => 
     turin,
     fetcher,
   );
-  assert.equal(brief.engine, "brief-ai-gemini:gemini-test");
+  assert.equal(brief.engine, "brief-ai-gemini-v2:gemini-test");
   assert.match(brief.title_ar, /ستيفانو لو روسو/);
   assert.match(brief.snippet_ar, /12 سبتمبر/);
   assert.match(brief.evidence, /La festa è prevista/);
@@ -236,10 +236,12 @@ test("AI clustering can merge one event reported in different scripts", async ()
       snippet: "수요일 청년주택 문을 열었다.",
     },
   ];
+  let call = 0;
   const fetcher = async () => ({
     ok: true,
     status: 200,
     async json() {
+      call += 1;
       return {
         steps: [
           {
@@ -247,24 +249,30 @@ test("AI clustering can merge one event reported in different scripts", async ()
             content: [
               {
                 type: "text",
-                text: JSON.stringify({
-                  groups: [
-                    {
-                      item_ids: ["en", "ko"],
-                      event_ar: "افتتاح مشروع إسكان للشباب",
-                      evidence: [
-                        {
-                          item_id: "en",
-                          quote: "opens 120-home youth housing complex",
-                        },
-                        {
-                          item_id: "ko",
-                          quote: "서울 청년주택 120가구 개관",
-                        },
-                      ],
-                    },
-                  ],
-                }),
+                text: JSON.stringify(
+                  call === 1
+                    ? {
+                        groups: [
+                          {
+                            item_ids: ["en", "ko"],
+                            event_ar: "افتتاح مشروع إسكان للشباب",
+                            evidence: [
+                              {
+                                item_id: "en",
+                                quote: "opens 120-home youth housing complex",
+                              },
+                              {
+                                item_id: "ko",
+                                quote: "서울 청년주택 120가구 개관",
+                              },
+                            ],
+                          },
+                        ],
+                      }
+                    : {
+                        groups: [{ index: 0, same_event: true }],
+                      },
+                ),
               },
             ],
           },
@@ -283,4 +291,63 @@ test("AI clustering can merge one event reported in different scripts", async ()
     groups[0].members.map((item) => item.id).sort(),
     ["en", "ko"],
   );
+});
+
+test("AI clustering keeps cards separate when the independent merge check rejects", async () => {
+  const items = [
+    {
+      id: "housing-a",
+      mayor_id: "seoul",
+      source: "official",
+      published_at: "2026-09-09T09:00:00Z",
+      title: "Oh Se-hoon presents a youth housing project in eastern Seoul",
+      snippet: "",
+    },
+    {
+      id: "housing-b",
+      mayor_id: "seoul",
+      source: "google_news",
+      published_at: "2026-09-09T08:00:00Z",
+      title: "Oh Se-hoon presents a senior housing project in western Seoul",
+      snippet: "",
+    },
+  ];
+  let call = 0;
+  const fetcher = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      call += 1;
+      const payload =
+        call === 1
+          ? {
+              groups: [
+                {
+                  item_ids: ["housing-a", "housing-b"],
+                  event_ar: "مشروع إسكان",
+                  evidence: [
+                    { item_id: "housing-a", quote: "youth housing project" },
+                    { item_id: "housing-b", quote: "senior housing project" },
+                  ],
+                },
+              ],
+            }
+          : { groups: [{ index: 0, same_event: false }] };
+      return {
+        steps: [
+          {
+            type: "model_output",
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ],
+      };
+    },
+  });
+  const groups = await clusterWithGemini(
+    { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+    items,
+    seoul,
+    fetcher,
+  );
+  assert.equal(groups.length, 2);
 });
