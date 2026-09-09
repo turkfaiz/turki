@@ -34,6 +34,24 @@ function parsedDocuments(value) {
   }
 }
 
+function legacyBodies(articleText, metadata) {
+  const text = String(articleText || "");
+  const markers = metadata
+    .map((row, index) => {
+      const marker = `[${row.domain || row.source || "source"}] ${row.title || ""}\n`;
+      return { index, marker, start: text.indexOf(marker) };
+    })
+    .filter((row) => row.start >= 0)
+    .sort((a, b) => a.start - b.start);
+  const bodies = new Map();
+  markers.forEach((row, position) => {
+    const start = row.start + row.marker.length;
+    const end = markers[position + 1]?.start ?? text.length;
+    bodies.set(row.index, compact(text.slice(start, end), MAX_ARTICLE_CHARS));
+  });
+  return bodies;
+}
+
 export function readSourceDocuments(item) {
   const stored = parsedDocuments(item.source_documents)
     .map((row) => ({
@@ -49,14 +67,18 @@ export function readSourceDocuments(item) {
 
   const metadata = parsedDocuments(item.merged_sources);
   if (metadata.length) {
+    const bodies = legacyBodies(item.article_text, metadata);
     return metadata.slice(0, MAX_SOURCES).map((row, index) => ({
       source: row.source || item.source || "source",
       domain: row.domain || item.publisher_domain || null,
       url: row.url || "",
       title: compact(row.title || item.title, 500),
       published_at: row.published_at || item.published_at || null,
-      article_text:
-        index === 0 ? compact(item.article_text || item.snippet, MAX_ARTICLE_CHARS) : "",
+      article_text: bodies.size
+        ? bodies.get(index) || ""
+        : index === 0
+          ? compact(item.article_text || item.snippet, MAX_ARTICLE_CHARS)
+          : "",
     }));
   }
   return [sourceDocument(item)];

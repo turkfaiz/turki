@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { planInboxReview, clusterInboxItems, mergeRecord } from "../src/reviewAgent.js";
 import { REASON } from "../src/reasons.js";
-import { refreshSourceDocuments } from "../src/sourceDocuments.js";
+import { readSourceDocuments, refreshSourceDocuments } from "../src/sourceDocuments.js";
 
 test("review agent drops leftover untrusted hosts before clustering", () => {
   const plan = planInboxReview([
@@ -251,4 +251,35 @@ test("unchanged rediscovery preserves all merged source bodies without resetting
   assert.equal(refreshed.documents.length, 2);
   assert.match(refreshed.articleText, /pagina ufficiale/);
   assert.match(refreshed.articleText, /giornale/);
+});
+
+test("legacy merged text is backfilled into separate source documents", () => {
+  const legacy = {
+    id: "legacy",
+    source: "official",
+    publisher_domain: "comune.torino.it",
+    url: "https://www.comune.torino.it/via-roma",
+    title: "Titolo ufficiale",
+    merged_sources: JSON.stringify([
+      {
+        source: "official",
+        domain: "comune.torino.it",
+        url: "https://www.comune.torino.it/via-roma",
+        title: "Titolo ufficiale",
+      },
+      {
+        source: "google_news",
+        domain: "lastampa.it",
+        url: "https://www.lastampa.it/via-roma",
+        title: "Titolo giornale",
+      },
+    ]),
+    article_text:
+      "[comune.torino.it] Titolo ufficiale\nCorpo completo ufficiale.\n\n" +
+      "[lastampa.it] Titolo giornale\nCorpo completo del giornale.",
+  };
+  const documents = readSourceDocuments(legacy);
+  assert.equal(documents.length, 2);
+  assert.equal(documents[0].article_text, "Corpo completo ufficiale.");
+  assert.equal(documents[1].article_text, "Corpo completo del giornale.");
 });
