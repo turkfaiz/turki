@@ -4,7 +4,6 @@ const state = {
   items: [],
   selectedId: null,
   busy: false,
-  translating: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -43,7 +42,7 @@ function setLed(id, on) {
 }
 
 function displayTitle(it) {
-  return it.news_title_ar || "جارٍ إعداد النشرة الرسمية…";
+  return it.news_title_ar || it.title || "—";
 }
 
 function factItems(snippet) {
@@ -52,10 +51,6 @@ function factItems(snippet) {
     .flatMap((line) => line.split(/\s*[•📌·]\s*/))
     .map((s) => s.replace(/^[•📌·]\s*/, "").trim())
     .filter((s) => s.length >= 4);
-}
-
-function needsRetranslate(it) {
-  return it.trans_engine !== "brief-radar" && it.trans_engine !== "brief-llm";
 }
 
 function originKey(value) {
@@ -105,6 +100,21 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function selectedMayorId() {
+  return $("mayor_id")?.value || "";
+}
+
+function syncSearchEnabled() {
+  const btn = $("search-btn");
+  if (!btn) return;
+  btn.disabled = state.busy || !selectedMayorId();
+}
+
+function setDeskStatus(text) {
+  const el = $("desk-status");
+  if (el) el.textContent = text;
+}
+
 async function api(path, options) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -119,8 +129,9 @@ async function loadMayors() {
   const { mayors } = await api("/api/mayors");
   state.mayors = mayors;
   $("mayor_id").innerHTML =
-    `<option value="">كل العمداء</option>` +
+    `<option value="">اختر مكتب العمدة</option>` +
     mayors.map((m) => `<option value="${m.id}">${m.name_ar} — ${m.city_ar}</option>`).join("");
+  syncSearchEnabled();
 }
 
 function applyPlatform(on, ledId, textId) {
@@ -142,44 +153,29 @@ async function loadStats() {
 
 function itemsQuery() {
   const qs = new URLSearchParams({ status: state.status });
-  const mayorId = $("mayor_id")?.value;
+  const mayorId = selectedMayorId();
   if (mayorId) qs.set("mayor_id", mayorId);
   return `/api/items?${qs.toString()}`;
 }
 
 async function loadItems() {
+  if (!selectedMayorId()) {
+    state.items = [];
+    renderItems([]);
+    return;
+  }
   $("list").innerHTML = `<div class="empty">جاري التحميل…</div>`;
   const { items } = await api(itemsQuery());
   state.items = items;
   renderItems(items);
-  if (items.some(needsRetranslate) && !state.translating) {
-    state.translating = true;
-    (async () => {
-      try {
-        for (let i = 0; i < 8; i++) {
-          const r = await api("/api/translate", { method: "POST", body: "{}" });
-          const again = await api(itemsQuery());
-          state.items = again.items;
-          renderItems(again.items);
-          if (state.selectedId) {
-            try {
-              await loadDetail(state.selectedId);
-            } catch {
-              /* item may have moved during review */
-            }
-          }
-          if (!r.translated || !(again.items || []).some(needsRetranslate)) break;
-        }
-      } finally {
-        state.translating = false;
-      }
-    })();
-  }
 }
 
 function renderItems(items) {
   if (!items.length) {
-    $("list").innerHTML = `<div class="empty">لا توجد عناصر في هذا القسم.</div>`;
+    const waitingMayor = !selectedMayorId();
+    $("list").innerHTML = waitingMayor
+      ? `<div class="empty">اختر مكتب العمدة ثم اضغط بحث. النظام يفتح المصدر ويدمج الحدث ويكتب النشرة قبل أن يظهر هنا.</div>`
+      : `<div class="empty">لا توجد بطاقات في هذا القسم.</div>`;
     return;
   }
   $("list").innerHTML = items
@@ -203,7 +199,7 @@ function renderItems(items) {
 async function loadDetail(id) {
   state.selectedId = id;
   const { item } = await api(`/api/items/${id}`);
-  const ar = item.news_title_ar || "جارٍ إعداد النشرة الرسمية…";
+  const ar = item.news_title_ar || item.title || "—";
   const facts = factItems(item.news_snippet_ar);
   const excludeBox =
     item.status === "excluded"
@@ -211,7 +207,7 @@ async function loadDetail(id) {
       : "";
   $("detail").innerHTML = `
     <div class="brief-head">
-      <strong>نشرة رسمية</strong>
+      <strong>نشرة جاهزة للقرار</strong>
       <span>${escapeHtml(item.country_ar)} · ${escapeHtml(item.city_ar)}</span>
     </div>
     <div class="brief-body">
@@ -251,7 +247,7 @@ async function refreshAll() {
     try {
       await loadDetail(state.selectedId);
     } catch {
-      $("detail").innerHTML = `<p class="placeholder">اختر خبرًا لعرض النشرة الرسمية ثم الأصل.</p>`;
+      $("detail").innerHTML = `<p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>`;
     }
   }
 }
@@ -261,7 +257,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     state.status = tab.dataset.status;
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t === tab));
     state.selectedId = null;
-    $("detail").innerHTML = `<p class="placeholder">اختر خبرًا لعرض النشرة الرسمية ثم الأصل.</p>`;
+    $("detail").innerHTML = `<p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>`;
     await loadItems();
   });
 });
@@ -279,63 +275,59 @@ $("detail").addEventListener("click", async (e) => {
     method: "POST",
     body: JSON.stringify({ status }),
   });
+  state.selectedId = null;
   await refreshAll();
+  $("detail").innerHTML = `<p class="placeholder">تم تسجيل القرار. اختر البطاقة التالية.</p>`;
 });
 
 $("mayor_id").addEventListener("change", () => {
+  syncSearchEnabled();
+  state.selectedId = null;
+  $("detail").innerHTML = `<p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>`;
   loadItems();
-});
-
-$("review-btn").addEventListener("click", async () => {
-  if (state.busy) return;
-  state.busy = true;
-  const btn = $("review-btn");
-  btn.disabled = true;
-  btn.textContent = "جارٍ المراجعة…";
-  try {
-    const mayorId = $("mayor_id").value || null;
-    const result = await api("/api/review", {
-      method: "POST",
-      body: JSON.stringify({ mayor_id: mayorId }),
-    });
-    state.status = "inbox";
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
-    await refreshAll();
-    $("detail").innerHTML = `<p class="placeholder">المراجعة الكاملة: مجموعات <b class="num">${num(result.groups)}</b> · أُبقي <b class="num">${num(result.kept)}</b> · استُبعد <b class="num">${num(result.excluded)}</b> (غير معتمد ${num(result.untrusted)} · غير متعلق ${num(result.unrelated)} · تكرار ${num(result.duplicates)}). يمكن الاستعادة من المستبعد.</p>`;
-  } catch (err) {
-    $("detail").innerHTML = `<p class="error">تعذر المراجعة: ${escapeHtml(err.message)}</p>`;
-  } finally {
-    state.busy = false;
-    btn.disabled = false;
-    btn.textContent = "مراجعة كاملة";
-  }
 });
 
 $("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (state.busy) return;
+  const mayorId = selectedMayorId();
+  if (!mayorId) {
+    setDeskStatus("اختر مكتب العمدة أولًا. البحث لمكتب واحد.");
+    return;
+  }
   state.busy = true;
+  syncSearchEnabled();
   const btn = $("search-btn");
-  btn.disabled = true;
-  btn.textContent = "جارٍ البحث…";
+  btn.textContent = "جارٍ المسار…";
+  setDeskStatus("النظام يفتح المصدر ويدمج الحدث ويكتب النشرة…");
   try {
     const result = await api("/api/search", {
       method: "POST",
       body: JSON.stringify({
         q: $("q").value.trim(),
-        mayor_id: $("mayor_id").value || null,
+        mayor_id: mayorId,
       }),
     });
     state.status = "inbox";
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
+    state.selectedId = null;
     await refreshAll();
-    $("detail").innerHTML = `<p class="placeholder">انتهى البحث (آخر 7 أيام بعد فتح المصدر). جديد: <b class="num">${num(result.found)}</b> · موجود مسبقاً: <b class="num">${num(result.held)}</b> · دُمج نفس الحدث: <b class="num">${num(result.review?.duplicates || 0)}</b> · خارج الأسبوع: <b class="num">${num(result.skippedStale)}</b> · لم يُتحقق: <b class="num">${num(result.skippedUnverified)}</b> · خارج المنصب: <b class="num">${num(result.skippedUnrelated)}</b></p>`;
+    const ready = (state.items || []).length;
+    setDeskStatus(
+      `اكتمل المسار. جديد ${num(result.found)} · كان موجودًا ${num(result.held)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}.`,
+    );
+    if (state.items[0]) {
+      await loadDetail(state.items[0].id);
+    } else {
+      $("detail").innerHTML = `<p class="placeholder">اكتمل المسار ولم تُضف بطاقات جديدة هذا الأسبوع بعد التحقق.</p>`;
+    }
   } catch (err) {
-    $("detail").innerHTML = `<p class="error">تعذر البحث: ${escapeHtml(err.message)}</p>`;
+    $("detail").innerHTML = `<p class="error">تعذر إكمال المسار: ${escapeHtml(err.message)}</p>`;
+    setDeskStatus("تعذر إكمال المسار. أعد المحاولة على المكتب نفسه.");
   } finally {
     state.busy = false;
-    btn.disabled = false;
     btn.textContent = "بحث";
+    syncSearchEnabled();
   }
 });
 

@@ -98,7 +98,7 @@ h1 {
 
 .command {
   display: grid;
-  grid-template-columns: 1fr 230px 100px 150px;
+  grid-template-columns: 1fr 260px 120px;
   gap: 0;
   margin: 0 24px;
   border: 1px solid var(--navy);
@@ -119,12 +119,38 @@ h1 {
   font-weight: 700;
   cursor: pointer;
 }
-.btn-search:disabled { opacity: 0.6; cursor: wait; }
+.btn-search:disabled { opacity: 0.45; cursor: not-allowed; }
 .rule-note {
   margin: 8px 24px 0;
   color: var(--muted);
   font-size: 12px;
 }
+
+.path {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  margin: 16px 24px 12px;
+  padding: 0;
+  border: 1px solid var(--navy);
+  background: #fff;
+}
+.path li {
+  padding: 10px 12px;
+  border-inline-start: 1px solid var(--rule);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.path li:first-child { border-inline-start: 0; }
+.path b {
+  display: block;
+  color: var(--wine);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-bottom: 2px;
+}
+.path .sys { background: #f3ece0; }
 
 .kpis {
   display: grid;
@@ -318,6 +344,6 @@ h1 {
 .error { color: var(--bad); }
 
 @media (max-width: 960px) {
-  .mast, .command, .kpis, .desk { grid-template-columns: 1fr; }
+  .mast, .command, .kpis, .desk, .path { grid-template-columns: 1fr; }
   .platforms { flex-direction: row; flex-wrap: wrap; }
 }

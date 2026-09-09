@@ -176,11 +176,11 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
-async function finishDesk(env, scanOpts) {
+/** مسار المكتب الوحيد: جمع → تحقق → نشرة عند الإدخال → دمج الحدث. */
   const result = await runScan(env, scanOpts);
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
-  const translated = await translatePending(env, 80);
-  return { ...result, review, translated };
+  const leftover = await translatePending(env, 40);
+  return { ...result, review, leftover };
 }
 
 function json(data, status = 200) {
@@ -328,10 +328,14 @@ async function handleApi(request, env) {
 
   if (path === "/api/search" && method === "POST") {
     const body = await readBody(request);
+    const mayorId = body.mayor_id || null;
+    if (!mayorId) {
+      return json({ error: "mayor_required", message: "اختر مكتب عمدة ثم ابحث. المسار اليدوي لمكتب واحد." }, 400);
+    }
     const result = await finishDesk(env, {
       type: "manual",
       query: body.q || "",
-      mayorId: body.mayor_id || null,
+      mayorId,
     });
     return json({ ok: true, ...result });
   }

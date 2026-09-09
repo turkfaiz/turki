@@ -4,11 +4,24 @@ import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
 import { isWithinWeek, toIso } from "./time.js";
 import { mapLimit, verifyCandidate } from "./article.js";
+import { writeOfficialBrief } from "./brief.js";
 
 const FETCH_HEADERS = {
   "User-Agent": "MayorWatch/0.2 (municipal briefing desk)",
   Accept: "application/rss+xml, application/xml, text/xml, */*",
 };
+
+export function stampBrief(mayor, row, status) {
+  if (status !== "inbox") {
+    return { title_ar: null, snippet_ar: null, trans_engine: null };
+  }
+  const brief = writeOfficialBrief(mayor, row.title || "", row.snippet || "", row.page_body || "");
+  return {
+    title_ar: brief.title_ar,
+    snippet_ar: brief.snippet_ar,
+    trans_engine: brief.engine,
+  };
+}
 
 async function fetchText(url, timeoutMs = 12000) {
   const ctrl = new AbortController();
@@ -238,14 +251,15 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
       }
 
       const verdict = classifyItem(row, mayor);
+      const brief = stampBrief(mayor, row, verdict.status);
       const id = crypto.randomUUID();
       try {
         await env.DB.prepare(
           `INSERT INTO items (
             id, mayor_id, scan_id, source, title, title_normalized, url, published_at,
             snippet, language, confidence, status, exclude_reason, fingerprint,
-            publisher_domain, publisher_tier
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            publisher_domain, publisher_tier, title_ar, snippet_ar, trans_engine
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             id,
@@ -264,6 +278,9 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             fp,
             verdict.publisher_domain,
             verdict.publisher_tier,
+            brief.title_ar,
+            brief.snippet_ar,
+            brief.trans_engine,
           )
           .run();
         found += 1;

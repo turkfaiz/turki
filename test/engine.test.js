@@ -5,6 +5,7 @@ import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
 import { isAboutMayor } from "../src/mayors.js";
+import { stampBrief } from "../src/collect.js";
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
@@ -74,4 +75,20 @@ test("splitHeadline pulls outlet off a wire title", () => {
   const s = splitHeadline("Oh Se-hoon announces plan - Korea Herald");
   assert.equal(s.headline, "Oh Se-hoon announces plan");
   assert.equal(s.outlet, "Korea Herald");
+});
+
+test("inbox rows are briefed at insert so the desk never rewrites them later", () => {
+  const turin = MAYORS.find((m) => m.id === "turin");
+  const stamped = stampBrief(
+    turin,
+    {
+      title: "Inaugurazione della via pedonale di Via Roma. Sabato 12 settembre",
+      snippet: "Grande festa. Stefano Lo Russo.",
+    },
+    "inbox",
+  );
+  assert.equal(stamped.trans_engine, "brief-radar");
+  assert.match(stamped.title_ar, /فيا روما|افتتاح|يفتتح/);
+  const skipped = stampBrief(turin, { title: "x", snippet: "" }, "excluded");
+  assert.equal(skipped.trans_engine, null);
 });
