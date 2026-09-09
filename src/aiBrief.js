@@ -57,7 +57,7 @@ function compact(value, max = 8000) {
 }
 
 function evidenceKey(value) {
-  return compact(value, 70000)
+  return compact(value, 260000)
     .toLocaleLowerCase()
     .normalize("NFKC")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
@@ -93,7 +93,7 @@ function responseText(data) {
 export function buildAiBriefPrompt(item, mayor) {
   const source = compact(
     [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n"),
-    60000,
+    240000,
   );
   return [
     "أنت محرر نشرة رصد حكومية. استخرج الزبدة من نص الصفحة المرفق، لا من العنوان وحده.",

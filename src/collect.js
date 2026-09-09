@@ -3,7 +3,7 @@ import { bingNewsRssUrl, decodeXml, googleNewsRssUrl, parseRssItems } from "./rs
 import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
 import { isWithinWeek, toIso } from "./time.js";
-import { mapLimit, verifyCandidate } from "./article.js";
+import { mapLimit, MAX_ARTICLE_CHARS, verifyCandidate } from "./article.js";
 import { writeOfficialBrief } from "./brief.js";
 
 const FETCH_HEADERS = {
@@ -380,7 +380,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             source === "official" ? "official" : verdict.confidence,
             verdict.publisher_domain,
             verdict.publisher_tier,
-            (row.page_body || row.snippet || "").slice(0, 20000),
+            (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS),
             existing.id,
           )
           .run();
@@ -415,7 +415,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             fp,
             verdict.publisher_domain,
             verdict.publisher_tier,
-            (row.page_body || row.snippet || "").slice(0, 20000),
+            (row.page_body || row.snippet || "").slice(0, MAX_ARTICLE_CHARS),
             JSON.stringify([
               {
                 source: row.source,

@@ -4,6 +4,9 @@ import { isAboutMayor, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
 
+const MAX_SOURCE_TEXT = 80000;
+const MAX_MERGED_TEXT = 240000;
+
 function clusterText(item) {
   return canonicalOriginal(item.title, item.snippet || "").headline;
 }
@@ -213,13 +216,13 @@ export function mergeRecord(group) {
     if (!text || textKeys.has(key)) continue;
     textKeys.add(key);
     textSections.push(
-      `[${item.publisher_domain || item.source || "source"}] ${item.title}\n${text.slice(0, 20000)}`,
+      `[${item.publisher_domain || item.source || "source"}] ${item.title}\n${text.slice(0, MAX_SOURCE_TEXT)}`,
     );
   }
 
   return {
     id: winner.id,
-    articleText: textSections.join("\n\n").slice(0, 60000),
+    articleText: textSections.join("\n\n").slice(0, MAX_MERGED_TEXT),
     mergedSources: JSON.stringify(sources.slice(0, 20)),
     sourceCount: sources.length || 1,
   };

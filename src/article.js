@@ -6,6 +6,7 @@ import { isAboutMayor } from "./mayors.js";
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute";
+export const MAX_ARTICLE_CHARS = 80000;
 
 export function isGoogleNewsUrl(url) {
   try {
@@ -65,11 +66,11 @@ function bodyText(html) {
   const parts = [];
   const re = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
   let m;
-  while ((m = re.exec(cleaned)) && parts.join(" ").length < 22000) {
+  while ((m = re.exec(cleaned)) && parts.join(" ").length < MAX_ARTICLE_CHARS + 2000) {
     const text = decodeEntities(m[1]);
     if (text.length > 40) parts.push(text);
   }
-  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 20000);
+  return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, MAX_ARTICLE_CHARS);
 }
 
 export function extractArticle(html, url = "") {
@@ -99,7 +100,7 @@ export function extractArticle(html, url = "") {
     canonical = url;
   }
   const paragraphBody = bodyText(html);
-  const structuredBody = decodeEntities(news.articleBody || "").slice(0, 20000);
+  const structuredBody = decodeEntities(news.articleBody || "").slice(0, MAX_ARTICLE_CHARS);
   const body = structuredBody.length > paragraphBody.length ? structuredBody : paragraphBody;
   return {
     title: title.replace(/\s+/g, " ").trim(),
@@ -119,7 +120,7 @@ export function extractJinaMarkdown(md, fallbackUrl = "") {
   return {
     title: decodeEntities(title).trim(),
     description: body.slice(0, 400),
-    body: body.slice(0, 20000),
+    body: body.slice(0, MAX_ARTICLE_CHARS),
     published_at: toIso(published),
     url: source || fallbackUrl,
     domain: publisherDomain(source || fallbackUrl),

@@ -26,7 +26,7 @@ test("AI briefing is enabled only with a secret key", () => {
 test("AI prompt contains the fetched page body, not only its headline", () => {
   const longArticle = {
     ...article,
-    article_text: `${"contenuto completo ".repeat(900)} FINE-PAGINA-VERIFICATA`,
+    article_text: `${"contenuto completo ".repeat(3000)} FINE-PAGINA-VERIFICATA`,
   };
   const prompt = buildAiBriefPrompt(longArticle, turin);
   assert.match(prompt, /FINE-PAGINA-VERIFICATA/);
