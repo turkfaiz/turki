@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS items (
   exclude_reason TEXT,
   fingerprint TEXT NOT NULL,
   trans_engine TEXT,
+  publisher_domain TEXT,
+  publisher_tier INTEGER,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -56,3 +58,13 @@ CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS publishers (
+  id TEXT PRIMARY KEY,
+  domain TEXT NOT NULL,
+  name TEXT NOT NULL,
+  tier INTEGER NOT NULL,
+  country_code TEXT,
+  mayor_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_publishers_domain ON publishers(domain);

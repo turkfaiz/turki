@@ -1,0 +1,202 @@
+import { MAYORS } from "./mayors.js";
+import { isAggregatorHost, resolvePublisherDomain } from "./domain.js";
+import { isRelevant, pickConfidence } from "./dedup.js";
+import { relevanceTokens } from "./mayors.js";
+
+export const UNTRUSTED_REASON = "مصدر غير معتمد";
+export const UNRELATED_REASON = "غير متعلق بالعمدة المختار";
+
+const GLOBAL = [
+  ["reuters.com", "Reuters"],
+  ["apnews.com", "Associated Press"],
+  ["afp.com", "AFP"],
+  ["bbc.com", "BBC"],
+  ["bbc.co.uk", "BBC"],
+];
+
+const BY_COUNTRY = {
+  KR: [
+    ["korea.kr", "Korea.kr", 0],
+    ["yna.co.kr", "Yonhap"],
+    ["yonhapnews.co.kr", "Yonhap"],
+    ["koreaherald.com", "Korea Herald"],
+    ["koreatimes.co.kr", "Korea Times"],
+    ["koreajoongangdaily.joins.com", "JoongAng Daily"],
+    ["joins.com", "JoongAng"],
+    ["hani.co.kr", "Hankyoreh"],
+    ["chosun.com", "Chosun"],
+    ["donga.com", "Donga"],
+    ["khan.co.kr", "Kyunghyang"],
+    ["kbs.co.kr", "KBS"],
+    ["mk.co.kr", "Maeil Business"],
+    ["news1.kr", "News1"],
+  ],
+  ES: [
+    ["elpais.com", "El País"],
+    ["elmundo.es", "El Mundo"],
+    ["abc.es", "ABC"],
+    ["lavanguardia.com", "La Vanguardia"],
+    ["rtve.es", "RTVE"],
+    ["efe.com", "EFE"],
+    ["europapress.es", "Europa Press"],
+    ["eldiario.es", "elDiario"],
+    ["elconfidencial.com", "El Confidencial"],
+    ["diariosur.es", "Diario Sur"],
+    ["laopiniondemalaga.es", "La Opinión de Málaga"],
+  ],
+  GB: [
+    ["theguardian.com", "The Guardian"],
+    ["telegraph.co.uk", "The Telegraph"],
+    ["independent.co.uk", "The Independent"],
+    ["ft.com", "Financial Times"],
+    ["chroniclelive.co.uk", "Chronicle Live"],
+    ["thenorthernecho.co.uk", "The Northern Echo"],
+  ],
+  JO: [
+    ["petra.gov.jo", "Petra", 0],
+    ["jordantimes.com", "Jordan Times"],
+    ["alghad.com", "Al Ghad"],
+    ["alrai.com", "Al Rai"],
+    ["addustour.com", "Ad-Dustour"],
+  ],
+  IQ: [
+    ["ina.iq", "INA"],
+    ["nina.iq", "NINA"],
+    ["shafaq.com", "Shafaq"],
+    ["alsumaria.tv", "Alsumaria"],
+  ],
+  OM: [
+    ["omannews.gov.om", "Oman News", 0],
+    ["omanobserver.om", "Oman Observer"],
+    ["timesofoman.com", "Times of Oman"],
+  ],
+  XK: [
+    ["koha.net", "Koha"],
+    ["rtklive.com", "RTK"],
+    ["balkaninsight.com", "Balkan Insight"],
+  ],
+  IT: [
+    ["ansa.it", "ANSA"],
+    ["repubblica.it", "La Repubblica"],
+    ["corriere.it", "Corriere"],
+    ["lastampa.it", "La Stampa"],
+    ["rainews.it", "Rai News"],
+    ["ilsole24ore.com", "Il Sole 24 Ore"],
+  ],
+  JP: [
+    ["nhk.or.jp", "NHK"],
+    ["nikkei.com", "Nikkei"],
+    ["asahi.com", "Asahi"],
+    ["mainichi.jp", "Mainichi"],
+    ["yomiuri.co.jp", "Yomiuri"],
+    ["japantimes.co.jp", "Japan Times"],
+    ["kyodo.co.jp", "Kyodo"],
+    ["jiji.com", "Jiji"],
+  ],
+  MA: [
+    ["map.ma", "MAP", 0],
+    ["lematin.ma", "Le Matin"],
+    ["leconomiste.com", "L'Économiste"],
+    ["telquel.ma", "TelQuel"],
+    ["hespress.com", "Hespress"],
+  ],
+  GR: [
+    ["amna.gr", "AMNA"],
+    ["kathimerini.gr", "Kathimerini"],
+    ["efsyn.gr", "Efsyn"],
+    ["naftemporiki.gr", "Naftemporiki"],
+    ["ert.gr", "ERT"],
+    ["ertnews.gr", "ERT News"],
+  ],
+};
+
+function row(domain, name, tier, country_code, mayor_id) {
+  return {
+    id: `${mayor_id || country_code || "global"}:${domain}`,
+    domain,
+    name,
+    tier,
+    country_code: country_code || null,
+    mayor_id: mayor_id || null,
+  };
+}
+
+export function buildPublishers() {
+  const out = [];
+  const seen = new Set();
+  const add = (item) => {
+    if (!item.domain || seen.has(item.id)) return;
+    seen.add(item.id);
+    out.push(item);
+  };
+
+  for (const [domain, name] of GLOBAL) {
+    add(row(domain, name, 1, null, null));
+  }
+  for (const mayor of MAYORS) {
+    if (mayor.official_host) {
+      add(row(mayor.official_host, mayor.title_en, 0, mayor.country_code, mayor.id));
+    }
+    for (const entry of BY_COUNTRY[mayor.country_code] || []) {
+      const [domain, name, tier = 1] = entry;
+      add(row(domain, name, tier, mayor.country_code, null));
+    }
+  }
+  return out;
+}
+
+export const PUBLISHERS = buildPublishers();
+
+export function matchPublisher(domain, mayor) {
+  if (!domain || isAggregatorHost(domain)) return null;
+  const hits = PUBLISHERS.filter((p) => {
+    const same =
+      domain === p.domain || domain.endsWith(`.${p.domain}`) || p.domain.endsWith(`.${domain}`);
+    if (!same) return false;
+    if (p.mayor_id && p.mayor_id !== mayor.id) return false;
+    if (p.country_code && p.country_code !== mayor.country_code) return false;
+    return true;
+  });
+  if (!hits.length) return null;
+  hits.sort((a, b) => {
+    const spec = (p) => (p.mayor_id ? 0 : p.country_code ? 1 : 2);
+    return a.tier - b.tier || spec(a) - spec(b);
+  });
+  return hits[0];
+}
+
+export function classifyItem(row, mayor) {
+  const domain = resolvePublisherDomain(row);
+  const pub = matchPublisher(domain, mayor);
+  const tokens = relevanceTokens(mayor);
+  const relevant = isRelevant(`${row.title || ""} ${row.snippet || ""}`, tokens);
+
+  if (!pub) {
+    return {
+      status: "excluded",
+      exclude_reason: UNTRUSTED_REASON,
+      confidence: "raw",
+      publisher_domain: domain || null,
+      publisher_tier: null,
+    };
+  }
+
+  if (!relevant) {
+    return {
+      status: "excluded",
+      exclude_reason: UNRELATED_REASON,
+      confidence: pub.tier === 0 ? "official" : pickConfidence(row.source, 0),
+      publisher_domain: pub.domain,
+      publisher_tier: pub.tier,
+    };
+  }
+
+  const official = pub.tier === 0 || row.source === "official";
+  return {
+    status: "inbox",
+    exclude_reason: null,
+    confidence: official ? "official" : pickConfidence(row.source, 0),
+    publisher_domain: pub.domain,
+    publisher_tier: pub.tier,
+  };
+}

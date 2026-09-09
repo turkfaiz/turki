@@ -1,6 +1,7 @@
 import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import { translatePending } from "./translate.js";
+import { PUBLISHERS } from "./publishers.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -52,12 +53,23 @@ const SCHEMA_STATEMENTS = [
     exclude_reason TEXT,
     fingerprint TEXT NOT NULL,
     trans_engine TEXT,
+    publisher_domain TEXT,
+    publisher_tier INTEGER,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS publishers (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    country_code TEXT,
+    mayor_id TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_publishers_domain ON publishers(domain)`,
 ];
 
 let ready = false;
@@ -93,6 +105,14 @@ async function ensureDb(env) {
     ),
   );
   await env.DB.batch(batch);
+  const pubStmt = env.DB.prepare(
+    `INSERT OR REPLACE INTO publishers (id, domain, name, tier, country_code, mayor_id) VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  await env.DB.batch(
+    PUBLISHERS.map((p) =>
+      pubStmt.bind(p.id, p.domain, p.name, p.tier, p.country_code, p.mayor_id),
+    ),
+  );
   await migrateItems(env);
   ready = true;
 }
@@ -109,12 +129,19 @@ async function migrateItems(env) {
   if (!names.has("trans_engine")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN trans_engine TEXT`).run();
   }
+  if (!names.has("publisher_domain")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN publisher_domain TEXT`).run();
+  }
+  if (!names.has("publisher_tier")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN publisher_tier INTEGER`).run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
   items.title_ar AS news_title_ar, items.snippet, items.snippet_ar AS news_snippet_ar,
   items.title_normalized, items.url, items.published_at, items.language, items.confidence,
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
+  items.publisher_domain, items.publisher_tier,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 

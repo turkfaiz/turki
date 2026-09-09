@@ -17,6 +17,16 @@ function tag(block, name) {
   return m ? decodeXml(m[1]) : "";
 }
 
+function sourceMeta(block) {
+  const open = block.match(/<source\b([^>]*)>([\s\S]*?)<\/source>/i);
+  if (!open) return { publisher_name: "", publisher_url: "" };
+  const href = open[1].match(/url\s*=\s*["']([^"']+)["']/i);
+  return {
+    publisher_url: href ? decodeXml(href[1]) : "",
+    publisher_name: decodeXml(open[2] || ""),
+  };
+}
+
 export function parseRssItems(xml) {
   if (!xml || !xml.includes("<item")) return [];
   return xml
@@ -27,8 +37,8 @@ export function parseRssItems(xml) {
       const link = tag(block, "link") || tag(block, "guid");
       const published = tag(block, "pubDate");
       const snippet = tag(block, "description").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      const source = tag(block, "source");
-      return { title, url: link, published_at: published || null, snippet, source };
+      const { publisher_name, publisher_url } = sourceMeta(block);
+      return { title, url: link, published_at: published || null, snippet, publisher_name, publisher_url };
     })
     .filter((item) => item.title && item.url);
 }

@@ -141,6 +141,9 @@ function renderItems(items) {
         <h3 class="headline">${escapeHtml(displayTitle(it))}</h3>
         <div class="meta">
           <span class="badge">${sourceLabel(it.source)}</span>
+          ${it.publisher_tier === 0 || it.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
+          ${it.publisher_domain ? `<span class="badge">${escapeHtml(it.publisher_domain)}</span>` : ""}
+          ${it.exclude_reason ? `<span class="badge">${escapeHtml(it.exclude_reason)}</span>` : ""}
           <span class="badge">${confidenceLabel(it.confidence)}</span>
           <span class="num">${fmtDate(it.published_at || it.created_at)}</span>
         </div>
@@ -167,6 +170,8 @@ async function loadDetail(id) {
       <h2 class="headline">${escapeHtml(ar)}</h2>
       <div class="meta">
         <span class="badge">${sourceLabel(item.source)}</span>
+        ${item.publisher_tier === 0 || item.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
+        ${item.publisher_domain ? `<span class="badge">${escapeHtml(item.publisher_domain)}</span>` : ""}
         <span class="badge">${confidenceLabel(item.confidence)}</span>
         <span class="badge">الرصد: ${escapeHtml(item.name_en)}</span>
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>

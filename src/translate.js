@@ -116,11 +116,6 @@ export async function translatePending(env, limit = 24) {
       let snippetAr = "";
       try {
         titleRes = await translateToAr(row.title, env);
-        const snip = decodeEntities(row.snippet || "").slice(0, 280);
-        if (snip && snip.length >= 40 && snip !== titleRes.text) {
-          const sn = await translateToAr(snip, env);
-          snippetAr = sn.text;
-        }
       } catch {
         titleRes = { text: splitHeadline(row.title).headline, engine: "failed" };
         snippetAr = decodeEntities(row.snippet || "");

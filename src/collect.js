@@ -1,6 +1,7 @@
-import { MAYORS, buildSearchQueries, mayorById, relevanceTokens } from "./mayors.js";
+import { MAYORS, buildSearchQueries, mayorById } from "./mayors.js";
 import { googleNewsRssUrl, parseRssItems } from "./rss.js";
-import { fingerprint, isRelevant, normalizeTitle, pickConfidence } from "./dedup.js";
+import { fingerprint, normalizeTitle } from "./dedup.js";
+import { classifyItem } from "./publishers.js";
 
 const FETCH_HEADERS = {
   "User-Agent": "MayorWatch/0.1 (municipal briefing desk)",
@@ -61,6 +62,8 @@ async function collectInoreader(env, query) {
     snippet: (it.summary?.content || it.origin?.title || "").replace(/<[^>]+>/g, " ").trim(),
     source: "inoreader",
     language: "und",
+    publisher_name: it.origin?.title || "",
+    publisher_url: it.origin?.htmlUrl || it.canonical?.[0]?.href || "",
   }));
 }
 
@@ -138,7 +141,6 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
 
   for (const { mayor, rows, errors } of gathered) {
     allErrors.push(...errors);
-    const tokens = relevanceTokens(mayor);
 
     for (const row of rows) {
       if (!row.title || !row.url) continue;
@@ -156,18 +158,15 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
         continue;
       }
 
-      const text = `${row.title} ${row.snippet || ""}`;
-      const relevant = isRelevant(text, tokens);
-      const status = relevant ? "inbox" : "excluded";
-      const reason = relevant ? null : "غير متعلق بالعمدة المختار";
-      const confidence = pickConfidence(row.source, 0);
+      const verdict = classifyItem(row, mayor);
       const id = crypto.randomUUID();
       try {
         await env.DB.prepare(
           `INSERT INTO items (
             id, mayor_id, scan_id, source, title, title_normalized, url, published_at,
-            snippet, language, confidence, status, exclude_reason, fingerprint
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            snippet, language, confidence, status, exclude_reason, fingerprint,
+            publisher_domain, publisher_tier
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
           .bind(
             id,
@@ -180,14 +179,16 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
             row.published_at || null,
             (row.snippet || "").slice(0, 800),
             row.language || null,
-            confidence,
-            status,
-            reason,
+            verdict.confidence,
+            verdict.status,
+            verdict.exclude_reason,
             fp,
+            verdict.publisher_domain,
+            verdict.publisher_tier,
           )
           .run();
         found += 1;
-        if (status === "excluded") excluded += 1;
+        if (verdict.status === "excluded") excluded += 1;
       } catch (err) {
         if (String(err.message || err).includes("UNIQUE")) duplicates += 1;
         else allErrors.push(String(err.message || err));
