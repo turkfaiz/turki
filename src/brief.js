@@ -114,7 +114,12 @@ const GLOSS = [
   [/million/gi, "مليون"],
   [/aperto/gi, "افتتاح"],
   [/nuova via/gi, "الشارع الجديد"],
-  [/città di torino/gi, "تورينو"],
+  [/restituito ai torinesi/gi, "أُعيد إلى أهل تورينو"],
+  [/al termine dei lavori/gi, "بعد انتهاء الأعمال"],
+  [/da oggi/gi, "اعتباراً من اليوم"],
+  [/punto di riferimento/gi, "نقطة مرجعية"],
+  [/housing first/gi, "إسكان أولاً"],
+  [/questa mattina/gi, "هذا الصباح"],
   [/comune di torino/gi, "بلدية تورينو"],
   [/torino/gi, "تورينو"],
   [/turin/gi, "تورينو"],
@@ -347,8 +352,14 @@ function translitIt(word) {
 function arabicPlace(raw) {
   const original = String(raw || "").replace(/[.]/g, " ").replace(/\s+/g, " ").trim();
   if (!original) return "";
-  const kind = /^piazza\b/i.test(original) ? "ساحة" : /^via\b/i.test(original) ? "فيا" : "";
-  const core = original.replace(/^(via|piazza)\s+/i, "");
+  const kind = /^piazzale\b|^piazza\b/i.test(original)
+    ? "ساحة"
+    : /^corso\b/i.test(original)
+      ? "كورسو"
+      : /^via\b/i.test(original)
+        ? "فيا"
+        : "";
+  const core = original.replace(/^(via|piazzale|piazza|corso)\s+/i, "");
   const parts = core
     .split(/\s+/)
     .map((part) => translitIt(part))
@@ -377,7 +388,7 @@ function extractVia(text) {
   const blob = String(text || "");
   const matches = [
     ...blob.matchAll(
-      /\b([Vv]ia|[Pp]iazza)\s+((?:di\s+)?[A-ZÀ-Ú][A-Za-zÀ-ÿ'’-]*(?:\s+(?:di\s+)?[A-ZÀ-Ú][A-Za-zÀ-ÿ'’-]*){0,3})/g,
+      /\b([Vv]ia|[Pp]iazzale|[Pp]iazza|[Cc]orso)\s+((?:di\s+)?[A-ZÀ-Ú][A-Za-zÀ-ÿ'’-]*(?:\s+(?:di\s+)?[A-ZÀ-Ú][A-Za-zÀ-ÿ'’-]*){0,3})/g,
     ),
   ];
   const named = matches.find((m) => !/^pedonal/i.test(m[2]));
@@ -390,7 +401,10 @@ function extractVia(text) {
 }
 
 function extractQuote(text) {
-  const m = String(text || "").match(/[«“"‘']([^»”"']{8,160})[»”"']/);
+  const blob = String(text || "");
+  const m = blob.match(
+    /(?:[:]|\bsaid\b|\bdice\b|\bdichiar|\bLo Russo\b|\bmayor\b|\balcalde\b)[^\n«“"']{0,48}[«“"']([^»”"']{8,160})[»”"']/i,
+  );
   return m ? tidy(m[1]) : "";
 }
 
@@ -446,7 +460,13 @@ function frameHeadline(mayor, blob, slots) {
     return actor ? `${name} يفتتح ${obj}` : asFact(`افتتاح ${obj}`);
   }
 
-  if (/inaugur|يفتتح|افتتاح/i.test(blob) && slots.via) {
+  if (slots.action === "housing" || /housing|vivienda|إسكان/i.test(blob)) {
+    const who = slots.youth ? "للشباب" : "";
+    const state = slots.fragile ? " في وضع هش" : "";
+    return asFact(`إسكان ${who}${state} في ${city}`.replace(/\s+/g, " "));
+  }
+
+  if (/inaugur|يفتتح|افتتاح/i.test(blob) && slots.via && /^via\b/i.test(slots.via)) {
     const street = arabicPlace(slots.via);
     const when = slots.when ? ` ${slots.when}` : "";
     return actor ? `${name} يفتتح شارع ${street}${when}` : asFact(`افتتاح شارع ${street}${when}`);
@@ -458,15 +478,14 @@ function frameHeadline(mayor, blob, slots) {
     return `${name}: انقطاع الكهرباء في ${city}`;
   }
 
-  if (slots.action === "housing" || /housing|vivienda|إسكان/i.test(blob)) {
-    const who = slots.youth ? "للشباب" : "";
-    const state = slots.fragile ? " في وضع هش" : "";
-    return asFact(`إسكان ${who}${state} في ${city}`.replace(/\s+/g, " "));
-  }
-
   if (slots.amount && (slots.action === "budget" || /مديونية|ميزانية|bilancio|budget|دينار/i.test(blob))) {
     if (/مديونية/.test(blob)) return asFact(`مديونية ${slots.amount}`);
     return asFact(`ميزانية ${city} ${slots.amount}`);
+  }
+
+  if (/circoscrizione\s+(\d+)/i.test(blob) && /aperto|da oggi|punto di riferimento|inaugur/i.test(blob)) {
+    const n = blob.match(/circoscrizione\s+(\d+)/i)[1];
+    return asFact(`افتتاح مكتب دائرة بلدية ${n}`);
   }
 
   if (/attend|ribbon|ceremon/i.test(blob)) {
@@ -540,13 +559,17 @@ export function arabicBullets(mayor, title, snippet = "", body = "") {
   const framed = Boolean(frameHeadline(mayor, blob, slots));
   const lines = [];
 
+  const corso = blob.match(/\bcorso\s+([A-ZÀ-Ú][A-Za-zÀ-ÿ'’-]+)\s+(\d+)/);
   if (slots.when && !headline.includes(slots.when)) {
     pushFact(lines, `يُحدد الموعد ${slots.when}.`, headline);
   }
-  if (slots.via) {
+  if (slots.via && !corso) {
     const place = arabicPlace(slots.via);
     if (place && !headline.includes(place) && !headline.includes(place.replace(/^فيا\s+/, ""))) {
-      pushFact(lines, `العمل في شارع ${place}.`, headline);
+      const loc = place.startsWith("ساحة") || place.startsWith("كورسو") || place.startsWith("فيا")
+        ? place
+        : `شارع ${place}`;
+      pushFact(lines, `العمل في ${loc}.`, headline);
     }
   }
   if (slots.amount && !headline.includes(slots.amount.split(" ")[0])) {
@@ -558,6 +581,15 @@ export function arabicBullets(mayor, title, snippet = "", body = "") {
   if (slots.oldGrid) pushFact(lines, `العمدة يقول إن الشبكة الكهربائية قديمة.`, headline);
   if (slots.youth) pushFact(lines, `البرنامج موجه للشباب.`, headline);
   if (slots.fragile) pushFact(lines, `يشمل من هم في وضع هش.`, headline);
+  if (/festa|grande festa/i.test(blob)) pushFact(lines, `يُقام احتفال بمناسبة الافتتاح.`, headline);
+  if (/riqualificaz|restituito/i.test(blob)) {
+    pushFact(lines, `بعد إعادة التأهيل يُعاد المكان إلى أهل المدينة.`, headline);
+  }
+  if (/piazzale di sogni|ساحة أحلام/i.test(blob)) pushFact(lines, `المشروع يحمل اسم ساحة أحلام.`, headline);
+  if (/housing first/i.test(blob)) pushFact(lines, `المشروع ضمن مسار إسكان أولاً.`, headline);
+  if (corso) {
+    pushFact(lines, `المكتب في كورسو ${translitIt(corso[1])} ${corso[2]}.`, headline);
+  }
   if (slots.quote) {
     const q = stripLatin(glossPhrase(slots.quote));
     if (q && !hasLatin(q)) pushFact(lines, `${mayor.name_ar}: «${q.slice(0, 120)}».`, headline);
@@ -570,10 +602,10 @@ export function arabicBullets(mayor, title, snippet = "", body = "") {
     }
   }
 
-  if (lines.length < 2) {
+  if (!framed && lines.length < 2) {
     for (const sentence of pickSentences(blob, original.headline)) {
       const g = stripLatin(glossPhrase(residualTopic(sentence, mayor)));
-      if (!g || g.length < 12 || arabicRatio(g) < 0.45 || hasLatin(g)) continue;
+      if (!g || g.length < 12 || g.length > 90 || arabicRatio(g) < 0.45 || hasLatin(g)) continue;
       pushFact(lines, `${g}.`, headline);
       if (lines.length === 4) break;
     }
