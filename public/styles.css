@@ -8,6 +8,10 @@
   --wine: #8a1f34;
   --good: #12805c;
   --bad: #b42318;
+  --teal: #0f766e;
+  --teal-bright: #14b8a6;
+  --teal-soft: #ecfdf7;
+  --teal-rule: #99f6e4;
   --shadow-soft: 0 1px 2px rgba(16, 24, 40, 0.05);
   --shadow-card: 0 12px 32px rgba(16, 24, 40, 0.08);
   --radius: 12px;
@@ -445,3 +449,192 @@ h1 {
   .platforms { flex-direction: row; flex-wrap: wrap; }
   .progress-tasks { grid-template-columns: 1fr; }
 }
+
+/* ===== لمسات لونية خضراء مائلة للأزرق تُبرز ما هو حيّ وموثوق ===== */
+
+.kpis article:first-child b,
+.mast-stamp b {
+  color: var(--teal);
+}
+
+.kpis article:first-child {
+  border-color: var(--teal-rule);
+  background: linear-gradient(180deg, var(--teal-soft) 0%, var(--card) 70%);
+}
+
+.badge.official {
+  background: var(--teal-soft);
+  border-color: var(--teal-rule);
+  color: var(--teal);
+}
+
+.led-on {
+  background: var(--teal-bright);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
+}
+
+.btn-search {
+  background: linear-gradient(180deg, var(--teal) 0%, #0b5f59 100%);
+  border-color: #0b5f59;
+}
+
+.btn-search:hover:not(:disabled) {
+  background: linear-gradient(180deg, #12857c 0%, var(--teal) 100%);
+}
+
+.result.selected {
+  border-color: var(--teal-rule);
+  box-shadow: inset 3px 0 0 var(--teal-bright), var(--shadow-soft);
+}
+
+.brief-head {
+  border-bottom: 2px solid var(--teal-rule);
+}
+
+.progress-track > span[data-tone="live"],
+.search-progress[data-status="running"] #progress-bar {
+  background: linear-gradient(90deg, var(--teal) 0%, var(--teal-bright) 100%);
+}
+
+.facts li::marker {
+  color: var(--teal-bright);
+}
+
+/* ===== صندوق التفاصيل: مخفي افتراضيًا ويُفتح عند الطلب ===== */
+
+.diagnostics {
+  margin: 0 18px 18px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.diagnostics > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-inline-start: 3px solid var(--teal-bright);
+}
+
+.diagnostics > summary::-webkit-details-marker { display: none; }
+
+.diagnostics > summary:hover { background: var(--teal-soft); }
+
+.diagnostics > summary small {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.diagnostics[open] > summary {
+  border-bottom: 1px solid var(--rule);
+  background: var(--teal-soft);
+}
+
+.diag-body {
+  padding: 14px 16px 18px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.diag-cell {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+}
+
+.diag-cell span {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-bottom: 3px;
+}
+
+.diag-cell b { font-size: 16px; }
+.diag-cell.is-good b { color: var(--teal); }
+.diag-cell.is-warn b { color: #b54708; }
+.diag-cell.is-bad b { color: var(--bad); }
+
+.diag-section {
+  margin-top: 14px;
+  border-top: 1px dashed var(--rule);
+  padding-top: 12px;
+}
+
+.diag-section h4 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--teal);
+  letter-spacing: 0.01em;
+}
+
+.diag-list { margin: 0; padding: 0; list-style: none; }
+
+.diag-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--rule);
+  line-height: 1.55;
+}
+
+.diag-list li:last-child { border-bottom: none; }
+
+.diag-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  margin-top: 6px;
+}
+
+.diag-dot.ok { background: var(--teal-bright); }
+.diag-dot.warn { background: #f79009; }
+.diag-dot.bad { background: var(--bad); }
+
+.diag-list small { color: var(--muted); }
+
+.diag-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.brief-error {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: #fffbfa;
+  border: 1px solid #fecdca;
+  border-radius: var(--radius-sm);
+  color: #912018;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.btn-retry {
+  margin-top: 8px;
+  background: var(--card);
+  border: 1px solid var(--teal-rule);
+  color: var(--teal);
+}
+
+.btn-retry:hover { background: var(--teal-soft); }

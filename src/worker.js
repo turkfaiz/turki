@@ -255,6 +255,20 @@ async function seedSources(env) {
 }
 
 /** يسجّل ما حدث فعلًا لكل مصدر حتى تكون الحوكمة مبنية على واقع الإنتاج. */
+/**
+ * المكتب أسبوعي، فلا معنى لتخزين ما خرج من النافذة. التقليم يمنع تراكم أخبار
+ * قديمة تظهر في القوائم وتشوّه الإحصاءات.
+ */
+export async function pruneOldItems(env, days = ITEM_RETENTION_DAYS) {
+  const result = await env.DB.prepare(
+    `DELETE FROM items
+     WHERE COALESCE(published_at, created_at) < datetime('now', ?)`,
+  )
+    .bind(`-${days} days`)
+    .run();
+  return Number(result?.meta?.changes) || 0;
+}
+
 export async function recordSourceHealth(env, rows) {
   if (!rows?.length) return;
   const stmt = env.DB.prepare(
@@ -367,7 +381,7 @@ async function migrateItems(env) {
       .bind(briefEpoch)
       .run();
   }
-  const resetEpoch = "clean-start-2026-09-10";
+  const resetEpoch = "clean-start-2026-09-10-registry";
   const currentReset = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'reset_epoch'`).first();
   if (currentReset?.v !== resetEpoch) {
     await env.DB.prepare(`DELETE FROM items`).run();
@@ -410,6 +424,9 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 const WEEKLY_CRON = "0 3 * * SUN";
+/** نافذة الرصد سبعة أيام، ويُحفظ يومان إضافيان لاستقرار الترحيل. */
+const ITEM_WINDOW_DAYS = 7;
+const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
 const DRAIN_MAX_BRIEFS = 12;
 const DRAIN_MAX_MS = 45000;
@@ -945,6 +962,70 @@ async function stats(env) {
   };
 }
 
+/** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
+async function diagnostics(env) {
+  const brief = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
+       SUM(CASE WHEN IFNULL(brief_attempts, 0) >= ${MAX_BRIEF_ATTEMPTS} THEN 1 ELSE 0 END) AS exhausted
+     FROM items`,
+  ).first();
+  const { results: errors } = await env.DB.prepare(
+    `SELECT brief_error AS code, COUNT(*) AS count, MAX(IFNULL(brief_attempts, 0)) AS attempts
+     FROM items WHERE brief_error IS NOT NULL
+     GROUP BY brief_error ORDER BY count DESC LIMIT 8`,
+  ).all();
+  const { results: sources } = await env.DB.prepare(
+    `SELECT sources.mayor_id, sources.domain, sources.name, sources.tier, sources.kind,
+            sources.rank, sources.last_status, sources.last_items, sources.last_ok_at,
+            sources.consecutive_failures, mayors.name_ar
+     FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+     ORDER BY sources.mayor_id, sources.rank`,
+  ).all();
+  const window = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            MIN(COALESCE(published_at, created_at)) AS oldest,
+            MAX(COALESCE(published_at, created_at)) AS newest
+     FROM items
+     WHERE COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
+  ).first();
+  const lastScan = await env.DB.prepare(
+    `SELECT type, started_at, finished_at, found_count, duplicate_count,
+            excluded_count, error_count, notes
+     FROM scans ORDER BY started_at DESC LIMIT 1`,
+  ).first();
+  return {
+    windowDays: ITEM_WINDOW_DAYS,
+    retentionDays: ITEM_RETENTION_DAYS,
+    window: {
+      total: Number(window?.total) || 0,
+      oldest: window?.oldest || null,
+      newest: window?.newest || null,
+    },
+    brief: {
+      completed: Number(brief?.completed) || 0,
+      pending: Number(brief?.pending) || 0,
+      waitingQuota: Number(brief?.waitingQuota) || 0,
+      failed: Number(brief?.failed) || 0,
+      exhausted: Number(brief?.exhausted) || 0,
+      maxAttempts: MAX_BRIEF_ATTEMPTS,
+      errors: errors || [],
+    },
+    ai: {
+      configured: Boolean(env.GEMINI_API_KEY),
+      model: env.GEMINI_MODEL || null,
+      budget: await budgetState(env),
+    },
+    registry: await registrySummary(env),
+    sources: sources || [],
+    lastScan: lastScan || null,
+    queue: Boolean(env.SCAN_QUEUE),
+  };
+}
+
 async function registrySummary(env) {
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS total,
@@ -971,6 +1052,25 @@ async function handleApi(request, env) {
   if (path === "/api/mayors" && method === "GET") {
     const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
     return json({ mayors: results });
+  }
+
+  if (path === "/api/diagnostics" && method === "GET") {
+    return json(await diagnostics(env));
+  }
+
+  const retryMatch = path.match(/^\/api\/items\/([0-9a-f-]+)\/retry-brief$/i);
+  if (retryMatch && method === "POST") {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, trans_engine = 'brief-pending'
+       WHERE id = ?`,
+    )
+      .bind(retryMatch[1])
+      .run();
+    const summary = await translatePending(env, 1, null);
+    if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, null, null);
+    return json({ ok: true, ai: summary });
   }
 
   if (path === "/api/sources" && method === "GET") {
@@ -1002,7 +1102,10 @@ async function handleApi(request, env) {
     const status = url.searchParams.get("status") || "inbox";
     const mayorId = url.searchParams.get("mayor_id");
     const q = url.searchParams.get("q");
-    const clauses = ["status = ?"];
+    const clauses = [
+      "status = ?",
+      `COALESCE(items.published_at, items.created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
+    ];
     const binds = [status];
     if (mayorId) {
       clauses.push("mayor_id = ?");
@@ -1110,6 +1213,7 @@ export default {
       (async () => {
         await ensureDb(env);
         await pruneAiBudget(env);
+        await pruneOldItems(env);
         await drainBriefs(env);
       })(),
     );

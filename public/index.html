@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui2" />
+    <link rel="stylesheet" href="/styles.css?v=ui3" />
   </head>
   <body>
     <div class="sheet">
@@ -71,6 +71,14 @@
         <article><span>دُمج هذا الأسبوع</span><b class="num" id="stat-dup">0</b></article>
       </section>
 
+      <details class="diagnostics" id="diagnostics">
+        <summary>
+          <span>التفاصيل والإحصائيات — ما يعمل الآن</span>
+          <small id="diag-headline">اضغط للعرض</small>
+        </summary>
+        <div class="diag-body" id="diag-body">جاري التحميل…</div>
+      </details>
+
       <section class="desk">
         <div class="index">
           <nav class="tabs" role="tablist">
@@ -89,6 +97,6 @@
         </aside>
       </section>
     </div>
-    <script src="/app.js?v=ui2"></script>
+    <script src="/app.js?v=ui3"></script>
   </body>
 </html>

@@ -59,6 +59,45 @@ function briefBadge(item) {
   return "بانتظار AI";
 }
 
+/** يترجم رمز الخطأ إلى سبب مفهوم، فلا يرى المستخدم «تعذر» بلا تفسير. */
+function briefErrorReason(code) {
+  const raw = String(code || "");
+  if (!raw) return "";
+  const rules = [
+    [/ai_deferred:daily_limit|ai_http_429.*day|daily/i, "نفدت حصة نداءات الذكاء الاصطناعي لليوم، ويستأنف تلقائيًا بعد تصفير الحصة."],
+    [/ai_deferred:rate_pacing/i, "تباعد مقصود بين النداءات لحماية حد الدقيقة، ويكمل تلقائيًا."],
+    [/ai_deferred|ai_http_429/i, "المزوّد رفض الطلب مؤقتًا لتجاوز الحد، والنظام في تهدئة ثم يعيد المحاولة."],
+    [/ai_http_5\d\d|provider_error/i, "خطأ مؤقت في خدمة الذكاء الاصطناعي، وتُعاد المحاولة."],
+    [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
+    [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
+    [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
+    [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
+    [/article_text_too_short/i, "نص الصفحة أقصر من أن يُستخرج منه موجز موثّق."],
+    [/ai_empty_response|ai_invalid_json/i, "جاء رد الذكاء الاصطناعي فارغًا أو غير صالح."],
+    [/ai_not_configured/i, "مفتاح الذكاء الاصطناعي غير مربوط."],
+  ];
+  for (const [pattern, message] of rules) {
+    if (pattern.test(raw)) return message;
+  }
+  return `سبب تقني: ${raw}`;
+}
+
+function briefErrorBox(item) {
+  const engine = String(item.trans_engine || "");
+  if (!item.brief_error || engine.startsWith("brief-ai-gemini-v2:")) return "";
+  const attempts = Number(item.brief_attempts) || 0;
+  const exhausted = attempts >= 5;
+  const heading = exhausted
+    ? `توقفت المحاولات بعد ${num(attempts)} محاولات`
+    : engine === "brief-deferred"
+      ? "التلخيص مؤجل ويكمل تلقائيًا"
+      : `تعذر التلخيص — المحاولة ${num(attempts)} من 5`;
+  return `<div class="brief-error">
+      <b>${escapeHtml(heading)}</b><br />${escapeHtml(briefErrorReason(item.brief_error))}
+      ${exhausted ? `<div><button type="button" class="btn-retry" data-act="retry-brief">إعادة المحاولة الآن</button></div>` : ""}
+    </div>`;
+}
+
 function factItems(snippet) {
   return String(snippet || "")
     .split(/\n+/)
@@ -206,6 +245,97 @@ function aiSourceLabel(s) {
   return `يقرأ ويلخص · ${quota}`;
 }
 
+function diagCell(label, value, tone = "") {
+  return `<div class="diag-cell ${tone}"><span>${escapeHtml(label)}</span><b class="num">${escapeHtml(String(value))}</b></div>`;
+}
+
+function sourceTone(source) {
+  if (Number(source.consecutive_failures) >= 3) return "bad";
+  if (!source.last_ok_at) return "warn";
+  return "ok";
+}
+
+function renderDiagnostics(d) {
+  const b = d.brief || {};
+  const budget = d.ai?.budget || {};
+  const reg = d.registry || {};
+  const waiting = (b.pending || 0) + (b.waitingQuota || 0);
+  $("diag-headline").textContent = budget.blocked
+    ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+    : waiting
+      ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
+      : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
+
+  const grouped = new Map();
+  for (const source of d.sources || []) {
+    if (!grouped.has(source.mayor_id)) grouped.set(source.mayor_id, []);
+    grouped.get(source.mayor_id).push(source);
+  }
+
+  $("diag-body").innerHTML = `
+    <div class="diag-grid">
+      ${diagCell("نافذة الرصد", `${num(d.windowDays)} أيام`)}
+      ${diagCell("أخبار داخل النافذة", num(d.window?.total))}
+      ${diagCell("موجزات مكتملة", num(b.completed), b.completed ? "is-good" : "")}
+      ${diagCell("بانتظار التلخيص", num(waiting), waiting ? "is-warn" : "is-good")}
+      ${diagCell("تعذر نهائيًا", num(b.exhausted), b.exhausted ? "is-bad" : "is-good")}
+      ${diagCell("رصيد AI اليوم", `${num(budget.remaining)} / ${num(budget.dailyLimit)}`, budget.blocked ? "is-bad" : "is-good")}
+      ${diagCell("مصادر سليمة", `${num(reg.healthy)} / ${num(reg.total)}`, reg.failing ? "is-warn" : "is-good")}
+      ${diagCell("محركات البحث", "معطّلة")}
+    </div>
+
+    <div class="diag-section">
+      <h4>حالة الذكاء الاصطناعي</h4>
+      <ul class="diag-list">
+        <li><span class="diag-dot ${d.ai?.configured ? "ok" : "bad"}"></span>
+          <span>الطراز <b>${escapeHtml(d.ai?.model || "غير محدد")}</b>
+          <small>نداء واحد لكل موجز · تباعد ${num(Math.round((budget.minIntervalMs || 0) / 100) / 10)} ثانية · حصة الدمج ${num(budget.mergeLimit)}</small></span></li>
+        ${budget.blocked
+          ? `<li><span class="diag-dot bad"></span><span>متوقف: ${escapeHtml(briefErrorReason(`ai_deferred:${budget.blockReason}`))}
+             <small>يستأنف بعد ${escapeHtml(humanWait(budget.resumesInSeconds))}</small></span></li>`
+          : `<li><span class="diag-dot ok"></span><span>يعمل ضمن الحصة<small>مهمة تصريف كل عشر دقائق تُكمل المعلّق تلقائيًا</small></span></li>`}
+        ${(b.errors || []).map((row) => `
+          <li><span class="diag-dot ${/deferred|429/i.test(row.code) ? "warn" : "bad"}"></span>
+            <span>${escapeHtml(briefErrorReason(row.code))}
+            <small>${num(row.count)} خبر · أقصى محاولات ${num(row.attempts)} من ${num(b.maxAttempts)}</small></span></li>`).join("")}
+      </ul>
+    </div>
+
+    <div class="diag-section">
+      <h4>المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب، ولا يُفتح غيرها</h4>
+      <ul class="diag-list">
+        ${[...grouped.values()].map((sources) => `
+          <li><span class="diag-dot ${sources.every((s) => sourceTone(s) === "ok") ? "ok" : sources.some((s) => sourceTone(s) === "ok") ? "warn" : "bad"}"></span>
+            <span><b>${escapeHtml(sources[0].name_ar)}</b>
+            <small>${sources.map((s) => `${escapeHtml(s.domain)} — ${s.last_ok_at ? `${num(s.last_items)} عنصر` : s.last_status ? escapeHtml(String(s.last_status).slice(0, 40)) : "لم يُفحص بعد"}`).join(" · ")}</small></span></li>`).join("")}
+      </ul>
+    </div>
+
+    ${d.lastScan
+      ? `<div class="diag-section">
+          <h4>آخر رصد</h4>
+          <ul class="diag-list">
+            <li><span class="diag-dot ${Number(d.lastScan.error_count) ? "warn" : "ok"}"></span>
+              <span>${escapeHtml(d.lastScan.type === "manual" ? "بحث يدوي" : "رصد أسبوعي")} — ${escapeHtml(fmtDate(d.lastScan.started_at))}
+              <small>جديد ${num(d.lastScan.found_count)} · مدمج ${num(d.lastScan.duplicate_count)} · مستبعد ${num(d.lastScan.excluded_count)} · مصادر متعثرة ${num(d.lastScan.error_count)}</small></span></li>
+          </ul>
+        </div>`
+      : ""}
+
+    <p class="diag-note">
+      المكتب يرصد نافذة ${num(d.windowDays)} أيام فقط: كل رابط تُقرأ صفحته ويُشترط تاريخ نشر داخل النافذة،
+      وما خرج منها يُحذف تلقائيًا بعد ${num(d.retentionDays)} أيام حتى لا تتراكم أخبار قديمة.
+    </p>`;
+}
+
+async function loadDiagnostics() {
+  try {
+    renderDiagnostics(await api("/api/diagnostics"));
+  } catch (error) {
+    $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function itemsQuery() {
   const qs = new URLSearchParams({ status: state.status });
   const mayorId = selectedMayorId();
@@ -274,6 +404,7 @@ async function loadDetail(id) {
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+      ${briefErrorBox(item)}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
@@ -294,7 +425,7 @@ async function loadDetail(id) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadItems()]);
+  await Promise.all([loadStats(), loadItems(), loadDiagnostics()]);
   if (state.selectedId) {
     try {
       await loadDetail(state.selectedId);
@@ -323,6 +454,19 @@ $("detail").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn || !state.selectedId) return;
   const status = btn.dataset.act;
+  if (status === "retry-brief") {
+    btn.disabled = true;
+    btn.textContent = "يعيد المحاولة…";
+    try {
+      await api(`/api/items/${state.selectedId}/retry-brief`, { method: "POST" });
+      await loadDetail(state.selectedId);
+      await loadDiagnostics();
+    } catch (error) {
+      btn.disabled = false;
+      btn.textContent = `تعذر: ${error.message}`;
+    }
+    return;
+  }
   await api(`/api/items/${state.selectedId}/status`, {
     method: "POST",
     body: JSON.stringify({ status }),
