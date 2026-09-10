@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { authorized, searchJobSnapshot } from "../src/worker.js";
+import {
+  authorized,
+  briefStage,
+  continuationDelaySeconds,
+  searchJobSnapshot,
+  shouldContinueBriefs,
+} from "../src/worker.js";
 
 test("dashboard authentication is optional locally and enforced when configured", () => {
   const plain = new Request("https://example.com/api/stats");
@@ -80,4 +86,42 @@ test("queued search reports partial completion without double counting", () => {
   assert.equal(snapshot.completed, 1);
   assert.equal(snapshot.failed, 1);
   assert.equal(snapshot.totals.found, 1);
+});
+
+test("brief stage separates waiting on quota from a real failure", () => {
+  assert.equal(
+    briefStage({ summarized: 1, failed: 0, deferred: 1, pending: 4 }).stage,
+    "ai_waiting_quota",
+  );
+  assert.equal(
+    briefStage({ summarized: 1, failed: 0, deferred: 0, pending: 4 }).stage,
+    "ai_pending",
+  );
+  assert.equal(
+    briefStage({ summarized: 0, failed: 2, deferred: 0, pending: 0 }).stage,
+    "ai_failed",
+  );
+  assert.equal(
+    briefStage({ summarized: 3, failed: 0, deferred: 0, pending: 0 }).stage,
+    "completed",
+  );
+});
+
+test("a long quota pause is left to the periodic drain, not requeued in a loop", () => {
+  assert.equal(shouldContinueBriefs({ pending: 0, deferred: 0 }), false);
+  assert.equal(shouldContinueBriefs({ pending: 5, deferred: 0 }), true);
+  assert.equal(
+    shouldContinueBriefs({ pending: 5, deferred: 1, retryAfterSeconds: 30 }),
+    true,
+  );
+  assert.equal(
+    shouldContinueBriefs({ pending: 5, deferred: 1, retryAfterSeconds: 20000 }),
+    false,
+  );
+});
+
+test("continuation delays stay inside safe bounds", () => {
+  assert.equal(continuationDelaySeconds({ retryAfterSeconds: 0 }), 10);
+  assert.equal(continuationDelaySeconds({ retryAfterSeconds: 45 }), 45);
+  assert.equal(continuationDelaySeconds({ retryAfterSeconds: 99999 }), 900);
 });

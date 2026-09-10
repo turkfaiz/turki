@@ -1,9 +1,12 @@
 import { arabicRatio, decodeEntities, splitHeadline } from "./text.js";
 import {
+  BRIEF_STATE,
   aiBriefEnabled,
   aiBriefEngine,
+  isDeferredAiError,
   pendingAiBrief,
   summarizeWithGemini,
+  transientAiError,
 } from "./aiBrief.js";
 
 export { arabicRatio, decodeEntities, splitHeadline };
@@ -41,8 +44,9 @@ export async function pendingBriefCount(env, mayorId = null) {
 }
 
 /**
- * Claims rows before calling Gemini so overlapping manual, review, and weekly
- * runs cannot bill the same article twice.
+ * يحجز الصفوف قبل نداء الذكاء الاصطناعي حتى لا يدفع تشغيلان متزامنان ثمن
+ * الخبر نفسه. الترتيب يوزّع الحصة على المكاتب بالتناوب: المكتب الأقل موجزات
+ * مكتملة يأخذ الدور أولًا، فلا يبتلع مكتب واحد حصة اليوم كلها.
  */
 async function claimBriefRows(env, limit, mayorId, targetEngine) {
   const claimId = crypto.randomUUID();
@@ -57,6 +61,11 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
     where += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
+  const fairness = mayorId
+    ? "0"
+    : `(SELECT COUNT(*) FROM items done
+        WHERE done.mayor_id = items.mayor_id AND done.trans_engine = ?)`;
+  if (!mayorId) binds.push(targetEngine);
   binds.push(limit);
 
   await env.DB.prepare(
@@ -66,6 +75,7 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
        SELECT items.id FROM items
        WHERE ${where}
        ORDER BY CASE WHEN items.brief_error IS NULL THEN 0 ELSE 1 END,
+                ${fairness} ASC,
                 IFNULL(items.brief_attempts, 0) ASC,
                 COALESCE(items.published_at, items.created_at) DESC
        LIMIT ?
@@ -88,46 +98,78 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
   return results || [];
 }
 
-export async function translatePending(env, limit = 3, mayorId = null) {
+async function releaseClaims(env, ids) {
+  if (!ids.length) return;
+  const stmt = env.DB.prepare(
+    `UPDATE items SET brief_claim_id = NULL, brief_claimed_at = NULL WHERE id = ?`,
+  );
+  await env.DB.batch(ids.map((id) => stmt.bind(id)));
+}
+
+async function storeBrief(env, row, brief) {
+  await env.DB.prepare(
+    `UPDATE items
+     SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
+         brief_evidence = ?, brief_error = NULL,
+         brief_attempted_at = datetime('now'),
+         brief_attempts = IFNULL(brief_attempts, 0) + 1,
+         brief_claim_id = NULL, brief_claimed_at = NULL
+     WHERE id = ?`,
+  )
+    .bind(brief.title_ar, brief.snippet_ar, brief.engine, brief.evidence, row.id)
+    .run();
+}
+
+/**
+ * نفاد الحصة ليس خطأ في الخبر، فلا يُحتسب محاولة ولا يستهلك رصيد إعادة
+ * المحاولة. الأخطاء العابرة تُحتسب لكنها تبقى قابلة للاستئناف، والأخطاء
+ * الحقيقية في المحتوى وحدها هي التي تنتهي بحالة تعذّر.
+ */
+async function storeBriefProblem(env, row, error) {
+  const deferred = isDeferredAiError(error);
+  const transient = deferred || transientAiError(error);
+  const state = pendingAiBrief(row, transient ? BRIEF_STATE.DEFERRED : BRIEF_STATE.FAILED);
+  const note = String(error?.message || error).slice(0, 240);
+  await env.DB.prepare(
+    `UPDATE items
+     SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
+         brief_evidence = NULL, brief_error = ?,
+         brief_attempted_at = datetime('now'),
+         brief_attempts = IFNULL(brief_attempts, 0) + ?,
+         brief_claim_id = NULL, brief_claimed_at = NULL
+     WHERE id = ?`,
+  )
+    .bind(state.title_ar, state.snippet_ar, state.engine, note, deferred ? 0 : 1, row.id)
+    .run();
+  return { deferred, transient };
+}
+
+export async function translatePending(env, limit = 2, mayorId = null) {
   if (!aiBriefEnabled(env)) {
-    return { summarized: 0, failed: 0, pending: 0, retryAfterSeconds: 0 };
+    return { summarized: 0, failed: 0, deferred: 0, pending: 0, retryAfterSeconds: 0 };
   }
   const targetEngine = aiBriefEngine(env);
   const rows = await claimBriefRows(env, limit, mayorId, targetEngine);
 
   let summarized = 0;
   let failed = 0;
+  let deferred = 0;
   let retryAfterSeconds = 0;
-  for (const row of rows) {
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
     try {
-      const brief = await summarizeWithGemini(env, row, row);
-      await env.DB.prepare(
-        `UPDATE items
-         SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
-             brief_evidence = ?, brief_error = NULL,
-             brief_attempted_at = datetime('now'),
-             brief_attempts = IFNULL(brief_attempts, 0) + 1,
-             brief_claim_id = NULL, brief_claimed_at = NULL
-         WHERE id = ?`,
-      )
-        .bind(brief.title_ar, brief.snippet_ar, brief.engine, brief.evidence, row.id)
-        .run();
+      await storeBrief(env, row, await summarizeWithGemini(env, row, row));
       summarized += 1;
     } catch (error) {
-      const message = String(error?.message || error).slice(0, 240);
+      const outcome = await storeBriefProblem(env, row, error);
       retryAfterSeconds = Math.max(retryAfterSeconds, Number(error?.retryAfterSeconds) || 0);
-      const state = pendingAiBrief(row, true);
-      await env.DB.prepare(
-        `UPDATE items
-         SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
-             brief_evidence = NULL, brief_error = ?,
-             brief_attempted_at = datetime('now'),
-             brief_attempts = IFNULL(brief_attempts, 0) + 1,
-             brief_claim_id = NULL, brief_claimed_at = NULL
-         WHERE id = ?`,
-      )
-        .bind(state.title_ar, state.snippet_ar, state.engine, message, row.id)
-        .run();
+      if (outcome.deferred) {
+        deferred += 1;
+        // الميزانية مغلقة الآن؛ إبقاء بقية الصفوف حرة لتشغيل لاحق.
+        await releaseClaims(env, rows.slice(index + 1).map((rest) => rest.id));
+        break;
+      }
       failed += 1;
     }
   }
@@ -135,6 +177,7 @@ export async function translatePending(env, limit = 3, mayorId = null) {
   return {
     summarized,
     failed,
+    deferred,
     retryAfterSeconds,
     pending: await pendingBriefCount(env, mayorId),
   };

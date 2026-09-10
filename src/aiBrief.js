@@ -1,8 +1,12 @@
 import { arabicRatio, decodeEntities } from "./text.js";
 import { tokenOverlap } from "./dedup.js";
 import { identityTokens } from "./mayors.js";
+import { AiDeferredError, isDeferredAiError, noteAiFailure, reserveAiCall } from "./aiBudget.js";
 
-const DEFAULT_MODEL = "gemini-3.8-flash";
+export { isDeferredAiError };
+
+/** الطبقة المجانية من الطراز الكامل تمنح ~20 نداءً يوميًا فقط، وهذا الطراز يمنح مئات. */
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const BRIEF_VERSION = "v2";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -137,13 +141,24 @@ export function aiBriefEngine(env) {
   return `brief-ai-gemini-${BRIEF_VERSION}:${env?.GEMINI_MODEL || DEFAULT_MODEL}`;
 }
 
-export function pendingAiBrief(mayor, failed = false) {
+export const BRIEF_STATE = {
+  PENDING: "brief-pending",
+  DEFERRED: "brief-deferred",
+  FAILED: "brief-ai-error",
+};
+
+const BRIEF_STATE_LABEL = {
+  [BRIEF_STATE.PENDING]: "بانتظار قراءة الذكاء الاصطناعي",
+  [BRIEF_STATE.DEFERRED]: "بانتظار حصة الذكاء الاصطناعي — يستأنف تلقائيًا",
+  [BRIEF_STATE.FAILED]: "تعذر تلخيص الصفحة بالذكاء الاصطناعي",
+};
+
+export function pendingAiBrief(mayor, state = BRIEF_STATE.PENDING) {
+  const key = BRIEF_STATE_LABEL[state] ? state : BRIEF_STATE.PENDING;
   return {
-    title_ar: failed
-      ? `تعذر تلخيص الصفحة بالذكاء الاصطناعي — ${mayor.name_ar}`
-      : `بانتظار قراءة الذكاء الاصطناعي — ${mayor.name_ar}`,
+    title_ar: `${BRIEF_STATE_LABEL[key]} — ${mayor.name_ar}`,
     snippet_ar: "",
-    engine: failed ? "brief-ai-error" : "brief-pending",
+    engine: key,
   };
 }
 
@@ -224,11 +239,27 @@ function providerErrorCode(payload) {
   return code ? `:${String(code).slice(0, 80)}` : "";
 }
 
+/** يميز نفاد الحصة اليومية عن تجاوز حد الدقيقة حتى يكون التبريد بالحجم الصحيح. */
+export function quotaScope(payload) {
+  const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
+  const ids = details
+    .flatMap((detail) => (Array.isArray(detail?.violations) ? detail.violations : []))
+    .map((violation) => String(violation?.quotaId || violation?.quotaMetric || ""));
+  const blob = `${ids.join(" ")} ${String(payload?.error?.message || "")}`;
+  if (/per\s*-?\s*day|perday|daily/i.test(blob)) return "day";
+  if (/per\s*-?\s*minute|perminute/i.test(blob)) return "minute";
+  return "";
+}
+
 /**
- * Single attempt per call. Backoff is delegated to the queue so a Worker
- * invocation never sleeps and provider limits are respected globally.
+ * نداء واحد فقط لكل استدعاء، والتراجع مفوَّض للطابور حتى لا ينام أي طلب.
+ * الحجز يسبق الشبكة، فإن لم تسمح الميزانية لا يخرج النداء أصلًا.
  */
-async function callGemini(env, input, schema, fetcher) {
+async function callGemini(env, input, schema, fetcher, purpose = "brief") {
+  const reservation = await reserveAiCall(env, purpose);
+  if (!reservation.ok) {
+    throw new AiDeferredError(reservation.reason, reservation.retryAfterSeconds);
+  }
   const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 90000);
@@ -269,6 +300,9 @@ async function callGemini(env, input, schema, fetcher) {
     const error = new Error(`ai_http_${status || "failed"}${providerErrorCode(payload)}`);
     error.status = status;
     error.retryAfterSeconds = parseRetryDelaySeconds(response, payload);
+    error.quotaScope = quotaScope(payload);
+    const cooldown = await noteAiFailure(env, error);
+    if (cooldown) throw new AiDeferredError(error.message, cooldown);
     throw error;
   }
 
@@ -364,7 +398,7 @@ async function verifySemanticSupport(env, brief, fetcher) {
       facts: checks,
     }),
   ].join("\n");
-  const verdict = await callGemini(env, prompt, SUPPORT_SCHEMA, fetcher);
+  const verdict = await callGemini(env, prompt, SUPPORT_SCHEMA, fetcher, "brief");
   if (verdict?.headline_supported !== true) throw new Error("ai_headline_not_supported");
   const supported = new Set(
     (Array.isArray(verdict?.facts) ? verdict.facts : [])
@@ -383,6 +417,11 @@ async function verifySemanticSupport(env, brief, fetcher) {
   };
 }
 
+/**
+ * موجز واحد = نداء واحد. التحقق الأساسي محلي: كل عنوان وحقيقة يجب أن يحمل
+ * اقتباسًا موجودًا حرفيًا في نص المصدر ويذكر العمدة. التدقيق الدلالي بنداء ثانٍ
+ * يضاعف الكلفة، فيبقى اختياريًا عبر AI_VERIFY_BRIEFS لمن يملك حصة واسعة.
+ */
 export async function summarizeWithGemini(env, item, mayor, fetcher = fetch) {
   if (!aiBriefEnabled(env)) throw new Error("ai_not_configured");
   const engine = aiBriefEngine(env);
@@ -394,8 +433,10 @@ export async function summarizeWithGemini(env, item, mayor, fetcher = fetch) {
     buildAiBriefPrompt(item, mayor),
     OUTPUT_SCHEMA,
     fetcher,
+    "brief",
   );
   const grounded = validateAiBrief(payload, sourceText, mayor, engine);
+  if (env.AI_VERIFY_BRIEFS !== "1") return grounded;
   return verifySemanticSupport(env, grounded, fetcher);
 }
 
@@ -438,7 +479,7 @@ export async function clusterWithGemini(env, items, mayor, fetcher = fetch) {
     "العناصر:",
     JSON.stringify(inputItems),
   ].join("\n");
-  const payload = await callGemini(env, prompt, CLUSTER_SCHEMA, fetcher);
+  const payload = await callGemini(env, prompt, CLUSTER_SCHEMA, fetcher, "merge");
   const byId = new Map(items.map((item) => [item.id, item]));
   const candidates = [];
 
@@ -466,30 +507,39 @@ export async function clusterWithGemini(env, items, mayor, fetcher = fetch) {
     });
   }
 
-  let accepted = new Set();
+  /**
+   * التدقيق المستقل يرفع الدقة لكنه يضاعف كلفة الدمج، فيُطلب فقط إن سمحت
+   * الميزانية. عند تعذره نكتفي بالضوابط الحتمية التي مرت عليها المجموعات.
+   */
+  let accepted = new Set(candidates.map((_candidate, index) => index));
   if (candidates.length) {
-    const verification = await callGemini(
-      env,
-      [
-        "أنت مدقق دمج مستقل. قرر هل اقتباسات كل مجموعة تصف الحدث الواقعي نفسه فعلًا.",
-        "يجب أن يتطابق الفعل والشيء أو القرار أو المكان والزمن. الموضوع أو الشخص المشترك وحدهما لا يكفيان.",
-        "ارفض عند الشك، وعند اختلاف مشروعين أو قرارين أو مناسبتين حتى لو كان المجال واحدًا.",
-        JSON.stringify(
-          candidates.map((candidate, index) => ({
-            index,
-            proposed_event_ar: candidate.event_ar,
-            evidence: candidate.evidence,
-          })),
-        ),
-      ].join("\n"),
-      CLUSTER_SUPPORT_SCHEMA,
-      fetcher,
-    );
-    accepted = new Set(
-      (Array.isArray(verification?.groups) ? verification.groups : [])
-        .filter((row) => row?.same_event === true && Number.isInteger(row.index))
-        .map((row) => row.index),
-    );
+    try {
+      const verification = await callGemini(
+        env,
+        [
+          "أنت مدقق دمج مستقل. قرر هل اقتباسات كل مجموعة تصف الحدث الواقعي نفسه فعلًا.",
+          "يجب أن يتطابق الفعل والشيء أو القرار أو المكان والزمن. الموضوع أو الشخص المشترك وحدهما لا يكفيان.",
+          "ارفض عند الشك، وعند اختلاف مشروعين أو قرارين أو مناسبتين حتى لو كان المجال واحدًا.",
+          JSON.stringify(
+            candidates.map((candidate, index) => ({
+              index,
+              proposed_event_ar: candidate.event_ar,
+              evidence: candidate.evidence,
+            })),
+          ),
+        ].join("\n"),
+        CLUSTER_SUPPORT_SCHEMA,
+        fetcher,
+        "merge",
+      );
+      accepted = new Set(
+        (Array.isArray(verification?.groups) ? verification.groups : [])
+          .filter((row) => row?.same_event === true && Number.isInteger(row.index))
+          .map((row) => row.index),
+      );
+    } catch (error) {
+      if (!isDeferredAiError(error)) throw error;
+    }
   }
 
   const used = new Set();
