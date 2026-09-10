@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  BRIEF_STATE,
   aiBriefEnabled,
   buildAiBriefPrompt,
   clusterWithGemini,
@@ -9,6 +10,7 @@ import {
   validateAiBrief,
 } from "../src/aiBrief.js";
 import { MAYORS } from "../src/mayors.js";
+import { aiEnv } from "./helpers/aiEnv.js";
 
 const turin = MAYORS.find((mayor) => mayor.id === "turin");
 const seoul = MAYORS.find((mayor) => mayor.id === "seoul");
@@ -28,10 +30,14 @@ test("AI briefing is enabled only with a secret key", () => {
 
 test("pending and failed AI states never invent a news claim", () => {
   const pending = pendingAiBrief(turin);
-  const failed = pendingAiBrief(turin, true);
+  const deferred = pendingAiBrief(turin, BRIEF_STATE.DEFERRED);
+  const failed = pendingAiBrief(turin, BRIEF_STATE.FAILED);
   assert.equal(pending.engine, "brief-pending");
   assert.match(pending.title_ar, /بانتظار/);
   assert.equal(pending.snippet_ar, "");
+  assert.equal(deferred.engine, "brief-deferred");
+  assert.match(deferred.title_ar, /حصة/);
+  assert.equal(deferred.snippet_ar, "");
   assert.equal(failed.engine, "brief-ai-error");
   assert.match(failed.title_ar, /تعذر/);
   assert.equal(failed.snippet_ar, "");
@@ -94,7 +100,7 @@ test("Gemini brief accepts only facts backed by exact page quotes", async () => 
   };
 
   const brief = await summarizeWithGemini(
-    { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+    aiEnv({ AI_VERIFY_BRIEFS: "1" }),
     article,
     turin,
     fetcher,
@@ -201,7 +207,7 @@ test("a second AI pass rejects a claim contradicted by its quote", async () => {
   });
   await assert.rejects(
     summarizeWithGemini(
-      { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+      aiEnv({ AI_VERIFY_BRIEFS: "1" }),
       {
         ...article,
         title: "Stefano Lo Russo: non è un'emergenza",
@@ -281,7 +287,7 @@ test("AI clustering can merge one event reported in different scripts", async ()
     },
   });
   const groups = await clusterWithGemini(
-    { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+    aiEnv(),
     items,
     seoul,
     fetcher,
@@ -344,7 +350,7 @@ test("AI clustering keeps cards separate when the independent merge check reject
     },
   });
   const groups = await clusterWithGemini(
-    { GEMINI_API_KEY: "secret", GEMINI_MODEL: "gemini-test" },
+    aiEnv(),
     items,
     seoul,
     fetcher,

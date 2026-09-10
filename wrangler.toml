@@ -5,16 +5,21 @@ account_id = "3b610858141e23b8b21c10aaf2387b67"
 keep_vars = true
 
 [vars]
-GEMINI_MODEL = "gemini-3.8-flash"
+# الطبقة المجانية من الطراز الكامل تمنح ~20 نداءً يوميًا، وهذا الطراز يمنح مئات.
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+# سقف يومي متحفظ يبقى تحت حصة المزوّد، وتباعد يحمي من حد الدقيقة.
+AI_DAILY_LIMIT = "400"
+AI_MIN_INTERVAL_MS = "4000"
 
 [assets]
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
 
-# Sunday 06:00 Asia/Riyadh = Sunday 03:00 UTC
+# Sunday 06:00 Asia/Riyadh = Sunday 03:00 UTC للرصد الأسبوعي،
+# وكل عشر دقائق لتصريف الموجزات المعلقة حتى تكتمل الرحلة بلا تدخل.
 [triggers]
-crons = ["0 3 * * SUN"]
+crons = ["0 3 * * SUN", "*/10 * * * *"]
 
 [[queues.producers]]
 binding = "SCAN_QUEUE"

@@ -54,6 +54,7 @@ function displayTitle(it) {
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
   if (engine.startsWith("brief-ai-gemini-v2:")) return "ملخص AI موثّق";
+  if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
 }
@@ -174,8 +175,29 @@ async function loadStats() {
   applyPlatform(s.sources.google_news === "ready" || s.sources.google_news?.on !== false, "led-google", "src-google");
   applyPlatform(s.sources.official === "ready" || s.sources.official?.on !== false, "led-official", "src-official");
   applyPlatform(s.sources.ai_brief === "ready", "led-ai", "src-ai");
-  $("src-ai").textContent = s.sources.ai_brief === "ready" ? "يقرأ الصفحة" : "غير مربوط";
+  $("src-ai").textContent = aiSourceLabel(s);
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
+}
+
+function humanWait(seconds) {
+  const total = Number(seconds) || 0;
+  if (total < 90) return `${Math.max(1, Math.round(total))} ثانية`;
+  if (total < 5400) return `${Math.round(total / 60)} دقيقة`;
+  return `${Math.round(total / 3600)} ساعة`;
+}
+
+/** يقول للمستخدم بصراحة لماذا يتأخر التلخيص ومتى يستأنف من تلقاء نفسه. */
+function aiSourceLabel(s) {
+  if (s.sources?.ai_brief !== "ready") return "غير مربوط";
+  const budget = s.ai?.budget;
+  const pending = Number(s.ai?.pending) || 0;
+  if (budget?.blocked) {
+    return `الحصة مغلقة · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
+  }
+  if (pending) {
+    return `يقرأ الصفحة · بقي ${num(pending)} · متبقٍ اليوم ${num(budget?.remaining)}`;
+  }
+  return `يقرأ الصفحة · متبقٍ اليوم ${num(budget?.remaining)}`;
 }
 
 function itemsQuery() {
@@ -325,6 +347,7 @@ const STAGE_LABELS = {
   merging: "دمج الحدث المتكرر",
   summarizing: "قراءة وتدقيق AI",
   ai_pending: "بانتظار إكمال قراءة AI",
+  ai_waiting_quota: "بانتظار حصة AI — يستأنف تلقائيًا",
   ai_failed: "تعذر تلخيص AI",
   completed: "اكتمل",
   retrying: "إعادة محاولة",
@@ -336,7 +359,9 @@ function renderSearchProgress(job) {
   box.hidden = false;
   const tasks = job.tasks || [];
   const hasAiFailure = tasks.some((task) => task.stage === "ai_failed");
-  const hasAiPending = tasks.some((task) => task.stage === "ai_pending");
+  const hasAiPending = tasks.some((task) =>
+    ["ai_pending", "ai_waiting_quota"].includes(task.stage),
+  );
   const visualStatus = hasAiFailure ? "failed" : hasAiPending ? "partial" : job.status;
   box.dataset.status = visualStatus;
   const done = Number(job.completed) + Number(job.failed);
@@ -371,7 +396,7 @@ function renderSearchProgress(job) {
       const className =
         task.stage === "ai_failed"
           ? "failed"
-          : task.stage === "ai_pending"
+          : ["ai_pending", "ai_waiting_quota"].includes(task.stage)
             ? "running"
             : task.status === "completed"
           ? "completed"
