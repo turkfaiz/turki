@@ -230,6 +230,35 @@ function readout(label, value, note, percent = null, tone = "") {
     </div>`;
 }
 
+const TOOL_ICONS = {
+  list: '<path d="M4 6h12M4 10h12M4 14h8"/>',
+  page: '<path d="M5 3h7l4 4v10H5z"/><path d="M12 3v4h4"/>',
+  spark: '<path d="M10 3l1.8 4.2L16 9l-4.2 1.8L10 15l-1.8-4.2L4 9l4.2-1.8z"/>',
+  merge: '<path d="M6 3v4a4 4 0 004 4h4"/><path d="M12 8l3 3-3 3"/><path d="M6 11v6"/>',
+  queue: '<path d="M3 5h14M3 10h14M3 15h14"/><circle cx="6" cy="5" r="1.4"/><circle cx="10" cy="10" r="1.4"/>',
+  clock: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/>',
+  db: '<ellipse cx="10" cy="5" rx="6" ry="2.4"/><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5"/><path d="M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/>',
+  ban: '<circle cx="10" cy="10" r="7"/><path d="M5.5 5.5l9 9"/>',
+};
+
+function toolIcon(name) {
+  return `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
+}
+
+/** رقاقة أداة: أيقونة، واسم، ونقطة حالة تفاعلية تكشف تفصيل عملها. */
+function toolChip(tool) {
+  const tone = tool.ok === null ? "off" : tool.ok ? "ok" : "bad";
+  const label = tool.ok === null ? "معطّلة بالحوكمة" : tool.ok ? "تعمل" : "متوقفة";
+  return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
+      aria-expanded="false" title="${escapeHtml(label)}">
+      <span class="tool-icon">${toolIcon(tool.icon)}</span>
+      <span class="tool-name">${escapeHtml(tool.name)}</span>
+      <span class="tool-dot" aria-hidden="true"></span>
+      <span class="tool-state">${escapeHtml(label)}</span>
+    </button>`;
+}
+
 function statusRow(tone, title, note) {
   return `<li><span class="diag-dot ${tone}"></span>
       <span>${title}<small>${note}</small></span></li>`;
@@ -237,8 +266,25 @@ function statusRow(tone, title, note) {
 
 function sourceTone(source) {
   if (Number(source.consecutive_failures) >= 3) return "bad";
-  if (!source.last_ok_at) return "warn";
-  return "ok";
+  if (source.last_ok_at) return "ok";
+  return "warn";
+}
+
+/**
+ * «لم يُفحص بعد» كانت صياغة مضلّلة: كل مصدر فُحص عند إعداد السجل، والمقصود أن
+ * هذا التشغيل لم يفتحه بعد. النص هنا يفصل بين الأمرين بصراحة.
+ */
+function sourceTitle(source) {
+  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${source.kind === "feed" ? "تغذية RSS" : "صفحة أخبار الموقع"}`;
+  const curated = source.verified
+    ? `مُتحقق منه بالفحص عند الإعداد (${source.curated_at || "—"})`
+    : `فُحص عند الإعداد ولم يستجب من شبكة الفحص، وبقي لأنه المصدر الأصلي للمدينة`;
+  const runtime = source.last_ok_at
+    ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
+    : source.last_status
+      ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
+      : "لم يُشغّل بعد في هذه البيئة";
+  return `${role}\n${curated}\n${runtime}`;
 }
 
 function renderDiagnostics(d) {
@@ -268,7 +314,9 @@ function renderDiagnostics(d) {
       : `${d.ai.model || "—"} · نداء واحد لكل موجز`;
 
   $("diag-body").innerHTML = `
-    <div class="board-bar">
+    <section class="board-section">
+      <h4>١ · القراءات الرئيسية</h4>
+      <div class="board-bar">
       ${readout(
         "موجزات مكتملة",
         `${num(b.completed)}${briefTotal ? ` / ${num(briefTotal)}` : ""}`,
@@ -296,11 +344,18 @@ function renderDiagnostics(d) {
         `${num(d.window?.total)} خبرًا داخل النافذة · يُحذف ما بعدها بعد ${num(d.retentionDays)} أيام`,
         null,
       )}
-    </div>
+      </div>
+    </section>
+
+    <section class="board-section">
+      <h4>٢ · الأدوات — اضغط أي أداة لمعرفة عملها</h4>
+      <div class="tools">${(d.tools || []).map(toolChip).join("")}</div>
+      <p class="tool-detail" id="tool-detail" hidden></p>
+    </section>
 
     <div class="board-panels">
       <section class="panel">
-        <h4>مسار التلخيص</h4>
+        <h4>٣ · مسار التلخيص</h4>
         <ul class="gauges">
           ${[
             ["مكتمل وموثّق", b.completed, "ok"],
@@ -333,7 +388,7 @@ function renderDiagnostics(d) {
       </section>
 
       <section class="panel">
-        <h4>آخر رصد</h4>
+        <h4>٤ · آخر رصد</h4>
         ${d.lastScan
           ? `<ul class="diag-list">
               ${statusRow(
@@ -343,43 +398,52 @@ function renderDiagnostics(d) {
               )}
             </ul>`
           : `<p class="diag-note">لم يُشغّل رصد بعد.</p>`}
-        <h4 class="panel-sub">المصادر المعتمدة لكل مكتب</h4>
+        <h4 class="panel-sub">٥ · المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب</h4>
         <div class="office-grid">
-          ${[...grouped.values()].map((sources) => {
-            const tones = sources.map(sourceTone);
-            const tone = tones.every((t) => t === "ok")
-              ? "ok"
-              : tones.some((t) => t === "ok")
-                ? "warn"
-                : "bad";
-            return `<article class="office-card ${tone}">
-              <header><b>${escapeHtml(sources[0].name_ar)}</b><span class="diag-dot ${tone}"></span></header>
-              <ul>
-                ${sources.map((s) => `<li>
-                  <span class="diag-dot ${sourceTone(s)}"></span>
-                  <span>${escapeHtml(s.domain)}
-                  <small>${s.tier === 0 ? "رسمي" : "محلي"} · ${s.kind === "feed" ? "تغذية" : "صفحة"} · ${
-                    s.last_ok_at
-                      ? `${num(s.last_items)} عنصر`
-                      : s.last_status
-                        ? escapeHtml(String(s.last_status).slice(0, 30))
-                        : "لم يُفحص بعد"
-                  }</small></span></li>`).join("")}
-              </ul>
-            </article>`;
-          }).join("")}
+          ${[...grouped.values()].map((sources) => `
+            <article class="office-card">
+              <b>${escapeHtml(sources[0].name_ar)}</b>
+              <span class="office-sources">
+                ${sources.map((s) => `<i class="src ${sourceTone(s)}" title="${escapeHtml(sourceTitle(s))}">${escapeHtml(s.domain)}</i>`).join("")}
+              </span>
+            </article>`).join("")}
         </div>
+        <p class="diag-note">
+          نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
+        </p>
       </section>
     </div>`;
 }
 
 async function loadDiagnostics() {
   try {
-    renderDiagnostics(await api("/api/diagnostics"));
+    const data = await api("/api/diagnostics");
+    state.tools = data.tools || [];
+    renderDiagnostics(data);
   } catch (error) {
     $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
   }
 }
+
+$("diag-body").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tool]");
+  if (!btn) return;
+  const box = $("tool-detail");
+  const tool = (state.tools || []).find((entry) => entry.id === btn.dataset.tool);
+  const alreadyOpen = btn.getAttribute("aria-expanded") === "true";
+  document.querySelectorAll("button[data-tool]").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+    el.classList.remove("on");
+  });
+  if (alreadyOpen || !tool) {
+    box.hidden = true;
+    return;
+  }
+  btn.setAttribute("aria-expanded", "true");
+  btn.classList.add("on");
+  box.hidden = false;
+  box.innerHTML = `<b>${escapeHtml(tool.name)}</b> — ${escapeHtml(tool.detail)}`;
+});
 
 function itemsQuery() {
   const qs = new URLSearchParams({ status: state.status });
