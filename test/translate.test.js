@@ -139,6 +139,57 @@ test("an exhausted AI budget defers articles without spending their retries", as
   assert.equal(rows[1].brief_attempts, 0);
 });
 
+test("a grounded answer is stored as a real Arabic brief and leaves nothing pending", async () => {
+  const rows = [articleRow("a")];
+  const env = {
+    GEMINI_API_KEY: "secret",
+    GEMINI_MODEL: "gemini-test",
+    AI_DAILY_LIMIT: "50",
+    AI_MIN_INTERVAL_MS: "0",
+    DB: fakeItemsDb(rows),
+  };
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        steps: [
+          {
+            type: "model_output",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
+                  headline_evidence:
+                    "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
+                  facts: [
+                    {
+                      fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
+                      evidence: "La festa è prevista sabato 12 settembre.",
+                    },
+                  ],
+                  topic_ar: "افتتاح شارع للمشاة",
+                }),
+              },
+            ],
+          },
+        ],
+      };
+    },
+  });
+
+  const summary = await translatePending(env, 1, null);
+  assert.equal(summary.summarized, 1);
+  assert.equal(summary.deferred, 0);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.pending, 0);
+  assert.equal(rows[0].trans_engine, "brief-ai-gemini-v2:gemini-test");
+  assert.match(rows[0].title_ar, /ستيفانو لو روسو يفتتح/);
+  assert.match(rows[0].snippet_ar, /12 سبتمبر/);
+  assert.equal(rows[0].brief_error, null);
+});
+
 test("a genuinely ungrounded answer counts as an attempt and ends in a failed state", async () => {
   const rows = [articleRow("a")];
   const db = fakeItemsDb(rows);
