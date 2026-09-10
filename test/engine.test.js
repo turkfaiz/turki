@@ -5,12 +5,14 @@ import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
 import { isAboutMayor } from "../src/mayors.js";
+import { extractArticleLinks, stampBrief } from "../src/collect.js";
 import {
-  isUnreadableWrapper,
-  parseSitemap,
-  stampBrief,
-  unwrapBingUrl,
-} from "../src/collect.js";
+  APPROVED_SOURCES,
+  MAX_SOURCES_PER_OFFICE,
+  approvedSourceFor,
+  isApprovedUrl,
+  sourcesFor,
+} from "../src/sources.js";
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
@@ -105,31 +107,68 @@ test("inbox rows wait for AI instead of receiving an unsafe rule-based brief", (
   assert.equal(skipped.trans_engine, null);
 });
 
-test("discovery keeps publisher urls and drops unreadable aggregator wrappers", () => {
-  assert.equal(
-    unwrapBingUrl(
-      "http://www.bing.com/news/apiclick.aspx?ref=FexRss&url=https%3A%2F%2Fwww.lastampa.it%2Ftorino&c=1",
-    ),
-    "https://www.lastampa.it/torino",
-  );
-  assert.equal(unwrapBingUrl("https://www.lastampa.it/torino"), "https://www.lastampa.it/torino");
-  assert.equal(isUnreadableWrapper("https://news.google.com/rss/articles/CBMiabc"), true);
-  assert.equal(isUnreadableWrapper("https://www.comune.torino.it/via-roma"), false);
+test("every office is governed by at most three approved sources, ranked", () => {
+  for (const mayor of MAYORS) {
+    const sources = sourcesFor(mayor.id);
+    assert.ok(sources.length > 0, `${mayor.id} has no approved source`);
+    assert.ok(
+      sources.length <= MAX_SOURCES_PER_OFFICE,
+      `${mayor.id} exceeds the source cap`,
+    );
+    assert.deepEqual(
+      sources.map((source) => source.rank),
+      sources.map((_source, index) => index + 1),
+    );
+    assert.equal(sources[0].tier, 0, `${mayor.id} must lead with its official newsroom`);
+    for (const source of sources) {
+      assert.match(source.url, /^https:\/\//);
+      assert.ok(["feed", "page"].includes(source.kind));
+    }
+  }
+  assert.equal(APPROVED_SOURCES.length, MAYORS.length * MAX_SOURCES_PER_OFFICE);
 });
 
-test("official sitemap discovery reads page urls and update dates", () => {
-  const parsed = parseSitemap(`<?xml version="1.0"?>
-    <urlset>
-      <url>
-        <loc>https://city.example/news/mayor-update</loc>
-        <lastmod>2026-09-09T10:00:00Z</lastmod>
-      </url>
-    </urlset>`);
-  assert.equal(parsed.index, false);
-  assert.deepEqual(parsed.rows, [
-    {
-      loc: "https://city.example/news/mayor-update",
-      lastmod: "2026-09-09T10:00:00Z",
-    },
+test("only approved domains may be opened, and never an aggregator wrapper", () => {
+  assert.equal(isApprovedUrl("https://www.comune.torino.it/via-roma", "turin"), true);
+  assert.equal(
+    approvedSourceFor("https://torino.repubblica.it/2026/09/piano", "turin").tier,
+    1,
+  );
+  // نطاق معتمد لمكتب آخر لا يفتح لهذا المكتب.
+  assert.equal(isApprovedUrl("https://www.comune.torino.it/via-roma", "seoul"), false);
+  // المجمّعات ومحركات البحث خارج السجل نهائيًا.
+  assert.equal(isApprovedUrl("https://news.google.com/rss/articles/CBMiabc", "turin"), false);
+  assert.equal(isApprovedUrl("https://www.bing.com/news/apiclick.aspx?url=x", "turin"), false);
+  assert.equal(isApprovedUrl("https://random-blog.example/turin", "turin"), false);
+});
+
+test("newsroom page extraction stays inside the approved domain", () => {
+  const html = `
+    <a href="/ar/gam/news-details.aspx?id=1024">قرار أمانة عمّان الجديد</a>
+    <a href="https://www.ammancity.gov.jo/ar/gam/news/2026-plan-approved">خطة 2026</a>
+    <a href="https://twitter.com/ammancity">تابعنا</a>
+    <a href="/ar/gam/category/news/">الأخبار</a>
+    <a href="/logo.png">صورة</a>
+    <a href="#top">أعلى</a>`;
+  const links = extractArticleLinks(html, "https://www.ammancity.gov.jo/ar/gam/news.aspx");
+  const urls = links.map((link) => link.url);
+  assert.equal(urls.length, 2);
+  assert.ok(urls.every((url) => url.includes("ammancity.gov.jo")));
+  assert.ok(!urls.some((url) => url.includes("twitter.com")), "external domains are dropped");
+  assert.ok(!urls.some((url) => url.includes("/category/")), "navigation pages are dropped");
+  assert.ok(!urls.some((url) => url.endsWith(".png")), "assets are dropped");
+});
+
+test("page extraction ignores service pages outside the newsroom", () => {
+  const html = `
+    <a href="/ar/gam/news-details.aspx?id=1024">قرار جديد</a>
+    <a href="/ar/eservices/BuildingsAndLandTax.aspx">ضريبة الأبنية</a>
+    <a href="/ar/gameservices/eservices.aspx">الخدمات الإلكترونية</a>`;
+  const urls = extractArticleLinks(
+    html,
+    "https://www.ammancity.gov.jo/ar/gam/news.aspx",
+  ).map((link) => link.url);
+  assert.deepEqual(urls, [
+    "https://www.ammancity.gov.jo/ar/gam/news-details.aspx?id=1024",
   ]);
 });
