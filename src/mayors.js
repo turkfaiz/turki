@@ -266,11 +266,37 @@ function identityText(value) {
     .trim();
 }
 
+/** الكتابات التي لا تفصل الكلمات بمسافات: الصينية واليابانية والكورية. */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+/**
+ * المطابقة بحدود المسافات صحيحة للغات التي تفصل كلماتها، وخاطئة لما سواها:
+ * «横山英幸市長» كلمة واحدة متصلة، و«오세훈은» تلتصق بها اللاحقة. اشتراط مسافة
+ * حول الاسم كان يُسقط هذه الأخبار كلها رغم أنها عن العمدة صراحةً.
+ */
 function containsIdentity(text, phrase) {
   const hay = identityText(text);
   const needle = identityText(phrase);
   if (!hay || !needle) return false;
+  if (UNSPACED_SCRIPT.test(needle)) {
+    return needle.length >= 2 && hay.includes(needle);
+  }
   return ` ${hay} `.includes(` ${needle} `);
+}
+
+/**
+ * مطابقة موضوع البحث: كل كلمة في الموضوع يجب أن ترد في نص الخبر. المطابقة
+ * تتجاهل الحركات وعلامات الترقيم، وتقبل التصاق اللواحق في الكتابات غير المفصولة.
+ * السلوك «كل الكلمات» لا «أيها»، حتى لا يوسّع الموضوع النتائج بدل أن يضيّقها.
+ */
+export function matchesTopic(text, topic) {
+  const words = identityText(topic).split(" ").filter(Boolean);
+  if (!words.length) return true;
+  const hay = identityText(text);
+  if (!hay) return false;
+  return words.every((word) =>
+    UNSPACED_SCRIPT.test(word) ? hay.includes(word) : ` ${hay} `.includes(` ${word} `),
+  );
 }
 
 export function isAboutMayor(text, mayor) {

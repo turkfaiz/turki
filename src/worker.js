@@ -639,6 +639,7 @@ const SEARCH_TOTAL_KEYS = [
   "skippedUntrusted",
   "discovered",
   "opened",
+  "skippedTopic",
   "summarized",
   "aiPending",
   "aiFailed",

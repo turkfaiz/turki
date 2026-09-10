@@ -734,14 +734,20 @@ $("search-form").addEventListener("submit", async (e) => {
       ? ` · تعذر ${num(result.failedOffices)} مكتب`
       : "";
     const sourceErrors = Number(result.sourceErrors) || 0;
-    const sourceWarning = sourceErrors ? ` · أخطاء مصادر ${num(sourceErrors)}` : "";
+    // تمييز «لا نتائج» عن «لم يكتمل الفحص» عن «صفّاها الموضوع».
+    const sourceWarning = sourceErrors
+      ? ` · تعذّر ${num(sourceErrors)} مصدر فلم يكتمل الفحص`
+      : "";
+    const topicNote = Number(result.skippedTopic)
+      ? ` · استبعد الموضوع ${num(result.skippedTopic)}`
+      : "";
     const aiWarning = Number(result.aiFailed)
       ? ` · تعذر AI ${num(result.aiFailed)}`
       : Number(result.aiPending)
         ? ` · بانتظار AI ${num(result.aiPending)}`
         : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${aiWarning}${sourceWarning}${failed}.`,
+      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${topicNote}${aiWarning}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);
