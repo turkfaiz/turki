@@ -305,6 +305,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
       skippedUnrelated: 0,
       skippedUntrusted: 0,
       held: 0,
+      updated: 0,
       discovered: 0,
       opened: 0,
       errors: ["mayor_not_found"],
@@ -319,6 +320,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
   let skippedUnrelated = 0;
   let skippedUntrusted = 0;
   let held = 0;
+  let updated = 0;
   let discovered = 0;
   let opened = 0;
   const allErrors = [];
@@ -398,6 +400,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
           row.source === "official" || existing.source === "official" ? "official" : existing.source;
         const refreshed = refreshSourceDocuments(existing, row, verdict.publisher_domain);
         const changed = refreshed.changed ? 1 : 0;
+        if (changed) updated += 1;
         await env.DB.prepare(
           `UPDATE items
            SET source = ?, title = ?, title_normalized = ?, url = ?, published_at = ?,
@@ -521,6 +524,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     skippedUnrelated,
     skippedUntrusted,
     held,
+    updated,
     discovered,
     opened,
     errors: allErrors,

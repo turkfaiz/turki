@@ -252,7 +252,10 @@ async function applyMerges(env, merges) {
   }
 }
 
-export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
+export async function reviewInbox(
+  env,
+  { mayorId = null, limit = 500, useAiMerge = true } = {},
+) {
   const clauses = ["status IN ('inbox', 'approved')"];
   const binds = [];
   if (mayorId) {
@@ -272,7 +275,7 @@ export async function reviewInbox(env, { mayorId = null, limit = 500 } = {}) {
     .all();
 
   let plan = planInboxReview(results || []);
-  if (aiBriefEnabled(env) && plan.trusted.length > 1) {
+  if (useAiMerge && aiBriefEnabled(env) && plan.trusted.length > 1) {
     const byMayor = new Map();
     for (const item of plan.trusted) {
       if (!byMayor.has(item.mayor_id)) byMayor.set(item.mayor_id, []);
