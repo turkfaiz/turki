@@ -285,14 +285,48 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 /** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
+async function aiBriefState(env, mayorId) {
+  const row = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed
+     FROM items
+     WHERE mayor_id = ?
+       AND (
+         status IN ('inbox', 'approved')
+         OR (
+           status = 'excluded'
+           AND publisher_tier IN (0, 1)
+           AND LENGTH(IFNULL(article_text, '')) > 80
+         )
+       )`,
+  )
+    .bind(mayorId)
+    .first();
+  return { pending: Number(row?.pending) || 0, failed: Number(row?.failed) || 0 };
+}
+
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await onProgress("merging", "يدمج التغطيات المتكررة للحدث نفسه");
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
   await onProgress("summarizing", "يقرأ الذكاء الاصطناعي نصوص الصفحات المدمجة ويدققها");
   const summarized = await translatePending(env, 12, scanOpts.mayorId || null);
-  await onProgress("completed", `اكتمل: جديد ${result.found}، ملخص AI ${summarized}`);
-  return { ...result, review, summarized };
+  const ai = await aiBriefState(env, scanOpts.mayorId);
+  if (ai.failed) {
+    await onProgress("ai_failed", `تعذر تلخيص ${ai.failed} خبر وسيعاد لاحقًا`);
+  } else if (ai.pending) {
+    await onProgress("ai_pending", `بقي ${ai.pending} خبر بانتظار قراءة AI`);
+  } else {
+    await onProgress("completed", `اكتمل: جديد ${result.found}، ملخص AI ${summarized}`);
+  }
+  return {
+    ...result,
+    review,
+    summarized,
+    aiPending: ai.pending,
+    aiFailed: ai.failed,
+  };
 }
 
 async function finishAllOffices(env, type = "weekly") {
@@ -337,6 +371,8 @@ const SEARCH_TOTAL_KEYS = [
   "discovered",
   "opened",
   "summarized",
+  "aiPending",
+  "aiFailed",
 ];
 
 function parseTaskResult(value) {
@@ -512,14 +548,24 @@ async function processQueuedSearch(env, message) {
       mayorId,
     }, onProgress);
     if (jobId) {
+      const finalStage = result.aiFailed
+        ? "ai_failed"
+        : result.aiPending
+          ? "ai_pending"
+          : "completed";
+      const finalDetail = result.aiFailed
+        ? `تعذر تلخيص ${result.aiFailed} خبر`
+        : result.aiPending
+          ? `بقي ${result.aiPending} خبر بانتظار AI`
+          : "اكتمل الرصد والتلخيص";
       await env.DB.prepare(
         `UPDATE search_job_tasks
          SET status = 'completed', finished_at = datetime('now'),
-             stage = 'completed', detail = 'اكتمل الرصد والتلخيص',
+             stage = ?, detail = ?,
              result_json = ?, error = NULL
          WHERE job_id = ? AND mayor_id = ?`,
       )
-        .bind(JSON.stringify(result), jobId, mayorId)
+        .bind(finalStage, finalDetail, JSON.stringify(result), jobId, mayorId)
         .run();
       await refreshSearchJobStatus(env, jobId);
     }

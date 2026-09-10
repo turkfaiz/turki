@@ -324,6 +324,8 @@ const STAGE_LABELS = {
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
   summarizing: "قراءة وتدقيق AI",
+  ai_pending: "بانتظار إكمال قراءة AI",
+  ai_failed: "تعذر تلخيص AI",
   completed: "اكتمل",
   retrying: "إعادة محاولة",
   failed: "تعذر",
@@ -332,21 +334,46 @@ const STAGE_LABELS = {
 function renderSearchProgress(job) {
   const box = $("search-progress");
   box.hidden = false;
+  const tasks = job.tasks || [];
+  const hasAiFailure = tasks.some((task) => task.stage === "ai_failed");
+  const hasAiPending = tasks.some((task) => task.stage === "ai_pending");
+  const visualStatus = hasAiFailure ? "failed" : hasAiPending ? "partial" : job.status;
+  box.dataset.status = visualStatus;
   const done = Number(job.completed) + Number(job.failed);
   const total = Number(job.total) || 1;
   const percent = Math.min(100, Math.round((done / total) * 100));
   $("progress-title").textContent =
-    job.status === "completed"
+    hasAiFailure
+      ? "اكتمل الرصد وتعذر بعض تلخيص AI"
+      : hasAiPending
+        ? "اكتمل الرصد وبقي تلخيص AI"
+        : job.status === "completed"
       ? "اكتمل الرصد"
       : job.status === "partial"
         ? "اكتمل الرصد مع تعذر بعض المكاتب"
         : "جاري الرصد في الخلفية";
   $("progress-count").textContent = `${done} / ${job.total}`;
   $("progress-bar").style.width = `${percent}%`;
-  $("progress-tasks").innerHTML = (job.tasks || [])
+  const active = tasks.filter((task) => ["running", "retrying"].includes(task.status));
+  const failedTask = tasks.find((task) => task.status === "failed");
+  const completedTask = [...tasks].reverse().find((task) => task.status === "completed");
+  const visibleTasks = active.length
+    ? [active[0]]
+    : failedTask
+      ? [failedTask]
+      : completedTask
+        ? [completedTask]
+        : tasks.length
+          ? [tasks[0]]
+          : [];
+  $("progress-tasks").innerHTML = visibleTasks
     .map((task) => {
       const className =
-        task.status === "completed"
+        task.stage === "ai_failed"
+          ? "failed"
+          : task.stage === "ai_pending"
+            ? "running"
+            : task.status === "completed"
           ? "completed"
           : task.status === "failed"
             ? "failed"
@@ -424,8 +451,13 @@ $("search-form").addEventListener("submit", async (e) => {
       : "";
     const sourceErrors = Number(result.sourceErrors) || 0;
     const sourceWarning = sourceErrors ? ` · أخطاء مصادر ${num(sourceErrors)}` : "";
+    const aiWarning = Number(result.aiFailed)
+      ? ` · تعذر AI ${num(result.aiFailed)}`
+      : Number(result.aiPending)
+        ? ` · بانتظار AI ${num(result.aiPending)}`
+        : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${sourceWarning}${failed}.`,
+      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${aiWarning}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);

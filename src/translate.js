@@ -28,7 +28,12 @@ export async function translatePending(env, limit = 12, mayorId = null) {
   if (!aiReady) return 0;
   const targetEngine = aiBriefEngine(env);
   const clauses = [
-    "items.status IN ('inbox', 'approved')",
+    `(items.status IN ('inbox', 'approved')
+      OR (
+        items.status = 'excluded'
+        AND items.publisher_tier IN (0, 1)
+        AND LENGTH(IFNULL(items.article_text, '')) > 80
+      ))`,
     "(items.brief_error IS NULL OR items.brief_attempted_at IS NULL OR items.brief_attempted_at <= datetime('now', '-30 minutes'))",
   ];
   const binds = [];

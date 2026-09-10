@@ -143,9 +143,12 @@ h1 {
   display: block;
   width: 0;
   height: 100%;
-  background: var(--wine);
+  background: var(--navy);
   transition: width 240ms ease;
 }
+.search-progress[data-status="completed"] .progress-track span { background: var(--good); }
+.search-progress[data-status="partial"] .progress-track span { background: #be7b12; }
+.search-progress[data-status="failed"] .progress-track span { background: var(--bad); }
 .progress-tasks {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
