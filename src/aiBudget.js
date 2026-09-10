@@ -16,6 +16,11 @@ const PROVIDER_COOLDOWN_SECONDS = 90;
 const MAX_COOLDOWN_SECONDS = 6 * 3600;
 const BUDGET_HISTORY_DAYS = 7;
 
+/** حصة المزوّد اليومية تُصفَّر عند منتصف ليل المحيط الهادئ، فيتبعها عدادنا. */
+const QUOTA_TIMEZONE = "America/Los_Angeles";
+/** عند رفض المزوّد لحد يومي نتوقف ساعة ثم نجرب، بدل تخمين لحظة التصفير. */
+const DAILY_PROBE_SECONDS = 3600;
+
 export const AI_DEFERRED = "ai_deferred";
 
 export class AiDeferredError extends Error {
@@ -50,17 +55,26 @@ export function purposeLimit(dailyLimit, purpose) {
   return Math.max(1, Math.floor(dailyLimit * share));
 }
 
-export function utcDay(now = new Date()) {
-  return now.toISOString().slice(0, 10);
+export function quotaDay(now = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: QUOTA_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
 }
 
-export function secondsUntilUtcMidnight(now = new Date()) {
-  const next = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() + 1,
-  );
-  return Math.max(60, Math.ceil((next - now.getTime()) / 1000));
+export function secondsUntilQuotaReset(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: QUOTA_TIMEZONE,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(now);
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  const elapsed = (value("hour") % 24) * 3600 + value("minute") * 60 + value("second");
+  return Math.max(60, 86400 - elapsed);
 }
 
 function secondsUntil(iso, now = new Date()) {
@@ -86,7 +100,7 @@ async function readDay(env, day) {
 export async function reserveAiCall(env, purpose = "brief") {
   const { dailyLimit, minIntervalMs } = budgetSettings(env);
   const limit = purposeLimit(dailyLimit, purpose);
-  const day = utcDay();
+  const day = quotaDay();
   const pacing = `-${(minIntervalMs / 1000).toFixed(3)} seconds`;
 
   const result = await env.DB.prepare(
@@ -115,8 +129,7 @@ export async function reserveAiCall(env, purpose = "brief") {
     return {
       ok: false,
       reason: purpose === "brief" ? "daily_limit" : "merge_share_spent",
-      retryAfterSeconds:
-        purpose === "brief" ? secondsUntilUtcMidnight() : secondsUntilUtcMidnight(),
+      retryAfterSeconds: secondsUntilQuotaReset(),
     };
   }
   return {
@@ -129,7 +142,7 @@ export async function reserveAiCall(env, purpose = "brief") {
 /** يوقف كل النظام مؤقتًا بدل أن يصطدم كل عامل بالحد بمفرده. */
 export async function blockAiCalls(env, seconds, reason = "provider_cooldown") {
   const wait = Math.min(Math.max(Math.round(seconds) || PROVIDER_COOLDOWN_SECONDS, 1), MAX_COOLDOWN_SECONDS);
-  const day = utcDay();
+  const day = quotaDay();
   await env.DB.prepare(
     `INSERT INTO ai_budget (day, calls, blocked_until, block_reason)
      VALUES (?, 0, datetime('now', ?), ?)
@@ -153,7 +166,11 @@ export async function noteAiFailure(env, error) {
     return blockAiCalls(env, error?.retryAfterSeconds || 30, "provider_error");
   }
   if (error?.quotaScope === "day") {
-    return blockAiCalls(env, secondsUntilUtcMidnight(), "daily_limit");
+    return blockAiCalls(
+      env,
+      Math.min(DAILY_PROBE_SECONDS, secondsUntilQuotaReset()),
+      "daily_limit",
+    );
   }
   return blockAiCalls(
     env,
@@ -164,7 +181,7 @@ export async function noteAiFailure(env, error) {
 
 export async function budgetState(env) {
   const { dailyLimit, minIntervalMs } = budgetSettings(env);
-  const day = utcDay();
+  const day = quotaDay();
   const row = await readDay(env, day);
   const used = Number(row?.calls || 0);
   const cooldown = secondsUntil(row?.blocked_until);

@@ -6,7 +6,8 @@ import {
   noteAiFailure,
   purposeLimit,
   reserveAiCall,
-  secondsUntilUtcMidnight,
+  quotaDay,
+  secondsUntilQuotaReset,
 } from "../src/aiBudget.js";
 import { summarizeWithGemini } from "../src/aiBrief.js";
 import { MAYORS } from "../src/mayors.js";
@@ -36,7 +37,7 @@ test("the daily ceiling stops further calls and reports when the day resets", as
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, "daily_limit");
   assert.ok(blocked.retryAfterSeconds > 0);
-  assert.ok(blocked.retryAfterSeconds <= secondsUntilUtcMidnight() + 5);
+  assert.ok(blocked.retryAfterSeconds <= secondsUntilQuotaReset() + 5);
 });
 
 test("pacing spaces calls apart instead of hammering the provider", async () => {
@@ -48,13 +49,24 @@ test("pacing spaces calls apart instead of hammering the provider", async () => 
   assert.equal(paced.retryAfterSeconds, 60);
 });
 
+test("the budget day follows the provider's Pacific reset, not UTC", () => {
+  // منتصف ليل لوس أنجلوس صيفًا هو 07:00 بتوقيت UTC، فما قبله يوم سابق.
+  assert.equal(quotaDay(new Date("2026-09-10T06:00:00Z")), "2026-09-09");
+  assert.equal(quotaDay(new Date("2026-09-10T07:00:00Z")), "2026-09-10");
+  assert.equal(quotaDay(new Date("2026-09-10T19:00:00Z")), "2026-09-10");
+  const justBeforeReset = secondsUntilQuotaReset(new Date("2026-09-10T06:59:00Z"));
+  assert.ok(justBeforeReset <= 3660, `expected a short wait, got ${justBeforeReset}`);
+});
+
 test("a per-day quota rejection pauses the whole desk, not one article", async () => {
   const env = aiEnv();
   await noteAiFailure(env, { status: 429, quotaScope: "day" });
   const state = await budgetState(env);
   assert.equal(state.blocked, true);
   assert.equal(state.blockReason, "daily_limit");
+  // نتوقف ساعة ثم نجرب، فلا نبقى معطلين لو صفّر المزوّد حصته قبل تقديرنا.
   assert.ok(state.resumesInSeconds > 600);
+  assert.ok(state.resumesInSeconds <= 3600);
   const blocked = await reserveAiCall(env, "brief");
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, "daily_limit");
