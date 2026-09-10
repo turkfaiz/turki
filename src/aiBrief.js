@@ -498,7 +498,11 @@ export function validateAiBrief(payload, sourceText, mayor, engine) {
   };
 }
 
-async function verifySemanticSupport(env, brief, fetcher) {
+/**
+ * التدقيق الدلالي مرحلة مستقلة تُستدعى بعد حفظ الموجز، لأن وجود الاقتباس حرفيًا
+ * لا يثبت أن الاستنتاج العربي يقوله فعلًا: قد يقلب النفي أو يغيّر الرقم أو الفاعل.
+ */
+export async function verifyBriefSemantics(env, brief, fetcher = fetch) {
   const evidence = JSON.parse(brief.evidence);
   const facts = brief.snippet_ar.split("\n").filter(Boolean);
   const checks = facts.map((fact, index) => ({
@@ -538,26 +542,21 @@ async function verifySemanticSupport(env, brief, fetcher) {
 }
 
 /**
- * موجز واحد = نداء واحد. التحقق الأساسي محلي: كل عنوان وحقيقة يجب أن يحمل
- * اقتباسًا موجودًا حرفيًا في نص المصدر ويذكر العمدة. التدقيق الدلالي بنداء ثانٍ
- * يضاعف الكلفة، فيبقى اختياريًا عبر AI_VERIFY_BRIEFS لمن يملك حصة واسعة.
+ * التلخيص نداء واحد ولا يدقّق. الفحص هنا محلي: كل عنوان وحقيقة يحمل اقتباسًا
+ * موجودًا حرفيًا في المصدر ويشير إلى العمدة. أما هل يقول الاقتباس ما يدّعيه
+ * النص العربي فسؤال دلالي يُحسم في مرحلة مستقلة محفوظة، لأن دمجه هنا يعني
+ * فقدان الموجز كلما منعت الميزانية النداء الثاني.
  */
-export async function summarizeWithGemini(env, item, mayor, fetcher = fetch) {
+export async function summarizeWithGemini(env, item, mayor, fetcher = fetch, documents = null) {
   if (!aiBriefEnabled(env)) throw new Error("ai_not_configured");
   const engine = aiBriefEngine(env);
   const sourceText = [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n");
   if (compact(sourceText).length < 80) throw new Error("article_text_too_short");
 
-  const payload = await callGemini(
-    env,
-    buildAiBriefPrompt(item, mayor),
-    OUTPUT_SCHEMA,
-    fetcher,
-    "brief",
-  );
+  const request = buildBriefRequest(item, mayor, documents);
+  const payload = await callGemini(env, request.prompt, OUTPUT_SCHEMA, fetcher, "brief");
   const grounded = validateAiBrief(payload, sourceText, mayor, engine);
-  if (env.AI_VERIFY_BRIEFS !== "1") return grounded;
-  return verifySemanticSupport(env, grounded, fetcher);
+  return { ...grounded, sent: request.sent, sourceText };
 }
 
 function itemEvidenceText(item) {

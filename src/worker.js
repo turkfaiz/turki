@@ -1,8 +1,22 @@
 import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
-import { MAX_BRIEF_ATTEMPTS, pendingBriefCount, translatePending } from "./translate.js";
+import {
+  MAX_BRIEF_ATTEMPTS,
+  briefBacklog,
+  pendingBriefCount,
+  translatePending,
+  verifyPending,
+} from "./translate.js";
 import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
 import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
+import {
+  currentVersion,
+  decisionsFor,
+  isReadyForApproval,
+  migrateVersions,
+  protectedItemsSql,
+  recordDecision,
+} from "./versions.js";
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
@@ -140,7 +154,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v12";
+const BOOTSTRAP_VERSION = "bootstrap-v13";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -165,11 +179,40 @@ async function migrateSearchJobs(env) {
   }
 }
 
+const REQUIRED_TABLES = [
+  "mayors",
+  "items",
+  "scans",
+  "search_jobs",
+  "search_job_tasks",
+  "publishers",
+  "sources",
+  "ai_budget",
+  "brief_versions",
+  "approvals",
+];
+
+/**
+ * الاعتماد على ختم النسخة وحده يفترض أن كل تغيير في المخطط رفع الختم. حين
+ * يُنسى ذلك تعمل القاعدة الفارغة وتنكسر القاعدة القائمة. فحص وجود الجداول
+ * يجعل التهيئة تشفي نفسها بدل أن تثق بافتراض.
+ */
+async function schemaComplete(env) {
+  const placeholders = REQUIRED_TABLES.map(() => "?").join(", ");
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM sqlite_master
+     WHERE type = 'table' AND name IN (${placeholders})`,
+  )
+    .bind(...REQUIRED_TABLES)
+    .first();
+  return Number(row?.n) === REQUIRED_TABLES.length;
+}
+
 export async function ensureDb(env) {
   if (bootstrapped.has(env.DB)) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
   const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
-  if (stamp?.v === BOOTSTRAP_VERSION) {
+  if (stamp?.v === BOOTSTRAP_VERSION && (await schemaComplete(env))) {
     bootstrapped.add(env.DB);
     return;
   }
@@ -219,6 +262,7 @@ export async function ensureDb(env) {
   );
   await seedSources(env);
   await migrateItems(env);
+  await migrateVersions(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
     .run();
@@ -283,9 +327,15 @@ async function seedSources(env) {
  * قديمة تظهر في القوائم وتشوّه الإحصاءات.
  */
 export async function pruneOldItems(env, days = ITEM_RETENTION_DAYS) {
+  /**
+   * نافذة الرصد للعرض، أما القرارات فأرشيف. أي خبر يحمل قرارًا محفوظًا يبقى
+   * هو وأدلته ونسخه، وإلا صار الأرشيف رهينة نافذة سبعة أيام.
+   */
   const result = await env.DB.prepare(
     `DELETE FROM items
-     WHERE COALESCE(published_at, created_at) < datetime('now', ?)`,
+     WHERE COALESCE(published_at, created_at) < datetime('now', ?)
+       AND NOT ${protectedItemsSql()}
+       AND status <> 'approved'`,
   )
     .bind(`-${days} days`)
     .run();
@@ -460,6 +510,11 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
   items.brief_evidence, items.brief_error, items.brief_attempted_at, items.brief_attempts,
+  items.current_version_id, items.approved_version_id, items.needs_review,
+  (SELECT verify_state FROM brief_versions
+    WHERE brief_versions.id = items.current_version_id) AS verify_state,
+  (SELECT verify_detail FROM brief_versions
+    WHERE brief_versions.id = items.current_version_id) AS verify_detail,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
@@ -582,16 +637,28 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = DRAIN_MAX_MS } = {}) {
   const startedAt = Date.now();
   const { minIntervalMs } = budgetSettings(env);
-  const totals = { summarized: 0, failed: 0, deferred: 0, pending: 0, rounds: 0 };
+  const totals = {
+    summarized: 0,
+    failed: 0,
+    deferred: 0,
+    verified: 0,
+    rejected: 0,
+    pending: 0,
+    rounds: 0,
+  };
   while (totals.summarized + totals.failed < maxBriefs && Date.now() - startedAt < maxMs) {
     const summary = await translatePending(env, 1, null);
+    const checked = await verifyPending(env, 1);
+    totals.verified += checked.verified;
+    totals.rejected += checked.rejected;
     totals.rounds += 1;
     totals.summarized += summary.summarized;
     totals.failed += summary.failed;
     totals.deferred += summary.deferred;
     totals.pending = summary.pending;
-    if (summary.deferred > 0 || summary.pending === 0) break;
-    if (summary.summarized === 0 && summary.failed === 0) break;
+    if (summary.deferred > 0) break;
+    if (summary.pending === 0 && checked.pending === 0) break;
+    if (summary.summarized === 0 && summary.failed === 0 && checked.verified === 0) break;
     if (minIntervalMs > 0) await sleep(minIntervalMs + 250);
   }
   return totals;
@@ -902,6 +969,20 @@ function json(data, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 }
 
+/** هوية المراجع كما وصلت فعلًا، ولا تُنسب القرارات إلى مجهول بصمت. */
+export function reviewerOf(request, env) {
+  const header = request.headers.get("Authorization") || "";
+  if (header.startsWith("Basic ")) {
+    try {
+      const user = atob(header.slice(6)).split(":")[0];
+      if (user) return user;
+    } catch {
+      /* fall through to the configured identity */
+    }
+  }
+  return env.DASHBOARD_USER || "unauthenticated-local";
+}
+
 export function authorized(request, env) {
   if (!env.DASHBOARD_PASSWORD) return !env.GEMINI_API_KEY;
   const header = request.headers.get("Authorization") || "";
@@ -1155,6 +1236,18 @@ async function diagnostics(env) {
       model: env.GEMINI_MODEL || null,
       budget,
     },
+    verification: await env.DB.prepare(
+      `SELECT
+         IFNULL(SUM(CASE WHEN verify_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+         IFNULL(SUM(CASE WHEN verify_state = 'passed' THEN 1 ELSE 0 END), 0) AS passed,
+         IFNULL(SUM(CASE WHEN verify_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+       FROM brief_versions WHERE superseded_at IS NULL`,
+    ).first(),
+    decisions: await env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              IFNULL(SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END), 0) AS approved
+       FROM approvals`,
+    ).first(),
     registry,
     sources: sources || [],
     lastScan: lastScan || null,
@@ -1281,11 +1374,50 @@ async function handleApi(request, env) {
     if (!["inbox", "approved", "excluded"].includes(status)) {
       return json({ error: "bad_status" }, 400);
     }
+    const itemId = statusMatch[1];
+    const version = await currentVersion(env, itemId);
+
+    /**
+     * الاعتماد قرار على محتوى بعينه. موجز لم يجتز التدقيق الدلالي ليس جاهزًا،
+     * فمنعه هنا أصدق من عرضه ثم تبرير قرار بُني على ادعاء غير مثبت.
+     */
+    if (status === "approved" && !isReadyForApproval(version)) {
+      return json(
+        {
+          error: "brief_not_verified",
+          verify_state: version?.verify_state || "missing",
+          detail: version
+            ? "لم يجتز الموجز التدقيق الدلالي بعد."
+            : "لا يوجد موجز محفوظ لهذا الخبر.",
+        },
+        409,
+      );
+    }
+
     const reason = status === "excluded" ? REASON.MANUAL : null;
     await env.DB.prepare(`UPDATE items SET status = ?, exclude_reason = ? WHERE id = ?`)
-      .bind(status, reason, statusMatch[1])
+      .bind(status, reason, itemId)
       .run();
-    return json({ ok: true });
+
+    if (version && status !== "inbox") {
+      const source = await env.DB.prepare(`SELECT article_text FROM items WHERE id = ?`)
+        .bind(itemId)
+        .first();
+      await recordDecision(env, {
+        itemId,
+        version,
+        decision: status,
+        reviewer: reviewerOf(request, env),
+        note: typeof body.note === "string" ? body.note.slice(0, 500) : null,
+        sourceText: source?.article_text || "",
+      });
+    }
+    return json({ ok: true, version_id: version?.id || null });
+  }
+
+  const decisionsMatch = path.match(/^\/api\/items\/([0-9a-f-]+)\/decisions$/i);
+  if (decisionsMatch && method === "GET") {
+    return json({ decisions: await decisionsFor(env, decisionsMatch[1]) });
   }
 
   if (path === "/api/review" && method === "POST") {
@@ -1295,6 +1427,34 @@ async function handleApi(request, env) {
     const summary = await summarizeBatch(env, mayorId);
     if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, mayorId, null);
     return json({ ok: true, ...result, ai: summary });
+  }
+
+  if (path === "/api/admin/reset" && method === "POST") {
+    const body = await readBody(request);
+    if (body.confirm !== "احذف كل الأخبار") {
+      return json(
+        {
+          error: "confirmation_required",
+          detail: 'أرسل confirm بالقيمة "احذف كل الأخبار" لتأكيد الحذف.',
+        },
+        400,
+      );
+    }
+    // القرارات المحفوظة أرشيف، فلا يمسّها إجراء تنظيف الأخبار.
+    const removed = await env.DB.prepare(
+      `DELETE FROM items WHERE NOT ${protectedItemsSql()}`,
+    ).run();
+    await env.DB.prepare(`DELETE FROM scans`).run();
+    await env.DB.prepare(`DELETE FROM search_job_tasks`).run();
+    await env.DB.prepare(`DELETE FROM search_jobs`).run();
+    return json({
+      ok: true,
+      removedItems: Number(removed?.meta?.changes) || 0,
+      keptDecided: Number(
+        (await env.DB.prepare(`SELECT COUNT(*) AS n FROM items`).first())?.n || 0,
+      ),
+      by: reviewerOf(request, env),
+    });
   }
 
   if (path === "/api/briefs/drain" && method === "POST") {

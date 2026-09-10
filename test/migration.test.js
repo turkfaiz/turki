@@ -117,3 +117,16 @@ test("registry columns are added to a table that already exists without them", a
   assert.ok(columns.has("curated_at"));
   assert.equal(db.one(`SELECT COUNT(*) AS n FROM sources`).n, 36);
 });
+
+test("a stamped database missing a new table is repaired instead of failing", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  // مخطط جديد أُضيف دون رفع الختم: الحالة التي تنكسر في الإنتاج وحدها.
+  db.exec(`DROP TABLE brief_versions; DROP TABLE approvals;`);
+  await ensureDb(envWith(db.reopen()));
+  const tables = new Set(
+    db.query(`SELECT name FROM sqlite_master WHERE type = 'table'`).map((r) => r.name),
+  );
+  assert.ok(tables.has("brief_versions"), "the missing table is recreated");
+  assert.ok(tables.has("approvals"));
+});

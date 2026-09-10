@@ -1,5 +1,15 @@
 import { arabicRatio, decodeEntities, splitHeadline } from "./text.js";
 import { availableAiCalls } from "./aiBudget.js";
+import { readSourceDocuments } from "./sourceDocuments.js";
+import {
+  claimVerifications,
+  deferVerification,
+  recordVerificationFailure,
+  recordVerificationPass,
+  saveBriefVersion,
+  sourceHash,
+  verificationBacklog,
+} from "./versions.js";
 import {
   BRIEF_STATE,
   aiBriefEnabled,
@@ -8,6 +18,7 @@ import {
   pendingAiBrief,
   summarizeWithGemini,
   transientAiError,
+  verifyBriefSemantics,
 } from "./aiBrief.js";
 
 export { arabicRatio, decodeEntities, splitHeadline };
@@ -124,7 +135,9 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
 
   const { results } = await env.DB.prepare(
     `SELECT items.id, items.title, items.snippet, items.article_text, items.url,
-            items.published_at, items.publisher_domain,
+            items.published_at, items.publisher_domain, items.source,
+            items.source_documents, items.merged_sources,
+            items.approved_version_id, items.source_hash,
             mayors.name_ar, mayors.name_en, mayors.name_native,
             mayors.title_ar, mayors.city_ar, mayors.city_en
      FROM items
@@ -144,18 +157,100 @@ async function releaseClaims(env, ids) {
   await env.DB.batch(ids.map((id) => stmt.bind(id)));
 }
 
+/**
+ * يُحفظ الموجز فور إنتاجه كنسخة مستقلة، قبل أي تدقيق، فلا يُفقد ولا يُعاد
+ * إنتاجه إن تعذّر النداء الثاني. والنسخة المعتمدة سابقًا لا تُمسّ: إن تغيّر
+ * المصدر نشأت نسخة جديدة تحتاج مراجعة، وبقي المعتمد وأدلته كما هما.
+ */
 async function storeBrief(env, row, brief) {
+  const hash = await sourceHash(brief.sourceText || row.article_text || "");
+  const versionId = await saveBriefVersion(env, {
+    itemId: row.id,
+    brief,
+    hash,
+    sent: brief.sent,
+  });
+  const changedUnderApproval = Boolean(row.approved_version_id) && row.source_hash !== hash;
+
   await env.DB.prepare(
     `UPDATE items
      SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
          brief_evidence = ?, brief_error = NULL,
          brief_attempted_at = datetime('now'),
          brief_attempts = IFNULL(brief_attempts, 0) + 1,
-         brief_claim_id = NULL, brief_claimed_at = NULL
+         brief_after = NULL, brief_claim_id = NULL, brief_claimed_at = NULL,
+         current_version_id = ?, source_hash = ?,
+         needs_review = CASE WHEN ? THEN 1 ELSE IFNULL(needs_review, 0) END
      WHERE id = ?`,
   )
-    .bind(brief.title_ar, brief.snippet_ar, brief.engine, brief.evidence, row.id)
+    .bind(
+      brief.title_ar,
+      brief.snippet_ar,
+      brief.engine,
+      brief.evidence,
+      versionId,
+      hash,
+      changedUnderApproval ? 1 : 0,
+      row.id,
+    )
     .run();
+  return versionId;
+}
+
+/**
+ * مرحلة التدقيق: تعمل على نسخ محفوظة، فتأجيلها لا يُفقد شيئًا ولا يعيد إنتاج
+ * الموجز. النتيجة تُكتب على النسخة نفسها مع وقت استئناف عند التأجيل.
+ */
+export async function verifyPending(env, limit = 1, fetcher = undefined) {
+  if (!aiBriefEnabled(env)) {
+    return { verified: 0, rejected: 0, deferred: 0, ...(await verificationBacklog(env)) };
+  }
+  const capacity = await availableAiCalls(env, "brief");
+  if (capacity <= 0) {
+    const backlog = await verificationBacklog(env);
+    return { verified: 0, rejected: 0, deferred: backlog.eligible > 0 ? 1 : 0, ...backlog };
+  }
+  const rows = await claimVerifications(env, Math.min(limit, capacity));
+  let verified = 0;
+  let rejected = 0;
+  let deferred = 0;
+
+  for (const version of rows) {
+    try {
+      const checked = await verifyBriefSemantics(
+        env,
+        {
+          title_ar: version.title_ar,
+          snippet_ar: version.snippet_ar,
+          evidence: version.evidence,
+          engine: version.engine,
+        },
+        fetcher,
+      );
+      await recordVerificationPass(env, version.id, checked.snippet_ar, checked.evidence);
+      await env.DB.prepare(
+        `UPDATE items SET snippet_ar = ?, brief_evidence = ?
+         WHERE id = ? AND current_version_id = ?`,
+      )
+        .bind(checked.snippet_ar, checked.evidence, version.item_id, version.id)
+        .run();
+      verified += 1;
+    } catch (error) {
+      if (isDeferredAiError(error) || transientAiError(error)) {
+        await deferVerification(
+          env,
+          version.id,
+          Number(error?.retryAfterSeconds) || 60,
+          String(error?.message || error),
+        );
+        deferred += 1;
+        break;
+      }
+      await recordVerificationFailure(env, version.id, String(error?.message || error));
+      rejected += 1;
+    }
+  }
+  return { verified, rejected, deferred, ...(await verificationBacklog(env)) };
 }
 
 /**
@@ -258,7 +353,8 @@ export async function translatePending(env, limit = 2, mayorId = null, fetcher =
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     try {
-      await storeBrief(env, row, await summarizeWithGemini(env, row, row, fetcher));
+      const documents = readSourceDocuments(row);
+      await storeBrief(env, row, await summarizeWithGemini(env, row, row, fetcher, documents));
       summarized += 1;
     } catch (error) {
       const outcome = await storeBriefProblem(env, row, error);
