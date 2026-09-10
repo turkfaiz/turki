@@ -41,12 +41,6 @@ function confidenceLabel(c) {
   return { raw: "خام", merged: "مدمج", official: "مؤكد رسمي" }[c] || c;
 }
 
-function setLed(id, on) {
-  const el = $(id);
-  if (!el) return;
-  el.className = `led ${on ? "led-on" : "led-off"}`;
-}
-
 function displayTitle(it) {
   return it.news_title_ar || it.title || "—";
 }
@@ -197,11 +191,6 @@ async function loadMayors() {
   syncSearchEnabled();
 }
 
-function applyPlatform(on, ledId, textId) {
-  setLed(ledId, on);
-  $(textId).textContent = on ? "يعمل" : "متوقف";
-}
-
 async function loadStats() {
   const s = await api("/api/stats");
   const mayorId = selectedMayorId();
@@ -210,18 +199,7 @@ async function loadStats() {
   $("stat-approved").textContent = num(mayorId ? row?.approved || 0 : s.approved);
   $("stat-excluded").textContent = num(mayorId ? row?.excluded || 0 : s.excluded);
   $("stat-dup").textContent = num(s.week?.duplicates);
-  const registry = s.registry || {};
-  const offices = (s.byMayor || []).length || 12;
-  setLed("led-registry", registry.failing === 0);
-  $("src-registry").textContent = registry.unchecked
-    ? `${num(registry.total)} مصدر · ${num(registry.perOffice)} لكل مكتب · بانتظار أول فحص`
-    : `${num(registry.healthy)} سليم من ${num(registry.total)}${registry.failing ? ` · متعطل ${num(registry.failing)}` : ""}`;
-  setLed("led-official", true);
-  $("src-official").textContent = `${num(offices)} غرفة أخبار رسمية في المرتبة الأولى`;
-  setLed("led-engines", false);
-  $("src-engines").textContent = "معطّلة بالحوكمة — لا يُفتح إلا نطاق معتمد";
-  applyPlatform(s.sources.ai_brief === "ready", "led-ai", "src-ai");
-  $("src-ai").textContent = aiSourceLabel(s);
+  state.aiReady = s.sources?.ai_brief === "ready";
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
 }
 
@@ -230,110 +208,6 @@ function humanWait(seconds) {
   if (total < 90) return `${Math.max(1, Math.round(total))} ثانية`;
   if (total < 5400) return `${Math.round(total / 60)} دقيقة`;
   return `${Math.round(total / 3600)} ساعة`;
-}
-
-/** يقول للمستخدم بصراحة لماذا يتأخر التلخيص ومتى يستأنف من تلقاء نفسه. */
-function aiSourceLabel(s) {
-  if (s.sources?.ai_brief !== "ready") return "غير مربوط";
-  const budget = s.ai?.budget;
-  const pending = Number(s.ai?.pending) || 0;
-  if (budget?.blocked) {
-    return `توقف مؤقت — نفدت نداءات AI · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
-  }
-  const quota = `رصيد نداءات AI اليوم ${num(budget?.remaining)} من ${num(budget?.dailyLimit)}`;
-  if (pending) return `يقرأ ويلخص · بقي ${num(pending)} خبر · ${quota}`;
-  return `يقرأ ويلخص · ${quota}`;
-}
-
-function diagCell(label, value, tone = "") {
-  return `<div class="diag-cell ${tone}"><span>${escapeHtml(label)}</span><b class="num">${escapeHtml(String(value))}</b></div>`;
-}
-
-function sourceTone(source) {
-  if (Number(source.consecutive_failures) >= 3) return "bad";
-  if (!source.last_ok_at) return "warn";
-  return "ok";
-}
-
-function renderDiagnostics(d) {
-  const b = d.brief || {};
-  const budget = d.ai?.budget || {};
-  const reg = d.registry || {};
-  const waiting = (b.pending || 0) + (b.waitingQuota || 0);
-  $("diag-headline").textContent = budget.blocked
-    ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
-    : waiting
-      ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
-      : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
-
-  const grouped = new Map();
-  for (const source of d.sources || []) {
-    if (!grouped.has(source.mayor_id)) grouped.set(source.mayor_id, []);
-    grouped.get(source.mayor_id).push(source);
-  }
-
-  $("diag-body").innerHTML = `
-    <div class="diag-grid">
-      ${diagCell("نافذة الرصد", `${num(d.windowDays)} أيام`)}
-      ${diagCell("أخبار داخل النافذة", num(d.window?.total))}
-      ${diagCell("موجزات مكتملة", num(b.completed), b.completed ? "is-good" : "")}
-      ${diagCell("بانتظار التلخيص", num(waiting), waiting ? "is-warn" : "is-good")}
-      ${diagCell("تعذر نهائيًا", num(b.exhausted), b.exhausted ? "is-bad" : "is-good")}
-      ${diagCell("رصيد AI اليوم", `${num(budget.remaining)} / ${num(budget.dailyLimit)}`, budget.blocked ? "is-bad" : "is-good")}
-      ${diagCell("مصادر سليمة", `${num(reg.healthy)} / ${num(reg.total)}`, reg.failing ? "is-warn" : "is-good")}
-      ${diagCell("محركات البحث", "معطّلة")}
-    </div>
-
-    <div class="diag-section">
-      <h4>حالة الذكاء الاصطناعي</h4>
-      <ul class="diag-list">
-        <li><span class="diag-dot ${d.ai?.configured ? "ok" : "bad"}"></span>
-          <span>الطراز <b>${escapeHtml(d.ai?.model || "غير محدد")}</b>
-          <small>نداء واحد لكل موجز · تباعد ${num(Math.round((budget.minIntervalMs || 0) / 100) / 10)} ثانية · حصة الدمج ${num(budget.mergeLimit)}</small></span></li>
-        ${budget.blocked
-          ? `<li><span class="diag-dot bad"></span><span>متوقف: ${escapeHtml(briefErrorReason(`ai_deferred:${budget.blockReason}`))}
-             <small>يستأنف بعد ${escapeHtml(humanWait(budget.resumesInSeconds))}</small></span></li>`
-          : `<li><span class="diag-dot ok"></span><span>يعمل ضمن الحصة<small>مهمة تصريف كل عشر دقائق تُكمل المعلّق تلقائيًا</small></span></li>`}
-        ${(b.errors || []).map((row) => `
-          <li><span class="diag-dot ${/deferred|429/i.test(row.code) ? "warn" : "bad"}"></span>
-            <span>${escapeHtml(briefErrorReason(row.code))}
-            <small>${num(row.count)} خبر · أقصى محاولات ${num(row.attempts)} من ${num(b.maxAttempts)}</small></span></li>`).join("")}
-      </ul>
-    </div>
-
-    <div class="diag-section">
-      <h4>المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب، ولا يُفتح غيرها</h4>
-      <ul class="diag-list">
-        ${[...grouped.values()].map((sources) => `
-          <li><span class="diag-dot ${sources.every((s) => sourceTone(s) === "ok") ? "ok" : sources.some((s) => sourceTone(s) === "ok") ? "warn" : "bad"}"></span>
-            <span><b>${escapeHtml(sources[0].name_ar)}</b>
-            <small>${sources.map((s) => `${escapeHtml(s.domain)} — ${s.last_ok_at ? `${num(s.last_items)} عنصر` : s.last_status ? escapeHtml(String(s.last_status).slice(0, 40)) : "لم يُفحص بعد"}`).join(" · ")}</small></span></li>`).join("")}
-      </ul>
-    </div>
-
-    ${d.lastScan
-      ? `<div class="diag-section">
-          <h4>آخر رصد</h4>
-          <ul class="diag-list">
-            <li><span class="diag-dot ${Number(d.lastScan.error_count) ? "warn" : "ok"}"></span>
-              <span>${escapeHtml(d.lastScan.type === "manual" ? "بحث يدوي" : "رصد أسبوعي")} — ${escapeHtml(fmtDate(d.lastScan.started_at))}
-              <small>جديد ${num(d.lastScan.found_count)} · مدمج ${num(d.lastScan.duplicate_count)} · مستبعد ${num(d.lastScan.excluded_count)} · مصادر متعثرة ${num(d.lastScan.error_count)}</small></span></li>
-          </ul>
-        </div>`
-      : ""}
-
-    <p class="diag-note">
-      المكتب يرصد نافذة ${num(d.windowDays)} أيام فقط: كل رابط تُقرأ صفحته ويُشترط تاريخ نشر داخل النافذة،
-      وما خرج منها يُحذف تلقائيًا بعد ${num(d.retentionDays)} أيام حتى لا تتراكم أخبار قديمة.
-    </p>`;
-}
-
-async function loadDiagnostics() {
-  try {
-    renderDiagnostics(await api("/api/diagnostics"));
-  } catch (error) {
-    $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
-  }
 }
 
 function itemsQuery() {

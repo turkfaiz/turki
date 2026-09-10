@@ -77,39 +77,6 @@ h1 {
   font-family: "IBM Plex Sans", sans-serif;
 }
 
-.platforms {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 186px;
-  padding: 10px 12px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sm);
-  background: var(--card);
-  box-shadow: var(--shadow-soft);
-}
-.platform {
-  display: grid;
-  grid-template-columns: 10px 1fr auto;
-  gap: 8px;
-  align-items: center;
-  font-size: 12px;
-  font-family: "IBM Plex Sans", sans-serif;
-}
-.platform small { color: var(--muted); }
-.led { width: 8px; height: 8px; border-radius: 50%; }
-.led-on {
-  background: #12b76a;
-  box-shadow: 0 0 0 0 rgba(18, 183, 106, 0.7);
-  animation: pulse-green 1.6s ease-out infinite;
-}
-.led-off { background: #d0d5dd; }
-@keyframes pulse-green {
-  0% { box-shadow: 0 0 0 0 rgba(18, 183, 106, 0.6); }
-  70% { box-shadow: 0 0 0 7px rgba(18, 183, 106, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(18, 183, 106, 0); }
-}
-
 .mast-stamp {
   border: 1px solid var(--rule);
   border-radius: var(--radius-sm);
@@ -468,11 +435,6 @@ h1 {
   color: var(--teal);
 }
 
-.led-on {
-  background: var(--teal-bright);
-  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
-}
-
 .btn-search {
   background: linear-gradient(180deg, var(--teal) 0%, #0b5f59 100%);
   border-color: #0b5f59;
@@ -545,32 +507,6 @@ h1 {
   color: var(--ink);
 }
 
-.diag-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.diag-cell {
-  background: var(--paper);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-sm);
-  padding: 9px 11px;
-}
-
-.diag-cell span {
-  display: block;
-  color: var(--muted);
-  font-size: 11.5px;
-  margin-bottom: 3px;
-}
-
-.diag-cell b { font-size: 16px; }
-.diag-cell.is-good b { color: var(--teal); }
-.diag-cell.is-warn b { color: #b54708; }
-.diag-cell.is-bad b { color: var(--bad); }
-
 .diag-section {
   margin-top: 14px;
   border-top: 1px dashed var(--rule);
@@ -638,3 +574,113 @@ h1 {
 }
 
 .btn-retry:hover { background: var(--teal-soft); }
+
+/* ===== لوحة القيادة: بلاطات مربعة متساوية ===== */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+  gap: 10px;
+}
+
+.tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 14px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.tile::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: 3px;
+  background: var(--rule);
+}
+
+.tile-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tile-value {
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.05;
+  color: var(--navy);
+}
+
+.tile-note {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.tile.is-good::before { background: var(--teal-bright); }
+.tile.is-good .tile-value { color: var(--teal); }
+.tile.is-warn::before { background: #f79009; }
+.tile.is-warn .tile-value { color: #b54708; }
+.tile.is-bad::before { background: var(--bad); }
+.tile.is-bad .tile-value { color: var(--bad); }
+.tile.is-muted { background: var(--paper); }
+.tile.is-muted .tile-value { font-size: 22px; color: var(--muted); }
+
+/* ===== بطاقات المكاتب داخل اللوحة ===== */
+
+.office-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.office-card {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--rule);
+}
+
+.office-card.ok { border-inline-start-color: var(--teal-bright); }
+.office-card.warn { border-inline-start-color: #f79009; }
+.office-card.bad { border-inline-start-color: var(--bad); }
+
+.office-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 13px;
+}
+
+.office-card ul { margin: 0; padding: 0; list-style: none; }
+
+.office-card li {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.office-card li small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .tile { aspect-ratio: auto; min-height: 118px; }
+}
