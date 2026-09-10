@@ -1,4 +1,5 @@
-import { MAYORS, buildSearchQueries, mayorById } from "./mayors.js";
+import { MAYORS, buildSearchQueries, isAboutMayor, mayorById } from "./mayors.js";
+import { publisherFeeds } from "./feeds.js";
 import { bingNewsRssUrl, decodeXml, googleNewsRssUrl, parseRssItems } from "./rss.js";
 import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
@@ -50,8 +51,74 @@ async function collectGoogleNews(query, hl, gl) {
   return collectRss(googleNewsRssUrl(query, hl, gl), "google_news", hl);
 }
 
+/** Bing wraps results in a click tracker that still carries the publisher URL. */
+export function unwrapBingUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!/(^|\.)bing\.com$/i.test(parsed.hostname)) return url;
+    const target = parsed.searchParams.get("url") || parsed.searchParams.get("u");
+    if (!target) return url;
+    const decoded = /^https?:\/\//i.test(target)
+      ? target
+      : decodeURIComponent(target.replace(/^a1/, ""));
+    return /^https?:\/\//i.test(decoded) ? decoded : url;
+  } catch {
+    return url;
+  }
+}
+
 async function collectBingNews(query, language) {
-  return collectRss(bingNewsRssUrl(query), "bing_news", language);
+  const rows = await collectRss(bingNewsRssUrl(query), "bing_news", language);
+  return rows
+    .map((row) => {
+      const url = unwrapBingUrl(row.url);
+      return { ...row, url, publisher_url: url };
+    })
+    .filter((row) => !/(^|\.)bing\.com$/i.test(new URL(row.url, "https://x.invalid").hostname));
+}
+
+/** Allowlisted publisher feeds expose direct article links for verification. */
+async function collectPublisherFeeds(mayor) {
+  const feeds = publisherFeeds(mayor.id);
+  if (!feeds.length) return [];
+  const settled = await Promise.all(
+    feeds.map(async (url) => {
+      try {
+        return await collectRss(url, "publisher_feed", mayor.native_lang);
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const rows = settled.flat();
+  if (!rows.length) throw new Error("publisher feeds unavailable");
+  return rows
+    .filter((row) => isAboutMayor(`${row.title} ${row.snippet || ""}`, mayor))
+    .map((row) => ({ ...row, publisher_url: row.url }));
+}
+
+/** Official newsroom feeds return real publisher links, unlike aggregator wrappers. */
+async function collectOfficialFeed(mayor) {
+  if (!mayor.official_host) return [];
+  const base = `https://${mayor.official_host}`;
+  const candidates = ["/rss.xml", "/rss", "/feed", "/feed.xml", "/news/rss.xml", "/en/rss.xml"];
+  const rows = [];
+  const failures = [];
+  for (const path of candidates) {
+    try {
+      const feed = await collectRss(`${base}${path}`, "official", mayor.native_lang);
+      if (feed.length) {
+        rows.push(...feed.map((row) => ({ ...row, publisher_url: row.url })));
+        break;
+      }
+    } catch (error) {
+      failures.push(String(error.message || error));
+    }
+  }
+  if (!rows.length && failures.length === candidates.length) {
+    throw new Error(`official feed unavailable: ${failures[0]}`);
+  }
+  return rows;
 }
 
 export function parseSitemap(xml) {
@@ -227,6 +294,16 @@ export function sourceStatus(env) {
   };
 }
 
+/** Google wraps links behind an encrypted redirect that is often rate limited. */
+export function isUnreadableWrapper(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    return host === "news.google.com" || host.endsWith(".news.google.com");
+  } catch {
+    return false;
+  }
+}
+
 function rssLooksFresh(row) {
   if (!row.published_at) return true;
   return isWithinWeek(row.published_at) !== false;
@@ -238,22 +315,14 @@ async function gatherForMayor(env, mayor, extraQuery, scanType = "manual") {
   const buckets = [];
   const manual = scanType === "manual";
   const jobs = [
-    ["google_news", collectGoogleNews(q.native, mayor.gn_hl, mayor.gn_gl)],
-    ["google_news_en", collectGoogleNews(q.english, "en", "US")],
+    ["official_feed", collectOfficialFeed(mayor)],
+    ["publisher_feeds", collectPublisherFeeds(mayor)],
     ["bing_news", collectBingNews(q.native, mayor.gn_hl)],
+    ["bing_news_en", collectBingNews(q.english, "en")],
+    ["google_news", collectGoogleNews(q.native, mayor.gn_hl, mayor.gn_gl)],
   ];
   if (!manual && !String(extraQuery || "").trim()) {
-    jobs.unshift(["official_direct", collectOfficialSitemap(mayor)]);
-  }
-  if (q.official) {
-    jobs.push(
-      [
-        "official",
-        collectGoogleNews(q.official, mayor.gn_hl, mayor.gn_gl).then((rows) =>
-          rows.map((row) => ({ ...row, source: "official", confidenceHint: "official" })),
-        ),
-      ],
-    );
+    jobs.push(["official_sitemap", collectOfficialSitemap(mayor)]);
   }
   jobs.push(["inoreader", collectInoreader(env, q.native)]);
   if (!manual) jobs.push(["gdelt", collectGdelt(mayor, extraQuery)]);
@@ -346,7 +415,9 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     allErrors.push(...errors);
     const unique = [];
     const urls = new Set();
-    for (const row of rows) {
+    const directRows = rows.filter((row) => !isUnreadableWrapper(row.url));
+    const usableRows = directRows.length ? directRows : rows;
+    for (const row of usableRows) {
       const key = `${row.url}|${row.title}`;
       if (urls.has(key)) continue;
       urls.add(key);

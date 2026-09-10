@@ -5,7 +5,12 @@ import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
 import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
 import { isAboutMayor } from "../src/mayors.js";
-import { parseSitemap, stampBrief } from "../src/collect.js";
+import {
+  isUnreadableWrapper,
+  parseSitemap,
+  stampBrief,
+  unwrapBingUrl,
+} from "../src/collect.js";
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
@@ -98,6 +103,18 @@ test("inbox rows wait for AI instead of receiving an unsafe rule-based brief", (
   assert.match(stamped.title_ar, /بانتظار قراءة الذكاء الاصطناعي/);
   const skipped = stampBrief(turin, { title: "x", snippet: "" }, "excluded");
   assert.equal(skipped.trans_engine, null);
+});
+
+test("discovery keeps publisher urls and drops unreadable aggregator wrappers", () => {
+  assert.equal(
+    unwrapBingUrl(
+      "http://www.bing.com/news/apiclick.aspx?ref=FexRss&url=https%3A%2F%2Fwww.lastampa.it%2Ftorino&c=1",
+    ),
+    "https://www.lastampa.it/torino",
+  );
+  assert.equal(unwrapBingUrl("https://www.lastampa.it/torino"), "https://www.lastampa.it/torino");
+  assert.equal(isUnreadableWrapper("https://news.google.com/rss/articles/CBMiabc"), true);
+  assert.equal(isUnreadableWrapper("https://www.comune.torino.it/via-roma"), false);
 });
 
 test("official sitemap discovery reads page urls and update dates", () => {
