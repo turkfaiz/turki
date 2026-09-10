@@ -12,6 +12,9 @@ import {
 export { arabicRatio, decodeEntities, splitHeadline };
 
 export const MAX_BRIEF_ATTEMPTS = 5;
+const BRIEF_STATE_TITLES = {
+  unconfigured: "مفتاح الذكاء الاصطناعي غير مربوط بالعامل — ",
+};
 const CLAIM_TIMEOUT_MINUTES = 10;
 const RETRY_BACKOFF_MINUTES = 15;
 
@@ -32,7 +35,6 @@ export function pendingBriefFilter(alias = "items") {
 }
 
 export async function pendingBriefCount(env, mayorId = null) {
-  if (!aiBriefEnabled(env)) return 0;
   const binds = [aiBriefEngine(env)];
   let sql = `SELECT COUNT(*) AS pending FROM items WHERE ${pendingBriefFilter()}`;
   if (mayorId) {
@@ -144,9 +146,38 @@ async function storeBriefProblem(env, row, error) {
   return { deferred, transient };
 }
 
+/**
+ * بلا مفتاح لا يمكن التلخيص، لكن الصمت أسوأ من التعذر: تُوسم الأخبار بحالة
+ * صريحة تقول إن المفتاح غير مربوط، بدل بقائها على «بانتظار القراءة» أبدًا
+ * بينما يبلّغ النظام أن لا شيء معلّق.
+ */
+async function markUnconfigured(env, mayorId) {
+  const binds = [aiBriefEngine(env)];
+  let sql = `UPDATE items
+     SET trans_engine = '${BRIEF_STATE.UNCONFIGURED}', snippet_ar = '',
+         title_ar = '${BRIEF_STATE_TITLES.unconfigured}' ||
+           COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), items.mayor_id)
+     WHERE ${briefScopeSql()}
+       AND (items.trans_engine IS NULL OR items.trans_engine <> ?)
+       AND IFNULL(items.trans_engine, '') <> '${BRIEF_STATE.UNCONFIGURED}'`;
+  if (mayorId) {
+    sql += " AND items.mayor_id = ?";
+    binds.push(mayorId);
+  }
+  await env.DB.prepare(sql).bind(...binds).run();
+}
+
 export async function translatePending(env, limit = 2, mayorId = null) {
   if (!aiBriefEnabled(env)) {
-    return { summarized: 0, failed: 0, deferred: 0, pending: 0, retryAfterSeconds: 0 };
+    await markUnconfigured(env, mayorId);
+    return {
+      summarized: 0,
+      failed: 0,
+      deferred: 0,
+      unconfigured: true,
+      pending: await pendingBriefCount(env, mayorId),
+      retryAfterSeconds: 0,
+    };
   }
   const targetEngine = aiBriefEngine(env);
   const rows = await claimBriefRows(env, limit, mayorId, targetEngine);

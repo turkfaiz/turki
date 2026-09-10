@@ -418,6 +418,31 @@ async function migrateItems(env) {
    * الأخبار التي أحرقت محاولاتها على أخطاء الحصة لم يكن فيها عيب. الحاكم الجديد
    * لم يعد يحتسب هذه الحالة محاولة، فتُعاد هذه الصفوف إلى الانتظار مرة واحدة.
    */
+  /**
+   * الأخبار التي رُفضت لأن الاقتباس لم يحمل الاسم الكامل كانت ضحية تناقض داخلي:
+   * الرصد يقبل اللقب مع سياق المنصب، والتلخيص كان يشترط الاسم الكامل في جملة
+   * واحدة. بعد توحيد القاعدة تستحق محاولة نظيفة.
+   */
+  const attributionEpoch = "attribution-parity-v1";
+  const currentAttribution = await env.DB
+    .prepare(`SELECT v FROM meta WHERE k = 'attribution_epoch'`)
+    .first();
+  if (currentAttribution?.v !== attributionEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL,
+           trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE brief_error LIKE 'ai_ungrounded_headline%'
+          OR brief_error LIKE 'ai_has_no_grounded_facts%'`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('attribution_epoch', ?)`)
+      .bind(attributionEpoch)
+      .run();
+  }
   const repairEpoch = "budget-governor-v1";
   const currentRepair = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'repair_epoch'`).first();
   if (currentRepair?.v !== repairEpoch) {
@@ -480,6 +505,12 @@ async function finishDesk(env, scanOpts, onProgress = async () => {}) {
 }
 
 export function briefStage(summary) {
+  if (summary.unconfigured) {
+    return {
+      stage: "ai_unconfigured",
+      detail: `مفتاح الذكاء الاصطناعي غير مربوط بالعامل، فلا يمكن تلخيص ${summary.pending} خبر`,
+    };
+  }
   if (summary.deferred > 0 && summary.pending > 0) {
     return {
       stage: "ai_waiting_quota",
@@ -517,7 +548,7 @@ export function continuationDelaySeconds(summary) {
  * يستحق إيقاظ اثنتي عشرة رسالة لتصطدم بالحد نفسه.
  */
 export function shouldContinueBriefs(summary) {
-  if (!summary || summary.pending <= 0) return false;
+  if (!summary || summary.pending <= 0 || summary.unconfigured) return false;
   if (!summary.deferred) return true;
   return (Number(summary.retryAfterSeconds) || 0) <= CONTINUATION_DEFER_CEILING;
 }
@@ -887,6 +918,7 @@ async function publicHealth(env) {
     `SELECT
        SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
+       SUM(CASE WHEN trans_engine = 'brief-unconfigured' THEN 1 ELSE 0 END) AS unconfigured,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
        SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed
      FROM items`,
@@ -909,6 +941,7 @@ async function publicHealth(env) {
       model: env.GEMINI_MODEL || null,
       pending: Number(ai?.pending) || 0,
       waitingQuota: Number(ai?.waitingQuota) || 0,
+      unconfigured: Number(ai?.unconfigured) || 0,
       failed: Number(ai?.failed) || 0,
       completed: Number(ai?.completed) || 0,
       retryable: await pendingBriefCount(env),

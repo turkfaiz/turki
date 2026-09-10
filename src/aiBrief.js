@@ -10,6 +10,12 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const BRIEF_VERSION = "v2";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
+/** منفذ اختبار: يسمح بتوجيه النداءات إلى خادم بديل لإثبات المسار كاملًا محليًا. */
+function geminiUrl(env) {
+  const base = String(env?.GEMINI_BASE_URL || "").trim();
+  return base ? base.replace(/\/+$/, "") : GEMINI_URL;
+}
+
 const OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -144,12 +150,14 @@ export function aiBriefEngine(env) {
 export const BRIEF_STATE = {
   PENDING: "brief-pending",
   DEFERRED: "brief-deferred",
+  UNCONFIGURED: "brief-unconfigured",
   FAILED: "brief-ai-error",
 };
 
 const BRIEF_STATE_LABEL = {
   [BRIEF_STATE.PENDING]: "بانتظار قراءة الذكاء الاصطناعي",
   [BRIEF_STATE.DEFERRED]: "بانتظار حصة الذكاء الاصطناعي — يستأنف تلقائيًا",
+  [BRIEF_STATE.UNCONFIGURED]: "مفتاح الذكاء الاصطناعي غير مربوط بالعامل",
   [BRIEF_STATE.FAILED]: "تعذر تلخيص الصفحة بالذكاء الاصطناعي",
 };
 
@@ -174,18 +182,65 @@ function evidenceKey(value) {
     .trim();
 }
 
+/**
+ * نفس تطبيع الرصد: يحذف الحركات وعلامات الترقيم، فتتطابق «Martinez Almeida»
+ * مع «Martínez-Almeida». الفارق بين هذا التطبيع وتطبيع الاقتباس كان يرفض
+ * صفحات صحيحة رُصدت بنجاح، وهو تناقض داخلي لا خطأ في المصدر.
+ */
+function identityKey(value) {
+  return compact(value, 260000)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f\u064b-\u065f]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function evidenceExists(source, quote) {
   const hay = evidenceKey(source);
   const needle = evidenceKey(quote);
   return needle.length >= 10 && hay.includes(needle);
 }
 
+/** إشارات المنصب بلغات المكاتب، تُستخدم للإسناد حين تُسمّي الصفحة العمدة مرة ثم تكتفي بمنصبه. */
+const OFFICE_WORDS = [
+  "mayor",
+  "alcalde",
+  "alcaldesa",
+  "sindaco",
+  "sindaca",
+  "dimarch",
+  "kryetar",
+  "市長",
+  "시장",
+  "عمدة",
+  "أمين",
+  "امين",
+  "رئيس",
+  "محافظ",
+  "والي",
+  "بلدية",
+];
+
+/**
+ * الإسناد لا يعني أن يحمل كل اقتباس الاسم الكامل. الصحافة تُسمّي الشخص مرة ثم
+ * تكتفي بلقبه أو منصبه، والصفحة نفسها مُثبت أنها عن هذا العمدة قبل الوصول هنا.
+ * فيُقبل الاسم الكامل، أو أي جزء مميز من اللقب، أو إشارة إلى المنصب — بنفس
+ * التطبيع المستخدم في الرصد حتى لا يرفض «Almeida» لأن الاسم «Martínez-Almeida».
+ */
 function evidenceMentionsMayor(evidence, mayor) {
-  const hay = evidenceKey(evidence);
-  const names = identityTokens(mayor).map(evidenceKey);
-  if (names.some((name) => name && hay.includes(name))) return true;
-  const surname = evidenceKey(mayor.name_en).split(" ").at(-1);
-  return Boolean(surname && surname.length >= 5 && hay.includes(surname));
+  const hay = identityKey(evidence);
+  if (!hay) return false;
+  const names = identityTokens(mayor).map(identityKey).filter(Boolean);
+  if (names.some((name) => hay.includes(name))) return true;
+
+  const surnameParts = names
+    .flatMap((name) => name.split(" "))
+    .filter((part) => part.length >= 4);
+  if (surnameParts.some((part) => hay.includes(part))) return true;
+
+  return OFFICE_WORDS.some((word) => hay.includes(identityKey(word)));
 }
 
 function cleanArabic(value, max) {
@@ -265,7 +320,7 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
   const timer = setTimeout(() => ctrl.abort(), 90000);
   let response;
   try {
-    response = await fetcher(GEMINI_URL, {
+    response = await fetcher(geminiUrl(env), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -328,8 +383,8 @@ export function buildAiBriefPrompt(item, mayor) {
     "تعليمات إلزامية:",
     `- العمدة المقصود: ${mayor.name_ar} (${mayor.name_en})، ${mayor.title_ar} في ${mayor.city_ar}.`,
     `- يجب أن يبدأ العنوان باسمه العربي حرفيًا هكذا: ${mayor.name_ar}.`,
-    `- اقتباس العنوان يجب أن يذكر اسمه بلغة المصدر: ${mayor.name_native || mayor.name_en}.`,
-    "- إن لم يذكر النص العمدة بالاسم فاختر جملة تذكره، ولا تؤلف اسمًا غير موجود.",
+    `- اقتباس العنوان يجب أن يشير إليه: باسمه أو لقبه بلغة المصدر (${mayor.name_native || mayor.name_en}) أو بمنصبه (${mayor.title_en}).`,
+    "- لا تؤلف اسمًا غير موجود في النص، واختر الجملة التي تُثبت الفعل فعلًا.",
     "- اكتب عنوانًا عربيًا خبريًا محددًا: من فعل ماذا، وما الشيء أو المكان أو الرقم أو التاريخ المهم.",
     "- ممنوع العناوين العامة مثل: ملف، نشاط رسمي، متابعة خبر، موضوع مرتبط بالمنصب.",
     "- اكتب من حقيقة إلى أربع حقائق مرتبة. لا تكرر العنوان ولا تضف تفسيرًا أو رأيًا.",
