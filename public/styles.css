@@ -100,7 +100,7 @@ h1 {
   display: grid;
   grid-template-columns: 1fr 260px 120px;
   gap: 0;
-  margin: 0 24px;
+  margin: 16px 24px 0;
   border: 1px solid var(--navy);
   background: #fff;
 }
@@ -120,37 +120,63 @@ h1 {
   cursor: pointer;
 }
 .btn-search:disabled { opacity: 0.45; cursor: not-allowed; }
-.rule-note {
-  margin: 8px 24px 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.path {
-  list-style: none;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0;
-  margin: 16px 24px 12px;
-  padding: 0;
+.search-progress {
+  margin: 14px 24px 0;
+  padding: 12px 14px;
   border: 1px solid var(--navy);
   background: #fff;
 }
-.path li {
-  padding: 10px 12px;
-  border-inline-start: 1px solid var(--rule);
+.progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 13px;
-  line-height: 1.45;
 }
-.path li:first-child { border-inline-start: 0; }
-.path b {
+.progress-track {
+  height: 7px;
+  margin-top: 9px;
+  background: #e5dfd3;
+  overflow: hidden;
+}
+.progress-track span {
   display: block;
-  color: var(--wine);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  margin-bottom: 2px;
+  width: 0;
+  height: 100%;
+  background: var(--navy);
+  transition: width 240ms ease;
 }
-.path .sys { background: #f3ece0; }
+.search-progress[data-status="completed"] .progress-track span { background: var(--good); }
+.search-progress[data-status="partial"] .progress-track span { background: #be7b12; }
+.search-progress[data-status="failed"] .progress-track span { background: var(--bad); }
+.progress-tasks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+.progress-task {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid var(--rule);
+  background: var(--card);
+}
+.progress-task .dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #a59d90;
+}
+.progress-task.running .dot { background: #be7b12; animation: pulse-green 1.5s ease-out infinite; }
+.progress-task.completed .dot { background: var(--good); }
+.progress-task.failed .dot { background: var(--bad); }
+.progress-task b, .progress-task small { display: block; }
+.progress-task b { font-size: 12px; }
+.progress-task small { margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 
 .kpis {
   display: grid;
@@ -344,6 +370,7 @@ h1 {
 .error { color: var(--bad); }
 
 @media (max-width: 960px) {
-  .mast, .command, .kpis, .desk, .path { grid-template-columns: 1fr; }
+  .mast, .command, .kpis, .desk { grid-template-columns: 1fr; }
   .platforms { flex-direction: row; flex-wrap: wrap; }
+  .progress-tasks { grid-template-columns: 1fr; }
 }

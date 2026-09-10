@@ -313,61 +313,121 @@ $("mayor_id").addEventListener("change", () => {
   refreshAll();
 });
 
-function addScanTotals(total, result) {
-  for (const key of [
-    "found",
-    "held",
-    "skippedStale",
-    "skippedUnverified",
-    "skippedUnrelated",
-    "skippedUntrusted",
-    "discovered",
-    "opened",
-  ]) {
-    total[key] += Number(result[key]) || 0;
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const STAGE_LABELS = {
+  queued: "بانتظار البدء",
+  discovering: "بحث مباشر بالاسم والمنصب",
+  verifying: "فتح الروابط والتحقق",
+  saving: "حفظ الصفحات الموثوقة",
+  merging: "دمج الحدث المتكرر",
+  summarizing: "قراءة وتدقيق AI",
+  ai_pending: "بانتظار إكمال قراءة AI",
+  ai_failed: "تعذر تلخيص AI",
+  completed: "اكتمل",
+  retrying: "إعادة محاولة",
+  failed: "تعذر",
+};
+
+function renderSearchProgress(job) {
+  const box = $("search-progress");
+  box.hidden = false;
+  const tasks = job.tasks || [];
+  const hasAiFailure = tasks.some((task) => task.stage === "ai_failed");
+  const hasAiPending = tasks.some((task) => task.stage === "ai_pending");
+  const visualStatus = hasAiFailure ? "failed" : hasAiPending ? "partial" : job.status;
+  box.dataset.status = visualStatus;
+  const done = Number(job.completed) + Number(job.failed);
+  const total = Number(job.total) || 1;
+  const percent = Math.min(100, Math.round((done / total) * 100));
+  $("progress-title").textContent =
+    hasAiFailure
+      ? "اكتمل الرصد وتعذر بعض تلخيص AI"
+      : hasAiPending
+        ? "اكتمل الرصد وبقي تلخيص AI"
+        : job.status === "completed"
+      ? "اكتمل الرصد"
+      : job.status === "partial"
+        ? "اكتمل الرصد مع تعذر بعض المكاتب"
+        : "جاري الرصد في الخلفية";
+  $("progress-count").textContent = `${done} / ${job.total}`;
+  $("progress-bar").style.width = `${percent}%`;
+  const active = tasks.filter((task) => ["running", "retrying"].includes(task.status));
+  const failedTask = tasks.find((task) => task.status === "failed");
+  const completedTask = [...tasks].reverse().find((task) => task.status === "completed");
+  const visibleTasks = active.length
+    ? [active[0]]
+    : failedTask
+      ? [failedTask]
+      : completedTask
+        ? [completedTask]
+        : tasks.length
+          ? [tasks[0]]
+          : [];
+  $("progress-tasks").innerHTML = visibleTasks
+    .map((task) => {
+      const className =
+        task.stage === "ai_failed"
+          ? "failed"
+          : task.stage === "ai_pending"
+            ? "running"
+            : task.status === "completed"
+          ? "completed"
+          : task.status === "failed"
+            ? "failed"
+            : task.status === "queued"
+              ? "queued"
+              : "running";
+      return `<div class="progress-task ${className}">
+        <span class="dot"></span>
+        <span>
+          <b>${escapeHtml(task.mayor_name)}</b>
+          <small>${escapeHtml(STAGE_LABELS[task.stage] || task.stage)}${task.detail ? ` — ${escapeHtml(task.detail)}` : ""}</small>
+        </span>
+      </div>`;
+    })
+    .join("");
+}
+
+async function waitForSearchJob(jobId) {
+  localStorage.setItem("mayorWatchSearchJob", jobId);
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const { job } = await api(`/api/search-jobs/${jobId}`);
+    renderSearchProgress(job);
+    setDeskStatus(
+      `الرصد يعمل في الخلفية: اكتمل ${num(job.completed)} من ${num(job.total)} مكتب` +
+        `${job.running ? ` · يعمل الآن ${num(job.running)}` : ""}` +
+        `${job.failed ? ` · تعذر ${num(job.failed)}` : ""}.`,
+    );
+    if (attempt % 2 === 0) await refreshAll();
+    if (["completed", "partial", "failed"].includes(job.status)) {
+      localStorage.removeItem("mayorWatchSearchJob");
+      if (job.status === "failed") throw new Error("تعذر الرصد في جميع المكاتب.");
+      return {
+        ...job.totals,
+        failedOffices: job.failed,
+        jobStatus: job.status,
+      };
+    }
+    await delay(3000);
   }
-  total.review.duplicates += Number(result.review?.duplicates) || 0;
-  total.sourceErrors += Array.isArray(result.errors) ? result.errors.length : 0;
+  throw new Error("استمر الرصد في الخلفية أكثر من المتوقع. حدّث الصفحة لاحقًا.");
 }
 
 async function runDeskSearch(query, mayorId) {
-  if (mayorId) {
-    return api("/api/search", {
-      method: "POST",
-      body: JSON.stringify({ q: query, mayor_id: mayorId }),
-    });
-  }
-
-  const total = {
-    found: 0,
-    held: 0,
-    skippedStale: 0,
-    skippedUnverified: 0,
-    skippedUnrelated: 0,
-    skippedUntrusted: 0,
-    discovered: 0,
-    opened: 0,
-    review: { duplicates: 0 },
-    failedOffices: [],
-    sourceErrors: 0,
-  };
-  for (let i = 0; i < state.mayors.length; i += 1) {
-    const mayor = state.mayors[i];
-    setDeskStatus(`بحث كل المكاتب: ${i + 1}/${state.mayors.length} — ${mayor.name_ar}…`);
-    try {
-      const result = await api("/api/search", {
-        method: "POST",
-        body: JSON.stringify({ q: query, mayor_id: mayor.id }),
-      });
-      addScanTotals(total, result);
-    } catch {
-      total.failedOffices.push(mayor.name_ar);
-    }
-  }
-  if (total.failedOffices.length === state.mayors.length) {
-    throw new Error("تعذر رصد جميع المكاتب.");
-  }
-  return total;
+  $("search-progress").hidden = false;
+  $("progress-title").textContent = "إرسال مهمة الرصد";
+  $("progress-count").textContent = "0 / 0";
+  $("progress-bar").style.width = "0";
+  $("progress-tasks").innerHTML = "";
+  const queued = await api("/api/search", {
+    method: "POST",
+    body: JSON.stringify({ q: query, mayor_id: mayorId || null }),
+  });
+  setDeskStatus(`تم إرسال ${num(queued.queued)} مكتب إلى الرصد. يمكنك متابعة النتائج دون تجمّد الصفحة.`);
+  return waitForSearchJob(queued.jobId);
 }
 
 $("search-form").addEventListener("submit", async (e) => {
@@ -386,13 +446,18 @@ $("search-form").addEventListener("submit", async (e) => {
     state.selectedId = null;
     await refreshAll();
     const ready = (state.items || []).length;
-    const failed = result.failedOffices?.length
-      ? ` · تعذر ${num(result.failedOffices.length)} مكتب`
+    const failed = Number(result.failedOffices)
+      ? ` · تعذر ${num(result.failedOffices)} مكتب`
       : "";
-    const sourceErrors = Number(result.sourceErrors) || (Array.isArray(result.errors) ? result.errors.length : 0);
+    const sourceErrors = Number(result.sourceErrors) || 0;
     const sourceWarning = sourceErrors ? ` · أخطاء مصادر ${num(sourceErrors)}` : "";
+    const aiWarning = Number(result.aiFailed)
+      ? ` · تعذر AI ${num(result.aiFailed)}`
+      : Number(result.aiPending)
+        ? ` · بانتظار AI ${num(result.aiPending)}`
+        : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · فتح ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.review?.duplicates || 0)} · بانتظار القرار ${num(ready)}${sourceWarning}${failed}.`,
+      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${aiWarning}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);
@@ -409,6 +474,28 @@ $("search-form").addEventListener("submit", async (e) => {
   }
 });
 
-loadMayors().then(refreshAll).catch((err) => {
+async function resumeActiveSearch() {
+  const jobId = localStorage.getItem("mayorWatchSearchJob");
+  if (!jobId) return;
+  state.busy = true;
+  syncSearchEnabled();
+  $("search-btn").textContent = "الرصد يعمل…";
+  try {
+    await waitForSearchJob(jobId);
+    await refreshAll();
+  } catch (error) {
+    localStorage.removeItem("mayorWatchSearchJob");
+    setDeskStatus(`تعذر استئناف متابعة الرصد: ${error.message}`);
+  } finally {
+    state.busy = false;
+    $("search-btn").textContent = "بحث";
+    syncSearchEnabled();
+  }
+}
+
+loadMayors().then(async () => {
+  await refreshAll();
+  await resumeActiveSearch();
+}).catch((err) => {
   $("list").innerHTML = `<div class="error">تعذر تحميل الصفحة: ${escapeHtml(err.message)}</div>`;
 });

@@ -71,6 +71,29 @@ const SCHEMA_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS search_jobs (
+    id TEXT PRIMARY KEY,
+    query TEXT,
+    mayor_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT DEFAULT (datetime('now')),
+    finished_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS search_job_tasks (
+    job_id TEXT NOT NULL,
+    mayor_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER DEFAULT 0,
+    stage TEXT DEFAULT 'queued',
+    detail TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    result_json TEXT,
+    error TEXT,
+    PRIMARY KEY (job_id, mayor_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_search_job_tasks_status
+    ON search_job_tasks(job_id, status)`,
   `CREATE TABLE IF NOT EXISTS publishers (
     id TEXT PRIMARY KEY,
     domain TEXT NOT NULL,
@@ -87,7 +110,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
-const BOOTSTRAP_VERSION = "bootstrap-v5";
+const BOOTSTRAP_VERSION = "bootstrap-v8";
 
 async function upsertRows(env, prefix, rows, width, chunkSize) {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -96,6 +119,17 @@ async function upsertRows(env, prefix, rows, width, chunkSize) {
     await env.DB.prepare(`${prefix} VALUES ${chunk.map(() => tuple).join(", ")}`)
       .bind(...chunk.flat())
       .run();
+  }
+}
+
+async function migrateSearchJobs(env) {
+  const info = await env.DB.prepare(`PRAGMA table_info(search_job_tasks)`).all();
+  const names = new Set((info.results || []).map((column) => column.name));
+  if (!names.has("stage")) {
+    await env.DB.prepare(`ALTER TABLE search_job_tasks ADD COLUMN stage TEXT DEFAULT 'queued'`).run();
+  }
+  if (!names.has("detail")) {
+    await env.DB.prepare(`ALTER TABLE search_job_tasks ADD COLUMN detail TEXT`).run();
   }
 }
 
@@ -110,6 +144,7 @@ async function ensureDb(env) {
   for (const sql of SCHEMA_STATEMENTS) {
     await env.DB.prepare(sql).run();
   }
+  await migrateSearchJobs(env);
   await upsertRows(
     env,
     `INSERT OR REPLACE INTO mayors (
@@ -250,11 +285,48 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 /** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
-async function finishDesk(env, scanOpts) {
-  const result = await runScan(env, scanOpts);
+async function aiBriefState(env, mayorId) {
+  const row = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed
+     FROM items
+     WHERE mayor_id = ?
+       AND (
+         status IN ('inbox', 'approved')
+         OR (
+           status = 'excluded'
+           AND publisher_tier IN (0, 1)
+           AND LENGTH(IFNULL(article_text, '')) > 80
+         )
+       )`,
+  )
+    .bind(mayorId)
+    .first();
+  return { pending: Number(row?.pending) || 0, failed: Number(row?.failed) || 0 };
+}
+
+async function finishDesk(env, scanOpts, onProgress = async () => {}) {
+  const result = await runScan(env, scanOpts, onProgress);
+  await onProgress("merging", "يدمج التغطيات المتكررة للحدث نفسه");
   const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
+  await onProgress("summarizing", "يقرأ الذكاء الاصطناعي نصوص الصفحات المدمجة ويدققها");
   const summarized = await translatePending(env, 12, scanOpts.mayorId || null);
-  return { ...result, review, summarized };
+  const ai = await aiBriefState(env, scanOpts.mayorId);
+  if (ai.failed) {
+    await onProgress("ai_failed", `تعذر تلخيص ${ai.failed} خبر وسيعاد لاحقًا`);
+  } else if (ai.pending) {
+    await onProgress("ai_pending", `بقي ${ai.pending} خبر بانتظار قراءة AI`);
+  } else {
+    await onProgress("completed", `اكتمل: جديد ${result.found}، ملخص AI ${summarized}`);
+  }
+  return {
+    ...result,
+    review,
+    summarized,
+    aiPending: ai.pending,
+    aiFailed: ai.failed,
+  };
 }
 
 async function finishAllOffices(env, type = "weekly") {
@@ -287,6 +359,243 @@ async function enqueueAllOffices(env, type = "weekly") {
     })),
   );
   return { queued: MAYORS.length, type };
+}
+
+const SEARCH_TOTAL_KEYS = [
+  "found",
+  "held",
+  "skippedStale",
+  "skippedUnverified",
+  "skippedUnrelated",
+  "skippedUntrusted",
+  "discovered",
+  "opened",
+  "summarized",
+  "aiPending",
+  "aiFailed",
+];
+
+function parseTaskResult(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function searchJobSnapshot(job, tasks) {
+  const totals = Object.fromEntries(SEARCH_TOTAL_KEYS.map((key) => [key, 0]));
+  totals.duplicates = 0;
+  totals.sourceErrors = 0;
+  let completed = 0;
+  let failed = 0;
+  let running = 0;
+  for (const task of tasks) {
+    if (task.status === "completed") {
+      completed += 1;
+      const result = parseTaskResult(task.result_json);
+      SEARCH_TOTAL_KEYS.forEach((key) => {
+        totals[key] += Number(result[key]) || 0;
+      });
+      totals.duplicates += Number(result.review?.duplicates) || 0;
+      totals.sourceErrors += Array.isArray(result.errors) ? result.errors.length : 0;
+    } else if (task.status === "failed") {
+      failed += 1;
+    } else if (task.status === "running" || task.status === "retrying") {
+      running += 1;
+    }
+  }
+  const total = tasks.length;
+  const terminal = total > 0 && completed + failed === total;
+  const status = terminal
+    ? failed === total
+      ? "failed"
+      : failed
+        ? "partial"
+        : "completed"
+    : running
+      ? "running"
+      : "queued";
+  return {
+    id: job.id,
+    status,
+    query: job.query || "",
+    mayor_id: job.mayor_id || null,
+    total,
+    completed,
+    failed,
+    running,
+    totals,
+    tasks: tasks.map((task) => ({
+      mayor_id: task.mayor_id,
+      mayor_name: MAYORS.find((mayor) => mayor.id === task.mayor_id)?.name_ar || task.mayor_id,
+      status: task.status,
+      stage: task.stage || task.status,
+      detail: task.detail || "",
+      attempts: Number(task.attempts) || 0,
+      error: task.error || null,
+    })),
+  };
+}
+
+async function readSearchJob(env, jobId) {
+  const job = await env.DB.prepare(`SELECT * FROM search_jobs WHERE id = ?`).bind(jobId).first();
+  if (!job) return null;
+  const { results } = await env.DB.prepare(
+    `SELECT mayor_id, status, stage, detail, attempts, result_json, error
+     FROM search_job_tasks WHERE job_id = ? ORDER BY mayor_id`,
+  )
+    .bind(jobId)
+    .all();
+  return searchJobSnapshot(job, results || []);
+}
+
+async function refreshSearchJobStatus(env, jobId) {
+  const snapshot = await readSearchJob(env, jobId);
+  if (!snapshot) return;
+  await env.DB.prepare(
+    `UPDATE search_jobs
+     SET status = ?, finished_at = CASE WHEN ? IN ('completed', 'partial', 'failed')
+       THEN datetime('now') ELSE NULL END
+     WHERE id = ?`,
+  )
+    .bind(snapshot.status, snapshot.status, jobId)
+    .run();
+}
+
+async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
+  if (!env.SCAN_QUEUE) throw new Error("scan_queue_unavailable");
+  const targets = mayorId ? MAYORS.filter((mayor) => mayor.id === mayorId) : MAYORS;
+  if (!targets.length) throw new Error("mayor_not_found");
+  const jobId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
+  )
+    .bind(jobId, query || null, mayorId)
+    .run();
+  const taskStmt = env.DB.prepare(
+    `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
+     VALUES (?, ?, 'queued', 'queued', 'بانتظار بدء الرصد')`,
+  );
+  await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
+  try {
+    await env.SCAN_QUEUE.sendBatch(
+      targets.map((mayor) => ({
+        body: { type: "manual", mayorId: mayor.id, query, jobId },
+        contentType: "json",
+      })),
+    );
+  } catch (error) {
+    await env.DB.prepare(
+      `UPDATE search_job_tasks SET status = 'failed', error = ? WHERE job_id = ?`,
+    )
+      .bind(String(error.message || error).slice(0, 300), jobId)
+      .run();
+    await refreshSearchJobStatus(env, jobId);
+    throw error;
+  }
+  return { jobId, queued: targets.length };
+}
+
+async function processQueuedSearch(env, message) {
+  const body = message.body || {};
+  const mayorId = body.mayorId;
+  if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
+    message.ack();
+    return;
+  }
+  const jobId = body.jobId || null;
+  if (jobId) {
+    const task = await env.DB.prepare(
+      `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(jobId, mayorId)
+      .first();
+    if (!task || task.status === "completed" || task.status === "failed") {
+      message.ack();
+      return;
+    }
+    await env.DB.prepare(
+      `UPDATE search_job_tasks
+       SET status = 'running', attempts = IFNULL(attempts, 0) + 1,
+           stage = 'discovering', detail = 'يبدأ البحث المباشر بالاسم والمنصب',
+           started_at = COALESCE(started_at, datetime('now')), error = NULL
+       WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(jobId, mayorId)
+      .run();
+    await env.DB.prepare(`UPDATE search_jobs SET status = 'running' WHERE id = ?`)
+      .bind(jobId)
+      .run();
+  }
+
+  const onProgress = jobId
+    ? async (stage, detail) => {
+        await env.DB.prepare(
+          `UPDATE search_job_tasks SET stage = ?, detail = ?
+           WHERE job_id = ? AND mayor_id = ?`,
+        )
+          .bind(stage, String(detail || "").slice(0, 300), jobId, mayorId)
+          .run();
+      }
+    : async () => {};
+
+  try {
+    const result = await finishDesk(env, {
+      type: body.type || "weekly",
+      query: body.query || "",
+      mayorId,
+    }, onProgress);
+    if (jobId) {
+      const finalStage = result.aiFailed
+        ? "ai_failed"
+        : result.aiPending
+          ? "ai_pending"
+          : "completed";
+      const finalDetail = result.aiFailed
+        ? `تعذر تلخيص ${result.aiFailed} خبر`
+        : result.aiPending
+          ? `بقي ${result.aiPending} خبر بانتظار AI`
+          : "اكتمل الرصد والتلخيص";
+      await env.DB.prepare(
+        `UPDATE search_job_tasks
+         SET status = 'completed', finished_at = datetime('now'),
+             stage = ?, detail = ?,
+             result_json = ?, error = NULL
+         WHERE job_id = ? AND mayor_id = ?`,
+      )
+        .bind(finalStage, finalDetail, JSON.stringify(result), jobId, mayorId)
+        .run();
+      await refreshSearchJobStatus(env, jobId);
+    }
+    message.ack();
+  } catch (error) {
+    if (!jobId) {
+      message.retry();
+      return;
+    }
+    const exhausted = Number(message.attempts || 1) >= 3;
+    await env.DB.prepare(
+      `UPDATE search_job_tasks
+       SET status = ?, finished_at = CASE WHEN ? THEN datetime('now') ELSE NULL END,
+           stage = ?, detail = ?, error = ?
+       WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(
+        exhausted ? "failed" : "retrying",
+        exhausted ? 1 : 0,
+        exhausted ? "failed" : "retrying",
+        exhausted ? "تعذر إكمال الرصد" : "تعذر مؤقتًا وستعاد المحاولة",
+        String(error.message || error).slice(0, 300),
+        jobId,
+        mayorId,
+      )
+      .run();
+    await refreshSearchJobStatus(env, jobId);
+    if (exhausted) message.ack();
+    else message.retry({ delaySeconds: 15 });
+  }
 }
 
 function json(data, status = 200) {
@@ -398,6 +707,13 @@ async function handleApi(request, env) {
     return json({ scans: results });
   }
 
+  const jobMatch = path.match(/^\/api\/search-jobs\/([0-9a-f-]+)$/i);
+  if (jobMatch && method === "GET") {
+    const job = await readSearchJob(env, jobMatch[1]);
+    if (!job) return json({ error: "not_found" }, 404);
+    return json({ job });
+  }
+
   if (path === "/api/items" && method === "GET") {
     const status = url.searchParams.get("status") || "inbox";
     const mayorId = url.searchParams.get("mayor_id");
@@ -456,16 +772,11 @@ async function handleApi(request, env) {
 
   if (path === "/api/search" && method === "POST") {
     const body = await readBody(request);
-    const mayorId = body.mayor_id || null;
-    if (!mayorId) {
-      return json({ error: "mayor_required", message: "اختر مكتب عمدة ثم ابحث. المسار اليدوي لمكتب واحد." }, 400);
-    }
-    const result = await finishDesk(env, {
-      type: "manual",
+    const result = await enqueueManualSearch(env, {
+      mayorId: body.mayor_id || null,
       query: body.q || "",
-      mayorId,
     });
-    return json({ ok: true, ...result });
+    return json({ ok: true, ...result }, 202);
   }
 
   if (path === "/api/scan/weekly" && method === "POST") {
@@ -498,22 +809,7 @@ export default {
   async queue(batch, env) {
     await ensureDb(env);
     for (const message of batch.messages) {
-      try {
-        const body = message.body || {};
-        const mayorId = body.mayorId;
-        if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
-          message.ack();
-          continue;
-        }
-        await finishDesk(env, {
-          type: body.type || "weekly",
-          query: "",
-          mayorId,
-        });
-        message.ack();
-      } catch {
-        message.retry();
-      }
+      await processQueuedSearch(env, message);
     }
   },
 };
