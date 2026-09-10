@@ -357,3 +357,75 @@ test("AI clustering keeps cards separate when the independent merge check reject
   );
   assert.equal(groups.length, 2);
 });
+
+test("attribution accepts how the press actually names a mayor", () => {
+  const madrid = MAYORS.find((mayor) => mayor.id === "madrid");
+  const accept = (evidence) => {
+    const source = `José Luis Martínez-Almeida es el alcalde de Madrid. ${evidence} El coste es de 12 millones de euros.`;
+    return validateAiBrief(
+      {
+        headline_ar: "خوسيه لويس مارتينيز ألميدا يعلن خطة تجديد ساحة مايور",
+        headline_evidence: evidence,
+        facts: [
+          {
+            fact_ar: "كلفة الخطة 12 مليون يورو.",
+            evidence: "El coste es de 12 millones de euros.",
+          },
+        ],
+        topic_ar: "تجديد",
+      },
+      source,
+      madrid,
+      "brief-test",
+    );
+  };
+
+  // اللقب وحده، وهو الشائع في الصحافة الإسبانية لعمدة اسمه Martínez-Almeida.
+  assert.match(accept("Almeida ha presentado el plan de renovación.").title_ar, /ألميدا/);
+  // الاسم بلا حركات، فالتطبيع يجب أن يوحّدهما.
+  assert.ok(accept("Jose Luis Martinez-Almeida presento el plan."));
+  // إشارة إلى المنصب بعد أن سمّته الصفحة، وهو أسلوب صحفي معتاد.
+  assert.ok(accept("El alcalde ha presentado el plan de renovación."));
+});
+
+test("a quote that attributes the act to nobody is still rejected", () => {
+  const madrid = MAYORS.find((mayor) => mayor.id === "madrid");
+  const source =
+    "José Luis Martínez-Almeida es el alcalde de Madrid. Las obras comenzarán en octubre.";
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          headline_ar: "خوسيه لويس مارتينيز ألميدا يعلن بدء الأعمال",
+          headline_evidence: "Las obras comenzarán en octubre.",
+          facts: [
+            { fact_ar: "تبدأ الأعمال في أكتوبر.", evidence: "Las obras comenzarán en octubre." },
+          ],
+          topic_ar: "أعمال",
+        },
+        source,
+        madrid,
+        "brief-test",
+      ),
+    /ai_ungrounded_headline/,
+  );
+});
+
+test("an invented quote is still rejected no matter how it attributes", () => {
+  const madrid = MAYORS.find((mayor) => mayor.id === "madrid");
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          headline_ar: "خوسيه لويس مارتينيز ألميدا يعلن خطة",
+          headline_evidence: "El alcalde Almeida anunció algo que la página no dice.",
+          facts: [{ fact_ar: "حقيقة.", evidence: "tampoco existe" }],
+          topic_ar: "خطة",
+        },
+        "José Luis Martínez-Almeida es el alcalde de Madrid.",
+        madrid,
+        "brief-test",
+      ),
+    /ai_ungrounded_headline/,
+  );
+});
