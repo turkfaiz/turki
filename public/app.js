@@ -210,6 +210,177 @@ function humanWait(seconds) {
   return `${Math.round(total / 3600)} ساعة`;
 }
 
+function pct(part, whole) {
+  const total = Number(whole) || 0;
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, (Number(part) || 0) / total * 100));
+}
+
+/** قراءة رئيسية في شريط اللوحة: رقم، ومقياس نسبي، وسطر يشرح المعنى. */
+function readout(label, value, note, percent = null, tone = "") {
+  const meter =
+    percent === null
+      ? ""
+      : `<div class="meter"><span style="width:${Math.round(percent)}%"></span></div>`;
+  return `<div class="readout ${tone}">
+      <span class="readout-label">${escapeHtml(label)}</span>
+      <b class="readout-value num">${escapeHtml(String(value))}</b>
+      ${meter}
+      <small class="readout-note">${escapeHtml(note)}</small>
+    </div>`;
+}
+
+function statusRow(tone, title, note) {
+  return `<li><span class="diag-dot ${tone}"></span>
+      <span>${title}<small>${note}</small></span></li>`;
+}
+
+function sourceTone(source) {
+  if (Number(source.consecutive_failures) >= 3) return "bad";
+  if (!source.last_ok_at) return "warn";
+  return "ok";
+}
+
+function renderDiagnostics(d) {
+  const b = d.brief || {};
+  const budget = d.ai?.budget || {};
+  const reg = d.registry || {};
+  const waiting = (b.pending || 0) + (b.waitingQuota || 0);
+  const briefTotal = (b.completed || 0) + waiting + (b.failed || 0);
+
+  $("diag-headline").textContent = budget.blocked
+    ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+    : waiting
+      ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
+      : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
+
+  const grouped = new Map();
+  for (const source of d.sources || []) {
+    if (!grouped.has(source.mayor_id)) grouped.set(source.mayor_id, []);
+    grouped.get(source.mayor_id).push(source);
+  }
+
+  const aiTone = !d.ai?.configured ? "is-bad" : budget.blocked ? "is-warn" : "is-good";
+  const aiNote = !d.ai?.configured
+    ? "المفتاح غير مربوط"
+    : budget.blocked
+      ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+      : `${d.ai.model || "—"} · نداء واحد لكل موجز`;
+
+  $("diag-body").innerHTML = `
+    <div class="board-bar">
+      ${readout(
+        "موجزات مكتملة",
+        `${num(b.completed)}${briefTotal ? ` / ${num(briefTotal)}` : ""}`,
+        briefTotal ? `${Math.round(pct(b.completed, briefTotal))}% من أخبار النافذة` : "لا أخبار بعد",
+        pct(b.completed, briefTotal),
+        b.completed ? "is-good" : "",
+      )}
+      ${readout(
+        "رصيد الذكاء الاصطناعي",
+        `${num(budget.remaining)} / ${num(budget.dailyLimit)}`,
+        aiNote,
+        pct(budget.remaining, budget.dailyLimit),
+        aiTone,
+      )}
+      ${readout(
+        "المصادر السليمة",
+        `${num(reg.healthy)} / ${num(reg.total)}`,
+        `${num(reg.perOffice)} مصادر معتمدة لكل مكتب · محركات البحث معطّلة`,
+        pct(reg.healthy, reg.total),
+        reg.failing ? "is-warn" : "is-good",
+      )}
+      ${readout(
+        "نافذة الرصد",
+        `${num(d.windowDays)} أيام`,
+        `${num(d.window?.total)} خبرًا داخل النافذة · يُحذف ما بعدها بعد ${num(d.retentionDays)} أيام`,
+        null,
+      )}
+    </div>
+
+    <div class="board-panels">
+      <section class="panel">
+        <h4>مسار التلخيص</h4>
+        <ul class="gauges">
+          ${[
+            ["مكتمل وموثّق", b.completed, "ok"],
+            ["بانتظار الدور", b.pending, "wait"],
+            ["بانتظار الحصة", b.waitingQuota, "warn"],
+            ["تعذر نهائيًا", b.exhausted, "bad"],
+          ].map(([label, value, tone]) => `
+            <li class="gauge ${tone}">
+              <span class="gauge-head"><span>${escapeHtml(label)}</span><b class="num">${num(value)}</b></span>
+              <div class="meter"><span style="width:${Math.round(pct(value, briefTotal || 1))}%"></span></div>
+            </li>`).join("")}
+        </ul>
+        <ul class="diag-list">
+          ${statusRow(
+            d.ai?.configured ? (budget.blocked ? "warn" : "ok") : "bad",
+            d.ai?.configured
+              ? budget.blocked
+                ? escapeHtml(briefErrorReason(`ai_deferred:${budget.blockReason}`))
+                : "يعمل ضمن الحصة"
+              : "مفتاح الذكاء الاصطناعي غير مربوط",
+            `مهمة تصريف كل عشر دقائق تُكمل المعلّق · تباعد ${num(Math.round((budget.minIntervalMs || 0) / 100) / 10)} ثانية · حصة الدمج ${num(budget.mergeLimit)}`,
+          )}
+          ${(b.errors || []).map((row) =>
+            statusRow(
+              /deferred|429/i.test(row.code) ? "warn" : "bad",
+              escapeHtml(briefErrorReason(row.code)),
+              `${num(row.count)} خبر · أقصى محاولات ${num(row.attempts)} من ${num(b.maxAttempts)}`,
+            )).join("")}
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h4>آخر رصد</h4>
+        ${d.lastScan
+          ? `<ul class="diag-list">
+              ${statusRow(
+                Number(d.lastScan.error_count) ? "warn" : "ok",
+                `${escapeHtml(d.lastScan.type === "manual" ? "بحث يدوي" : "رصد أسبوعي")} — ${escapeHtml(fmtDate(d.lastScan.started_at))}`,
+                `جديد ${num(d.lastScan.found_count)} · مدمج ${num(d.lastScan.duplicate_count)} · مستبعد ${num(d.lastScan.excluded_count)} · مصادر متعثرة ${num(d.lastScan.error_count)}`,
+              )}
+            </ul>`
+          : `<p class="diag-note">لم يُشغّل رصد بعد.</p>`}
+        <h4 class="panel-sub">المصادر المعتمدة لكل مكتب</h4>
+        <div class="office-grid">
+          ${[...grouped.values()].map((sources) => {
+            const tones = sources.map(sourceTone);
+            const tone = tones.every((t) => t === "ok")
+              ? "ok"
+              : tones.some((t) => t === "ok")
+                ? "warn"
+                : "bad";
+            return `<article class="office-card ${tone}">
+              <header><b>${escapeHtml(sources[0].name_ar)}</b><span class="diag-dot ${tone}"></span></header>
+              <ul>
+                ${sources.map((s) => `<li>
+                  <span class="diag-dot ${sourceTone(s)}"></span>
+                  <span>${escapeHtml(s.domain)}
+                  <small>${s.tier === 0 ? "رسمي" : "محلي"} · ${s.kind === "feed" ? "تغذية" : "صفحة"} · ${
+                    s.last_ok_at
+                      ? `${num(s.last_items)} عنصر`
+                      : s.last_status
+                        ? escapeHtml(String(s.last_status).slice(0, 30))
+                        : "لم يُفحص بعد"
+                  }</small></span></li>`).join("")}
+              </ul>
+            </article>`;
+          }).join("")}
+        </div>
+      </section>
+    </div>`;
+}
+
+async function loadDiagnostics() {
+  try {
+    renderDiagnostics(await api("/api/diagnostics"));
+  } catch (error) {
+    $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function itemsQuery() {
   const qs = new URLSearchParams({ status: state.status });
   const mayorId = selectedMayorId();
