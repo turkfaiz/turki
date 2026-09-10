@@ -301,13 +301,56 @@ const REGISTRY = {
 
 export const MAX_SOURCES_PER_OFFICE = 3;
 
+/** تاريخ الفحص العميق الذي اختير على أساسه هذا السجل. */
+export const CURATED_AT = "2026-09-10";
+
+/**
+ * نتيجة الفحص العميق لكل مصدر: أعاد عناصر حقيقية بروابط مباشرة أم لا.
+ * غرف الأخبار الرسمية الغائبة هنا فُحصت كذلك لكنها لم تستجب من شبكة الفحص
+ * (حجب 403، أو تعذّر DNS، أو صفحة بلا روابط أخبار)، وتبقى في السجل لأنها
+ * المصدر الأصلي للمدينة وقد تستجيب من شبكة Cloudflare، فيحكم عليها التشغيل.
+ */
+const VERIFIED_AT_CURATION = new Set([
+  "turin:comune.torino.it",
+  "turin:torinoclick.it",
+  "turin:torino.repubblica.it",
+  "seoul:seoul.go.kr",
+  "seoul:yna.co.kr",
+  "seoul:koreaherald.com",
+  "madrid:europapress.es",
+  "madrid:elmundo.es",
+  "malaga:diariosur.es",
+  "malaga:europapress.es",
+  "northeast-england:chroniclelive.co.uk",
+  "northeast-england:thenorthernecho.co.uk",
+  "amman:roya.tv",
+  "amman:almamlakatv.com",
+  "baghdad:baghdadtoday.news",
+  "baghdad:ina.iq",
+  "muscat:timesofoman.com",
+  "muscat:omanobserver.om",
+  "osaka:nhk.or.jp",
+  "osaka:asahi.com",
+  "athens:efsyn.gr",
+  "athens:in.gr",
+  "pristina:telegrafi.com",
+  "pristina:kallxo.com",
+  "rabat:hespress.com",
+  "rabat:telquel.ma",
+]);
+
 function withIds(mayorId, entries) {
-  return entries.slice(0, MAX_SOURCES_PER_OFFICE).map((entry, index) => ({
-    ...entry,
-    id: `${mayorId}:${entry.domain}`,
-    mayor_id: mayorId,
-    rank: index + 1,
-  }));
+  return entries.slice(0, MAX_SOURCES_PER_OFFICE).map((entry, index) => {
+    const id = `${mayorId}:${entry.domain}`;
+    return {
+      ...entry,
+      id,
+      mayor_id: mayorId,
+      rank: index + 1,
+      verified: VERIFIED_AT_CURATION.has(id) ? 1 : 0,
+      curated_at: CURATED_AT,
+    };
+  });
 }
 
 export const APPROVED_SOURCES = Object.entries(REGISTRY).flatMap(([mayorId, entries]) =>

@@ -41,12 +41,6 @@ function confidenceLabel(c) {
   return { raw: "خام", merged: "مدمج", official: "مؤكد رسمي" }[c] || c;
 }
 
-function setLed(id, on) {
-  const el = $(id);
-  if (!el) return;
-  el.className = `led ${on ? "led-on" : "led-off"}`;
-}
-
 function displayTitle(it) {
   return it.news_title_ar || it.title || "—";
 }
@@ -57,6 +51,45 @@ function briefBadge(item) {
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
+}
+
+/** يترجم رمز الخطأ إلى سبب مفهوم، فلا يرى المستخدم «تعذر» بلا تفسير. */
+function briefErrorReason(code) {
+  const raw = String(code || "");
+  if (!raw) return "";
+  const rules = [
+    [/ai_deferred:daily_limit|ai_http_429.*day|daily/i, "نفدت حصة نداءات الذكاء الاصطناعي لليوم، ويستأنف تلقائيًا بعد تصفير الحصة."],
+    [/ai_deferred:rate_pacing/i, "تباعد مقصود بين النداءات لحماية حد الدقيقة، ويكمل تلقائيًا."],
+    [/ai_deferred|ai_http_429/i, "المزوّد رفض الطلب مؤقتًا لتجاوز الحد، والنظام في تهدئة ثم يعيد المحاولة."],
+    [/ai_http_5\d\d|provider_error/i, "خطأ مؤقت في خدمة الذكاء الاصطناعي، وتُعاد المحاولة."],
+    [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
+    [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
+    [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
+    [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
+    [/article_text_too_short/i, "نص الصفحة أقصر من أن يُستخرج منه موجز موثّق."],
+    [/ai_empty_response|ai_invalid_json/i, "جاء رد الذكاء الاصطناعي فارغًا أو غير صالح."],
+    [/ai_not_configured/i, "مفتاح الذكاء الاصطناعي غير مربوط."],
+  ];
+  for (const [pattern, message] of rules) {
+    if (pattern.test(raw)) return message;
+  }
+  return `سبب تقني: ${raw}`;
+}
+
+function briefErrorBox(item) {
+  const engine = String(item.trans_engine || "");
+  if (!item.brief_error || engine.startsWith("brief-ai-gemini-v2:")) return "";
+  const attempts = Number(item.brief_attempts) || 0;
+  const exhausted = attempts >= 5;
+  const heading = exhausted
+    ? `توقفت المحاولات بعد ${num(attempts)} محاولات`
+    : engine === "brief-deferred"
+      ? "التلخيص مؤجل ويكمل تلقائيًا"
+      : `تعذر التلخيص — المحاولة ${num(attempts)} من 5`;
+  return `<div class="brief-error">
+      <b>${escapeHtml(heading)}</b><br />${escapeHtml(briefErrorReason(item.brief_error))}
+      ${exhausted ? `<div><button type="button" class="btn-retry" data-act="retry-brief">إعادة المحاولة الآن</button></div>` : ""}
+    </div>`;
 }
 
 function factItems(snippet) {
@@ -158,11 +191,6 @@ async function loadMayors() {
   syncSearchEnabled();
 }
 
-function applyPlatform(on, ledId, textId) {
-  setLed(ledId, on);
-  $(textId).textContent = on ? "يعمل" : "متوقف";
-}
-
 async function loadStats() {
   const s = await api("/api/stats");
   const mayorId = selectedMayorId();
@@ -171,18 +199,7 @@ async function loadStats() {
   $("stat-approved").textContent = num(mayorId ? row?.approved || 0 : s.approved);
   $("stat-excluded").textContent = num(mayorId ? row?.excluded || 0 : s.excluded);
   $("stat-dup").textContent = num(s.week?.duplicates);
-  const registry = s.registry || {};
-  const offices = (s.byMayor || []).length || 12;
-  setLed("led-registry", registry.failing === 0);
-  $("src-registry").textContent = registry.unchecked
-    ? `${num(registry.total)} مصدر · ${num(registry.perOffice)} لكل مكتب · بانتظار أول فحص`
-    : `${num(registry.healthy)} سليم من ${num(registry.total)}${registry.failing ? ` · متعطل ${num(registry.failing)}` : ""}`;
-  setLed("led-official", true);
-  $("src-official").textContent = `${num(offices)} غرفة أخبار رسمية في المرتبة الأولى`;
-  setLed("led-engines", false);
-  $("src-engines").textContent = "معطّلة بالحوكمة — لا يُفتح إلا نطاق معتمد";
-  applyPlatform(s.sources.ai_brief === "ready", "led-ai", "src-ai");
-  $("src-ai").textContent = aiSourceLabel(s);
+  state.aiReady = s.sources?.ai_brief === "ready";
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
 }
 
@@ -193,18 +210,240 @@ function humanWait(seconds) {
   return `${Math.round(total / 3600)} ساعة`;
 }
 
-/** يقول للمستخدم بصراحة لماذا يتأخر التلخيص ومتى يستأنف من تلقاء نفسه. */
-function aiSourceLabel(s) {
-  if (s.sources?.ai_brief !== "ready") return "غير مربوط";
-  const budget = s.ai?.budget;
-  const pending = Number(s.ai?.pending) || 0;
-  if (budget?.blocked) {
-    return `توقف مؤقت — نفدت نداءات AI · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
-  }
-  const quota = `رصيد نداءات AI اليوم ${num(budget?.remaining)} من ${num(budget?.dailyLimit)}`;
-  if (pending) return `يقرأ ويلخص · بقي ${num(pending)} خبر · ${quota}`;
-  return `يقرأ ويلخص · ${quota}`;
+function pct(part, whole) {
+  const total = Number(whole) || 0;
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, (Number(part) || 0) / total * 100));
 }
+
+/** قراءة رئيسية في شريط اللوحة: رقم، ومقياس نسبي، وسطر يشرح المعنى. */
+function readout(label, value, note, percent = null, tone = "") {
+  const meter =
+    percent === null
+      ? ""
+      : `<div class="meter"><span style="width:${Math.round(percent)}%"></span></div>`;
+  return `<div class="readout ${tone}">
+      <span class="readout-label">${escapeHtml(label)}</span>
+      <b class="readout-value num">${escapeHtml(String(value))}</b>
+      ${meter}
+      <small class="readout-note">${escapeHtml(note)}</small>
+    </div>`;
+}
+
+const TOOL_ICONS = {
+  list: '<path d="M4 6h12M4 10h12M4 14h8"/>',
+  page: '<path d="M5 3h7l4 4v10H5z"/><path d="M12 3v4h4"/>',
+  spark: '<path d="M10 3l1.8 4.2L16 9l-4.2 1.8L10 15l-1.8-4.2L4 9l4.2-1.8z"/>',
+  merge: '<path d="M6 3v4a4 4 0 004 4h4"/><path d="M12 8l3 3-3 3"/><path d="M6 11v6"/>',
+  queue: '<path d="M3 5h14M3 10h14M3 15h14"/><circle cx="6" cy="5" r="1.4"/><circle cx="10" cy="10" r="1.4"/>',
+  clock: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/>',
+  db: '<ellipse cx="10" cy="5" rx="6" ry="2.4"/><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5"/><path d="M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/>',
+  ban: '<circle cx="10" cy="10" r="7"/><path d="M5.5 5.5l9 9"/>',
+};
+
+function toolIcon(name) {
+  return `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
+}
+
+/** رقاقة أداة: أيقونة، واسم، ونقطة حالة تفاعلية تكشف تفصيل عملها. */
+function toolChip(tool) {
+  const tone = tool.ok === null ? "off" : tool.ok ? "ok" : "bad";
+  const label = tool.ok === null ? "معطّلة بالحوكمة" : tool.ok ? "تعمل" : "متوقفة";
+  return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
+      aria-expanded="false" title="${escapeHtml(label)}">
+      <span class="tool-icon">${toolIcon(tool.icon)}</span>
+      <span class="tool-name">${escapeHtml(tool.name)}</span>
+      <span class="tool-dot" aria-hidden="true"></span>
+      <span class="tool-state">${escapeHtml(label)}</span>
+    </button>`;
+}
+
+function statusRow(tone, title, note) {
+  return `<li><span class="diag-dot ${tone}"></span>
+      <span>${title}<small>${note}</small></span></li>`;
+}
+
+function sourceTone(source) {
+  if (Number(source.consecutive_failures) >= 3) return "bad";
+  if (source.last_ok_at) return "ok";
+  return "warn";
+}
+
+/**
+ * «لم يُفحص بعد» كانت صياغة مضلّلة: كل مصدر فُحص عند إعداد السجل، والمقصود أن
+ * هذا التشغيل لم يفتحه بعد. النص هنا يفصل بين الأمرين بصراحة.
+ */
+function sourceTitle(source) {
+  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${source.kind === "feed" ? "تغذية RSS" : "صفحة أخبار الموقع"}`;
+  const curated = source.verified
+    ? `مُتحقق منه بالفحص عند الإعداد (${source.curated_at || "—"})`
+    : `فُحص عند الإعداد ولم يستجب من شبكة الفحص، وبقي لأنه المصدر الأصلي للمدينة`;
+  const runtime = source.last_ok_at
+    ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
+    : source.last_status
+      ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
+      : "لم يُشغّل بعد في هذه البيئة";
+  return `${role}\n${curated}\n${runtime}`;
+}
+
+function renderDiagnostics(d) {
+  const b = d.brief || {};
+  const budget = d.ai?.budget || {};
+  const reg = d.registry || {};
+  const waiting = (b.pending || 0) + (b.waitingQuota || 0);
+  const briefTotal = (b.completed || 0) + waiting + (b.failed || 0);
+
+  $("diag-headline").textContent = budget.blocked
+    ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+    : waiting
+      ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
+      : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
+
+  const grouped = new Map();
+  for (const source of d.sources || []) {
+    if (!grouped.has(source.mayor_id)) grouped.set(source.mayor_id, []);
+    grouped.get(source.mayor_id).push(source);
+  }
+
+  const aiTone = !d.ai?.configured ? "is-bad" : budget.blocked ? "is-warn" : "is-good";
+  const aiNote = !d.ai?.configured
+    ? "المفتاح غير مربوط"
+    : budget.blocked
+      ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+      : `${d.ai.model || "—"} · نداء واحد لكل موجز`;
+
+  $("diag-body").innerHTML = `
+    <section class="board-section">
+      <h4>١ · القراءات الرئيسية</h4>
+      <div class="board-bar">
+      ${readout(
+        "موجزات مكتملة",
+        `${num(b.completed)}${briefTotal ? ` / ${num(briefTotal)}` : ""}`,
+        briefTotal ? `${Math.round(pct(b.completed, briefTotal))}% من أخبار النافذة` : "لا أخبار بعد",
+        pct(b.completed, briefTotal),
+        b.completed ? "is-good" : "",
+      )}
+      ${readout(
+        "رصيد الذكاء الاصطناعي",
+        `${num(budget.remaining)} / ${num(budget.dailyLimit)}`,
+        aiNote,
+        pct(budget.remaining, budget.dailyLimit),
+        aiTone,
+      )}
+      ${readout(
+        "المصادر السليمة",
+        `${num(reg.healthy)} / ${num(reg.total)}`,
+        `${num(reg.perOffice)} مصادر معتمدة لكل مكتب · محركات البحث معطّلة`,
+        pct(reg.healthy, reg.total),
+        reg.failing ? "is-warn" : "is-good",
+      )}
+      ${readout(
+        "نافذة الرصد",
+        `${num(d.windowDays)} أيام`,
+        `${num(d.window?.total)} خبرًا داخل النافذة · يُحذف ما بعدها بعد ${num(d.retentionDays)} أيام`,
+        null,
+      )}
+      </div>
+    </section>
+
+    <section class="board-section">
+      <h4>٢ · الأدوات — اضغط أي أداة لمعرفة عملها</h4>
+      <div class="tools">${(d.tools || []).map(toolChip).join("")}</div>
+      <p class="tool-detail" id="tool-detail" hidden></p>
+    </section>
+
+    <div class="board-panels">
+      <section class="panel">
+        <h4>٣ · مسار التلخيص</h4>
+        <ul class="gauges">
+          ${[
+            ["مكتمل وموثّق", b.completed, "ok"],
+            ["بانتظار الدور", b.pending, "wait"],
+            ["بانتظار الحصة", b.waitingQuota, "warn"],
+            ["تعذر نهائيًا", b.exhausted, "bad"],
+          ].map(([label, value, tone]) => `
+            <li class="gauge ${tone}">
+              <span class="gauge-head"><span>${escapeHtml(label)}</span><b class="num">${num(value)}</b></span>
+              <div class="meter"><span style="width:${Math.round(pct(value, briefTotal || 1))}%"></span></div>
+            </li>`).join("")}
+        </ul>
+        <ul class="diag-list">
+          ${statusRow(
+            d.ai?.configured ? (budget.blocked ? "warn" : "ok") : "bad",
+            d.ai?.configured
+              ? budget.blocked
+                ? escapeHtml(briefErrorReason(`ai_deferred:${budget.blockReason}`))
+                : "يعمل ضمن الحصة"
+              : "مفتاح الذكاء الاصطناعي غير مربوط",
+            `مهمة تصريف كل عشر دقائق تُكمل المعلّق · تباعد ${num(Math.round((budget.minIntervalMs || 0) / 100) / 10)} ثانية · حصة الدمج ${num(budget.mergeLimit)}`,
+          )}
+          ${(b.errors || []).map((row) =>
+            statusRow(
+              /deferred|429/i.test(row.code) ? "warn" : "bad",
+              escapeHtml(briefErrorReason(row.code)),
+              `${num(row.count)} خبر · أقصى محاولات ${num(row.attempts)} من ${num(b.maxAttempts)}`,
+            )).join("")}
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h4>٤ · آخر رصد</h4>
+        ${d.lastScan
+          ? `<ul class="diag-list">
+              ${statusRow(
+                Number(d.lastScan.error_count) ? "warn" : "ok",
+                `${escapeHtml(d.lastScan.type === "manual" ? "بحث يدوي" : "رصد أسبوعي")} — ${escapeHtml(fmtDate(d.lastScan.started_at))}`,
+                `جديد ${num(d.lastScan.found_count)} · مدمج ${num(d.lastScan.duplicate_count)} · مستبعد ${num(d.lastScan.excluded_count)} · مصادر متعثرة ${num(d.lastScan.error_count)}`,
+              )}
+            </ul>`
+          : `<p class="diag-note">لم يُشغّل رصد بعد.</p>`}
+        <h4 class="panel-sub">٥ · المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب</h4>
+        <div class="office-grid">
+          ${[...grouped.values()].map((sources) => `
+            <article class="office-card">
+              <b>${escapeHtml(sources[0].name_ar)}</b>
+              <span class="office-sources">
+                ${sources.map((s) => `<i class="src ${sourceTone(s)}" title="${escapeHtml(sourceTitle(s))}">${escapeHtml(s.domain)}</i>`).join("")}
+              </span>
+            </article>`).join("")}
+        </div>
+        <p class="diag-note">
+          نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
+        </p>
+      </section>
+    </div>`;
+}
+
+async function loadDiagnostics() {
+  try {
+    const data = await api("/api/diagnostics");
+    state.tools = data.tools || [];
+    renderDiagnostics(data);
+  } catch (error) {
+    $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+$("diag-body").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tool]");
+  if (!btn) return;
+  const box = $("tool-detail");
+  const tool = (state.tools || []).find((entry) => entry.id === btn.dataset.tool);
+  const alreadyOpen = btn.getAttribute("aria-expanded") === "true";
+  document.querySelectorAll("button[data-tool]").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+    el.classList.remove("on");
+  });
+  if (alreadyOpen || !tool) {
+    box.hidden = true;
+    return;
+  }
+  btn.setAttribute("aria-expanded", "true");
+  btn.classList.add("on");
+  box.hidden = false;
+  box.innerHTML = `<b>${escapeHtml(tool.name)}</b> — ${escapeHtml(tool.detail)}`;
+});
 
 function itemsQuery() {
   const qs = new URLSearchParams({ status: state.status });
@@ -274,6 +513,7 @@ async function loadDetail(id) {
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+      ${briefErrorBox(item)}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
@@ -294,7 +534,7 @@ async function loadDetail(id) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadItems()]);
+  await Promise.all([loadStats(), loadItems(), loadDiagnostics()]);
   if (state.selectedId) {
     try {
       await loadDetail(state.selectedId);
@@ -323,6 +563,19 @@ $("detail").addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-act]");
   if (!btn || !state.selectedId) return;
   const status = btn.dataset.act;
+  if (status === "retry-brief") {
+    btn.disabled = true;
+    btn.textContent = "يعيد المحاولة…";
+    try {
+      await api(`/api/items/${state.selectedId}/retry-brief`, { method: "POST" });
+      await loadDetail(state.selectedId);
+      await loadDiagnostics();
+    } catch (error) {
+      btn.disabled = false;
+      btn.textContent = `تعذر: ${error.message}`;
+    }
+    return;
+  }
   await api(`/api/items/${state.selectedId}/status`, {
     method: "POST",
     body: JSON.stringify({ status }),

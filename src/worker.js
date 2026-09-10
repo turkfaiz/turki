@@ -116,6 +116,8 @@ const SCHEMA_STATEMENTS = [
     kind TEXT NOT NULL,
     url TEXT NOT NULL,
     rank INTEGER NOT NULL,
+    verified INTEGER DEFAULT 0,
+    curated_at TEXT,
     last_checked_at TEXT,
     last_ok_at TEXT,
     last_status TEXT,
@@ -137,7 +139,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
-const BOOTSTRAP_VERSION = "bootstrap-v11";
+const BOOTSTRAP_VERSION = "bootstrap-v12";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -226,10 +228,27 @@ async function ensureDb(env) {
  * السجل في الشيفرة هو المرجع، والجدول مرآة له تحمل بيانات الصحة. أي مصدر خرج
  * من السجل يُحذف من الجدول حتى لا يبقى نطاق معتمد بالخطأ.
  */
+/**
+ * إنشاء الجدول لا يضيف أعمدة لجدول قائم، فأي عمود جديد يحتاج ترحيلًا صريحًا
+ * وإلا فشل الزرع في الإنتاج بينما يمر على قاعدة فارغة.
+ */
+async function migrateSources(env) {
+  const info = await env.DB.prepare(`PRAGMA table_info(sources)`).all();
+  const names = new Set((info.results || []).map((column) => column.name));
+  if (!names.size) return;
+  if (!names.has("verified")) {
+    await env.DB.prepare(`ALTER TABLE sources ADD COLUMN verified INTEGER DEFAULT 0`).run();
+  }
+  if (!names.has("curated_at")) {
+    await env.DB.prepare(`ALTER TABLE sources ADD COLUMN curated_at TEXT`).run();
+  }
+}
+
 async function seedSources(env) {
+  await migrateSources(env);
   await upsertRows(
     env,
-    `INSERT INTO sources (id, mayor_id, domain, name, tier, kind, url, rank)`,
+    `INSERT INTO sources (id, mayor_id, domain, name, tier, kind, url, rank, verified, curated_at)`,
     APPROVED_SOURCES.map((source) => [
       source.id,
       source.mayor_id,
@@ -239,12 +258,15 @@ async function seedSources(env) {
       source.kind,
       source.url,
       source.rank,
+      source.verified,
+      source.curated_at,
     ]),
-    8,
     10,
+    8,
     `ON CONFLICT(id) DO UPDATE SET
        mayor_id = excluded.mayor_id, domain = excluded.domain, name = excluded.name,
-       tier = excluded.tier, kind = excluded.kind, url = excluded.url, rank = excluded.rank`,
+       tier = excluded.tier, kind = excluded.kind, url = excluded.url, rank = excluded.rank,
+       verified = excluded.verified, curated_at = excluded.curated_at`,
   );
   const keep = APPROVED_SOURCES.map((source) => source.id);
   await env.DB.prepare(
@@ -255,6 +277,20 @@ async function seedSources(env) {
 }
 
 /** يسجّل ما حدث فعلًا لكل مصدر حتى تكون الحوكمة مبنية على واقع الإنتاج. */
+/**
+ * المكتب أسبوعي، فلا معنى لتخزين ما خرج من النافذة. التقليم يمنع تراكم أخبار
+ * قديمة تظهر في القوائم وتشوّه الإحصاءات.
+ */
+export async function pruneOldItems(env, days = ITEM_RETENTION_DAYS) {
+  const result = await env.DB.prepare(
+    `DELETE FROM items
+     WHERE COALESCE(published_at, created_at) < datetime('now', ?)`,
+  )
+    .bind(`-${days} days`)
+    .run();
+  return Number(result?.meta?.changes) || 0;
+}
+
 export async function recordSourceHealth(env, rows) {
   if (!rows?.length) return;
   const stmt = env.DB.prepare(
@@ -367,7 +403,7 @@ async function migrateItems(env) {
       .bind(briefEpoch)
       .run();
   }
-  const resetEpoch = "clean-start-2026-09-10";
+  const resetEpoch = "clean-start-2026-09-10-registry";
   const currentReset = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'reset_epoch'`).first();
   if (currentReset?.v !== resetEpoch) {
     await env.DB.prepare(`DELETE FROM items`).run();
@@ -410,6 +446,9 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 const WEEKLY_CRON = "0 3 * * SUN";
+/** نافذة الرصد سبعة أيام، ويُحفظ يومان إضافيان لاستقرار الترحيل. */
+const ITEM_WINDOW_DAYS = 7;
+const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
 const DRAIN_MAX_BRIEFS = 12;
 const DRAIN_MAX_MS = 45000;
@@ -945,13 +984,147 @@ async function stats(env) {
   };
 }
 
+/** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
+async function diagnostics(env) {
+  const brief = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
+       SUM(CASE WHEN IFNULL(brief_attempts, 0) >= ${MAX_BRIEF_ATTEMPTS} THEN 1 ELSE 0 END) AS exhausted
+     FROM items`,
+  ).first();
+  const { results: errors } = await env.DB.prepare(
+    `SELECT brief_error AS code, COUNT(*) AS count, MAX(IFNULL(brief_attempts, 0)) AS attempts
+     FROM items WHERE brief_error IS NOT NULL
+     GROUP BY brief_error ORDER BY count DESC LIMIT 8`,
+  ).all();
+  const { results: sources } = await env.DB.prepare(
+    `SELECT sources.mayor_id, sources.domain, sources.name, sources.tier, sources.kind,
+            sources.rank, sources.last_status, sources.last_items, sources.last_ok_at,
+            sources.consecutive_failures, sources.verified, sources.curated_at,
+            mayors.name_ar
+     FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+     ORDER BY sources.mayor_id, sources.rank`,
+  ).all();
+  const window = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            MIN(COALESCE(published_at, created_at)) AS oldest,
+            MAX(COALESCE(published_at, created_at)) AS newest
+     FROM items
+     WHERE COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
+  ).first();
+  const lastScan = await env.DB.prepare(
+    `SELECT type, started_at, finished_at, found_count, duplicate_count,
+            excluded_count, error_count, notes
+     FROM scans ORDER BY started_at DESC LIMIT 1`,
+  ).first();
+  const registry = await registrySummary(env);
+  const budget = await budgetState(env);
+  const pageSources = APPROVED_SOURCES.filter((source) => source.kind === "page").length;
+  const readerOk = Number(window?.total) > 0 || !lastScan;
+  return {
+    windowDays: ITEM_WINDOW_DAYS,
+    retentionDays: ITEM_RETENTION_DAYS,
+    tools: [
+      {
+        id: "registry",
+        name: "سجل المصادر",
+        icon: "list",
+        ok: registry.failing === 0,
+        detail: `${registry.total} نطاقًا معتمدًا · ${registry.perOffice} لكل مكتب · مُتحقق منها بالفحص ${registry.verified}`,
+      },
+      {
+        id: "reader",
+        name: "قارئ الصفحات",
+        icon: "page",
+        ok: readerOk,
+        detail: `يفتح كل رابط ويستخرج نص الخبر · ${pageSources} مصدرًا يُقرأ من صفحته لعدم نشره تغذية`,
+      },
+      {
+        id: "ai",
+        name: `الذكاء الاصطناعي — ${env.GEMINI_MODEL || "غير محدد"}`,
+        icon: "spark",
+        ok: Boolean(env.GEMINI_API_KEY) && !budget.blocked,
+        detail: Boolean(env.GEMINI_API_KEY)
+          ? budget.blocked
+            ? `متوقف مؤقتًا · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
+            : `يقرأ الصفحة ويكتب الموجز بنداء واحد · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
+          : "المفتاح غير مربوط",
+      },
+      {
+        id: "merge",
+        name: "دمج الأحداث",
+        icon: "merge",
+        ok: Boolean(env.GEMINI_API_KEY),
+        detail: `يوحّد تغطية الحدث نفسه عبر اللغات والمنصات · حصته ${budget.mergeLimit} نداءً يوميًا`,
+      },
+      {
+        id: "queue",
+        name: "طابور التشغيل",
+        icon: "queue",
+        ok: Boolean(env.SCAN_QUEUE),
+        detail: Boolean(env.SCAN_QUEUE)
+          ? "يشغّل البحث في الخلفية فلا تتجمد الصفحة"
+          : "غير مربوط — سيعمل البحث داخل الطلب",
+      },
+      {
+        id: "scheduler",
+        name: "المجدول التلقائي",
+        icon: "clock",
+        ok: true,
+        detail: "رصد أسبوعي الأحد 06:00 بتوقيت الرياض · تصريف الموجزات كل عشر دقائق",
+      },
+      {
+        id: "database",
+        name: "قاعدة البيانات",
+        icon: "db",
+        ok: true,
+        detail: `تحفظ نافذة ${ITEM_WINDOW_DAYS} أيام وتحذف ما بعدها بعد ${ITEM_RETENTION_DAYS} أيام`,
+      },
+      {
+        id: "engines",
+        name: "محركات البحث",
+        icon: "ban",
+        ok: null,
+        detail: "معطّلة بالحوكمة — روابط جوجل ملفوفة لا تُقرأ، وبينج يعيد نطاقات غير موثوقة",
+      },
+    ],
+    window: {
+      total: Number(window?.total) || 0,
+      oldest: window?.oldest || null,
+      newest: window?.newest || null,
+    },
+    brief: {
+      completed: Number(brief?.completed) || 0,
+      pending: Number(brief?.pending) || 0,
+      waitingQuota: Number(brief?.waitingQuota) || 0,
+      failed: Number(brief?.failed) || 0,
+      exhausted: Number(brief?.exhausted) || 0,
+      maxAttempts: MAX_BRIEF_ATTEMPTS,
+      errors: errors || [],
+    },
+    ai: {
+      configured: Boolean(env.GEMINI_API_KEY),
+      model: env.GEMINI_MODEL || null,
+      budget,
+    },
+    registry,
+    sources: sources || [],
+    lastScan: lastScan || null,
+    queue: Boolean(env.SCAN_QUEUE),
+  };
+}
+
 async function registrySummary(env) {
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN last_ok_at IS NOT NULL AND IFNULL(consecutive_failures, 0) = 0
                      THEN 1 ELSE 0 END) AS healthy,
             SUM(CASE WHEN IFNULL(consecutive_failures, 0) >= 3 THEN 1 ELSE 0 END) AS failing,
-            SUM(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked
+            SUM(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked,
+            SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS verified
      FROM sources`,
   ).first();
   return {
@@ -959,6 +1132,7 @@ async function registrySummary(env) {
     healthy: Number(row?.healthy) || 0,
     failing: Number(row?.failing) || 0,
     unchecked: Number(row?.unchecked) || 0,
+    verified: Number(row?.verified) || 0,
     perOffice: MAX_SOURCES_PER_OFFICE,
   };
 }
@@ -971,6 +1145,25 @@ async function handleApi(request, env) {
   if (path === "/api/mayors" && method === "GET") {
     const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
     return json({ mayors: results });
+  }
+
+  if (path === "/api/diagnostics" && method === "GET") {
+    return json(await diagnostics(env));
+  }
+
+  const retryMatch = path.match(/^\/api\/items\/([0-9a-f-]+)\/retry-brief$/i);
+  if (retryMatch && method === "POST") {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, trans_engine = 'brief-pending'
+       WHERE id = ?`,
+    )
+      .bind(retryMatch[1])
+      .run();
+    const summary = await translatePending(env, 1, null);
+    if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, null, null);
+    return json({ ok: true, ai: summary });
   }
 
   if (path === "/api/sources" && method === "GET") {
@@ -1002,7 +1195,10 @@ async function handleApi(request, env) {
     const status = url.searchParams.get("status") || "inbox";
     const mayorId = url.searchParams.get("mayor_id");
     const q = url.searchParams.get("q");
-    const clauses = ["status = ?"];
+    const clauses = [
+      "status = ?",
+      `COALESCE(items.published_at, items.created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
+    ];
     const binds = [status];
     if (mayorId) {
       clauses.push("mayor_id = ?");
@@ -1110,6 +1306,7 @@ export default {
       (async () => {
         await ensureDb(env);
         await pruneAiBudget(env);
+        await pruneOldItems(env);
         await drainBriefs(env);
       })(),
     );
