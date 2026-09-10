@@ -69,6 +69,7 @@ const SCHEMA_STATEMENTS = [
     brief_attempts INTEGER DEFAULT 0,
     brief_claim_id TEXT,
     brief_claimed_at TEXT,
+    brief_after TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -138,7 +139,7 @@ const SCHEMA_STATEMENTS = [
   )`,
 ];
 
-let ready = false;
+const bootstrapped = new WeakSet();
 const BOOTSTRAP_VERSION = "bootstrap-v12";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
@@ -164,12 +165,12 @@ async function migrateSearchJobs(env) {
   }
 }
 
-async function ensureDb(env) {
-  if (ready) return;
+export async function ensureDb(env) {
+  if (bootstrapped.has(env.DB)) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
-  const bootstrapped = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
-  if (bootstrapped?.v === BOOTSTRAP_VERSION) {
-    ready = true;
+  const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
+  if (stamp?.v === BOOTSTRAP_VERSION) {
+    bootstrapped.add(env.DB);
     return;
   }
   for (const sql of SCHEMA_STATEMENTS) {
@@ -221,7 +222,7 @@ async function ensureDb(env) {
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
     .run();
-  ready = true;
+  bootstrapped.add(env.DB);
 }
 
 /**
@@ -361,6 +362,9 @@ async function migrateItems(env) {
   if (!names.has("brief_claim_id")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claim_id TEXT`).run();
   }
+  if (!names.has("brief_after")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_after TEXT`).run();
+  }
   if (!names.has("brief_claimed_at")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claimed_at TEXT`).run();
   }
@@ -401,17 +405,6 @@ async function migrateItems(env) {
     ).run();
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('brief_epoch', ?)`)
       .bind(briefEpoch)
-      .run();
-  }
-  const resetEpoch = "clean-start-2026-09-10-registry";
-  const currentReset = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'reset_epoch'`).first();
-  if (currentReset?.v !== resetEpoch) {
-    await env.DB.prepare(`DELETE FROM items`).run();
-    await env.DB.prepare(`DELETE FROM scans`).run();
-    await env.DB.prepare(`DELETE FROM search_job_tasks`).run();
-    await env.DB.prepare(`DELETE FROM search_jobs`).run();
-    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('reset_epoch', ?)`)
-      .bind(resetEpoch)
       .run();
   }
   /**
@@ -538,8 +531,22 @@ async function summarizeBatch(env, mayorId, onProgress = async () => {}) {
   return summary;
 }
 
+function secondsUntilIso(iso) {
+  if (!iso) return 0;
+  const at = Date.parse(`${String(iso).replace(" ", "T")}Z`);
+  if (!Number.isFinite(at)) return 0;
+  return Math.max(0, Math.ceil((at - Date.now()) / 1000));
+}
+
+/**
+ * الجدولة تتبع أقرب وقت صالح فعلًا. الحد الأدنى الثابت كان يوقظ رسالة كل عشر
+ * ثوانٍ بينما لا شيء مؤهل للتنفيذ.
+ */
 export function continuationDelaySeconds(summary) {
-  const requested = Number(summary?.retryAfterSeconds) || 0;
+  const requested = Math.max(
+    Number(summary?.retryAfterSeconds) || 0,
+    secondsUntilIso(summary?.nextAt),
+  );
   return Math.min(Math.max(requested, CONTINUATION_MIN_SECONDS), CONTINUATION_MAX_SECONDS);
 }
 
@@ -550,7 +557,11 @@ export function continuationDelaySeconds(summary) {
 export function shouldContinueBriefs(summary) {
   if (!summary || summary.pending <= 0 || summary.unconfigured) return false;
   if (!summary.deferred) return true;
-  return (Number(summary.retryAfterSeconds) || 0) <= CONTINUATION_DEFER_CEILING;
+  const wait = Math.max(
+    Number(summary.retryAfterSeconds) || 0,
+    secondsUntilIso(summary.nextAt),
+  );
+  return wait <= CONTINUATION_DEFER_CEILING;
 }
 
 async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {

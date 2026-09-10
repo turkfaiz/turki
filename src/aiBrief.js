@@ -372,12 +372,77 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
 }
 
 export const MAX_PROMPT_CHARS = 60000;
+const MIN_SOURCE_SHARE = 600;
 
-export function buildAiBriefPrompt(item, mayor) {
-  const source = compact(
-    [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n"),
-    MAX_PROMPT_CHARS,
+/**
+ * اقتطاع أول ستين ألف حرف من النص المدمج يمنح المصدر الأول كل المساحة ويحرم
+ * الباقي. التوزيع هنا يعطي كل مصدر نصيبًا، ويبدأ بالأقصر فما لا يحتاجه يعود
+ * إلى البقية، فيُمثَّل مصدر قصير مهم بجوار مصدر طويل.
+ */
+export function allocateSourceExcerpts(documents, maxChars = MAX_PROMPT_CHARS) {
+  const usable = (documents || []).filter((document) => document?.article_text);
+  if (!usable.length) return [];
+  const byLength = [...usable].sort(
+    (a, b) => a.article_text.length - b.article_text.length,
   );
+  const taken = new Map();
+  let remaining = maxChars;
+  let left = byLength.length;
+  for (const document of byLength) {
+    const share = Math.max(MIN_SOURCE_SHARE, Math.floor(remaining / left));
+    const text = compact(document.article_text, share);
+    taken.set(document, text);
+    remaining = Math.max(0, remaining - text.length);
+    left -= 1;
+  }
+  return usable.map((document) => ({
+    id: document.url || `${document.domain || document.source || "source"}|${document.title || ""}`,
+    domain: document.domain || document.source || "",
+    title: compact(document.title, 300),
+    published_at: document.published_at || "",
+    chars: taken.get(document).length,
+    text: taken.get(document),
+  }));
+}
+
+/** الطلب المرسل فعلًا، ومعه ما أُرسل من كل مصدر حتى يُحفظ مع النسخة. */
+export function buildBriefRequest(item, mayor, documents = null) {
+  const excerpts = allocateSourceExcerpts(
+    documents && documents.length
+      ? documents
+      : [
+          {
+            source: item.source,
+            domain: item.publisher_domain,
+            url: item.url,
+            title: item.title,
+            published_at: item.published_at,
+            article_text: [item.snippet, item.article_text].filter(Boolean).join("\n\n"),
+          },
+        ],
+  );
+  return {
+    prompt: renderBriefPrompt(item, mayor, excerpts),
+    sent: {
+      excerpts: excerpts.map(({ text: _text, ...meta }) => meta),
+      sourceIds: excerpts.map((excerpt) => excerpt.id),
+      presentedCount: excerpts.length,
+    },
+  };
+}
+
+export function buildAiBriefPrompt(item, mayor, documents = null) {
+  return buildBriefRequest(item, mayor, documents).prompt;
+}
+
+function renderBriefPrompt(item, mayor, excerpts) {
+  const source = excerpts
+    .map(
+      (excerpt) =>
+        `<source domain="${excerpt.domain}" published="${excerpt.published_at}">\n` +
+        `<title>${excerpt.title}</title>\n${excerpt.text}\n</source>`,
+    )
+    .join("\n\n");
   return [
     "أنت محرر نشرة رصد حكومية. استخرج الزبدة من نص الصفحة المرفق، لا من العنوان وحده.",
     "تعليمات إلزامية:",
