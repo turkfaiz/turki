@@ -45,9 +45,14 @@ function displayTitle(it) {
   return it.news_title_ar || it.title || "—";
 }
 
+/** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
-  if (engine.startsWith("brief-ai-gemini-v2:")) return "ملخص AI موثّق";
+  if (engine.startsWith("brief-ai-gemini-v2:")) {
+    if (item.verify_state === "passed") return "موجز مدقَّق — مسند ومُتحقق دلاليًا";
+    if (item.verify_state === "failed") return "موجز مرفوض في التدقيق";
+    return "موجز مسند — بانتظار التدقيق الدلالي";
+  }
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
@@ -475,7 +480,7 @@ function renderItems(items) {
           ${it.publisher_tier === 0 || it.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
           ${it.publisher_domain ? `<span class="badge">${escapeHtml(it.publisher_domain)}</span>` : ""}
           ${Number(it.source_count) > 1 ? `<span class="badge">${num(it.source_count)} مصادر مدمجة</span>` : ""}
-          <span class="badge ${String(it.trans_engine || "").startsWith("brief-ai-gemini-v2:") ? "official" : ""}">${briefBadge(it)}</span>
+          <span class="badge ${it.verify_state === "passed" ? "official" : ""}">${briefBadge(it)}</span>
           ${it.exclude_reason ? `<span class="badge">${escapeHtml(it.exclude_reason)}</span>` : ""}
           <span class="badge">${confidenceLabel(it.confidence)}</span>
           <span class="num">${fmtDate(it.published_at || it.created_at)}</span>
@@ -507,7 +512,8 @@ async function loadDetail(id) {
         ${item.publisher_tier === 0 || item.publisher_tier === 1 ? `<span class="badge official">معتمد</span>` : ""}
         ${item.publisher_domain ? `<span class="badge">${escapeHtml(item.publisher_domain)}</span>` : ""}
         ${sources.length > 1 ? `<span class="badge">${num(sources.length)} مصادر مدمجة</span>` : ""}
-        <span class="badge ${String(item.trans_engine || "").startsWith("brief-ai-gemini-v2:") ? "official" : ""}">${briefBadge(item)}</span>
+        <span class="badge ${item.verify_state === "passed" ? "official" : ""}">${briefBadge(item)}</span>
+        ${Number(item.needs_review) ? `<span class="badge">تغيّر المصدر — يحتاج مراجعة جديدة</span>` : ""}
         <span class="badge">${confidenceLabel(item.confidence)}</span>
         <span class="badge">الرصد: ${escapeHtml(item.name_en)}</span>
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
@@ -522,7 +528,11 @@ async function loadDetail(id) {
       <p><a href="${item.url}" target="_blank" rel="noopener">فتح المصدر</a></p>
       ${excludeBox}
       <div class="actions">
-        ${item.status !== "approved" ? `<button type="button" class="btn-good" data-act="approved">اعتماد</button>` : ""}
+        ${item.status !== "approved"
+          ? item.verify_state === "passed"
+            ? `<button type="button" class="btn-good" data-act="approved">اعتماد</button>`
+            : `<button type="button" class="btn-good" disabled title="لا يُعتمد موجز قبل اجتياز التدقيق الدلالي">اعتماد — بانتظار التدقيق</button>`
+          : ""}
         ${item.status !== "excluded" ? `<button type="button" class="btn-bad" data-act="excluded">استبعاد يدوي</button>` : ""}
         ${item.status === "excluded" ? `<button type="button" data-act="inbox">استرجاع للوارد</button>` : ""}
       </div>
@@ -734,14 +744,20 @@ $("search-form").addEventListener("submit", async (e) => {
       ? ` · تعذر ${num(result.failedOffices)} مكتب`
       : "";
     const sourceErrors = Number(result.sourceErrors) || 0;
-    const sourceWarning = sourceErrors ? ` · أخطاء مصادر ${num(sourceErrors)}` : "";
+    // تمييز «لا نتائج» عن «لم يكتمل الفحص» عن «صفّاها الموضوع».
+    const sourceWarning = sourceErrors
+      ? ` · تعذّر ${num(sourceErrors)} مصدر فلم يكتمل الفحص`
+      : "";
+    const topicNote = Number(result.skippedTopic)
+      ? ` · استبعد الموضوع ${num(result.skippedTopic)}`
+      : "";
     const aiWarning = Number(result.aiFailed)
       ? ` · تعذر AI ${num(result.aiFailed)}`
       : Number(result.aiPending)
         ? ` · بانتظار AI ${num(result.aiPending)}`
         : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${aiWarning}${sourceWarning}${failed}.`,
+      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${topicNote}${aiWarning}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);

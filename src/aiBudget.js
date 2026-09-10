@@ -179,6 +179,28 @@ export async function noteAiFailure(env, error) {
   );
 }
 
+/**
+ * عدد النداءات التي يمكن تنفيذها الآن. الحجز يمنع تجاوز الحد، لكن معرفة السعة
+ * مقدمًا يمنع مطالبة صفوف لن تُخدم، وهي المطالبة التي كانت تُعاقب الخبر بتأجيل
+ * جدولة كأنه عيب فيه.
+ */
+export async function availableAiCalls(env, purpose = "brief") {
+  const { dailyLimit, minIntervalMs } = budgetSettings(env);
+  const limit = purposeLimit(dailyLimit, purpose);
+  const row = await readDay(env, quotaDay());
+  if (!row) return limit;
+  if (secondsUntil(row.blocked_until) > 0) return 0;
+  const left = Math.max(0, limit - Number(row.calls || 0));
+  if (!left) return 0;
+  // التباعد يسمح بنداء واحد فقط في كل تشغيل لا ينام بين النداءات.
+  if (minIntervalMs > 0 && secondsUntil(row.last_call_at) === 0) {
+    const since = Date.now() - Date.parse(`${String(row.last_call_at).replace(" ", "T")}Z`);
+    if (Number.isFinite(since) && since < minIntervalMs) return 0;
+    return Math.min(left, 1);
+  }
+  return left;
+}
+
 export async function budgetState(env) {
   const { dailyLimit, minIntervalMs } = budgetSettings(env);
   const day = quotaDay();
