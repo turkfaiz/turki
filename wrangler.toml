@@ -2,6 +2,7 @@ name = "mayor-watch"
 main = "src/worker.js"
 compatibility_date = "2026-01-15"
 account_id = "3b610858141e23b8b21c10aaf2387b67"
+keep_vars = true
 
 [vars]
 GEMINI_MODEL = "gemini-3.8-flash"
@@ -24,6 +25,7 @@ queue = "mayor-watch-scans"
 max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
+max_concurrency = 1
 
 [[d1_databases]]
 binding = "DB"

@@ -192,10 +192,46 @@ function responseText(data) {
   return blocks.join("").trim();
 }
 
+export function transientAiError(error) {
+  const message = String(error?.message || error || "");
+  if (error?.name === "AbortError") return true;
+  if (/^ai_http_(408|429|5\d\d)/.test(message)) return true;
+  return /network|fetch failed|connection|socket|ECONNRESET|ETIMEDOUT/i.test(message);
+}
+
+export function parseRetryDelaySeconds(response, payload) {
+  const header = response?.headers?.get?.("Retry-After");
+  const headerSeconds = Number(header);
+  if (Number.isFinite(headerSeconds) && headerSeconds > 0) return Math.ceil(headerSeconds);
+  if (header) {
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) {
+      const seconds = Math.ceil((at - Date.now()) / 1000);
+      if (seconds > 0) return seconds;
+    }
+  }
+  const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
+  for (const detail of details) {
+    const value = detail?.retryDelay || detail?.retry_delay;
+    const seconds = Number(String(value || "").replace(/s$/, ""));
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);
+  }
+  return 0;
+}
+
+function providerErrorCode(payload) {
+  const code = payload?.error?.status || payload?.error?.code || "";
+  return code ? `:${String(code).slice(0, 80)}` : "";
+}
+
+/**
+ * Single attempt per call. Backoff is delegated to the queue so a Worker
+ * invocation never sleeps and provider limits are respected globally.
+ */
 async function callGemini(env, input, schema, fetcher) {
   const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 35000);
+  const timer = setTimeout(() => ctrl.abort(), 30000);
   let response;
   try {
     response = await fetcher(GEMINI_URL, {
@@ -209,6 +245,7 @@ async function callGemini(env, input, schema, fetcher) {
         model,
         store: false,
         input,
+        generation_config: { thinking_level: "low" },
         response_format: {
           type: "text",
           mime_type: "application/json",
@@ -220,7 +257,21 @@ async function callGemini(env, input, schema, fetcher) {
   } finally {
     clearTimeout(timer);
   }
-  if (!response?.ok) throw new Error(`ai_http_${response?.status || "failed"}`);
+
+  if (!response?.ok) {
+    const status = Number(response?.status) || 0;
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    const error = new Error(`ai_http_${status || "failed"}${providerErrorCode(payload)}`);
+    error.status = status;
+    error.retryAfterSeconds = parseRetryDelaySeconds(response, payload);
+    throw error;
+  }
+
   const data = await response.json();
   const text = responseText(data);
   if (!text) throw new Error("ai_empty_response");
@@ -231,10 +282,12 @@ async function callGemini(env, input, schema, fetcher) {
   }
 }
 
+export const MAX_PROMPT_CHARS = 60000;
+
 export function buildAiBriefPrompt(item, mayor) {
   const source = compact(
     [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n"),
-    240000,
+    MAX_PROMPT_CHARS,
   );
   return [
     "أنت محرر نشرة رصد حكومية. استخرج الزبدة من نص الصفحة المرفق، لا من العنوان وحده.",

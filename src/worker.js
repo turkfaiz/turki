@@ -1,6 +1,6 @@
 import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
-import { translatePending } from "./translate.js";
+import { MAX_BRIEF_ATTEMPTS, pendingBriefCount, translatePending } from "./translate.js";
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
@@ -65,6 +65,8 @@ const SCHEMA_STATEMENTS = [
     brief_error TEXT,
     brief_attempted_at TEXT,
     brief_attempts INTEGER DEFAULT 0,
+    brief_claim_id TEXT,
+    brief_claimed_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -110,7 +112,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
-const BOOTSTRAP_VERSION = "bootstrap-v8";
+const BOOTSTRAP_VERSION = "bootstrap-v9";
 
 async function upsertRows(env, prefix, rows, width, chunkSize) {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -234,6 +236,12 @@ async function migrateItems(env) {
   if (!names.has("brief_attempts")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_attempts INTEGER DEFAULT 0`).run();
   }
+  if (!names.has("brief_claim_id")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claim_id TEXT`).run();
+  }
+  if (!names.has("brief_claimed_at")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claimed_at TEXT`).run();
+  }
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -273,6 +281,17 @@ async function migrateItems(env) {
       .bind(briefEpoch)
       .run();
   }
+  const resetEpoch = "clean-start-2026-09-10";
+  const currentReset = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'reset_epoch'`).first();
+  if (currentReset?.v !== resetEpoch) {
+    await env.DB.prepare(`DELETE FROM items`).run();
+    await env.DB.prepare(`DELETE FROM scans`).run();
+    await env.DB.prepare(`DELETE FROM search_job_tasks`).run();
+    await env.DB.prepare(`DELETE FROM search_jobs`).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('reset_epoch', ?)`)
+      .bind(resetEpoch)
+      .run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -284,28 +303,9 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
-/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
-async function aiBriefState(env, mayorId) {
-  const row = await env.DB.prepare(
-    `SELECT
-       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
-       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed
-     FROM items
-     WHERE mayor_id = ?
-       AND (
-         status IN ('inbox', 'approved')
-         OR (
-           status = 'excluded'
-           AND publisher_tier IN (0, 1)
-           AND LENGTH(IFNULL(article_text, '')) > 80
-         )
-       )`,
-  )
-    .bind(mayorId)
-    .first();
-  return { pending: Number(row?.pending) || 0, failed: Number(row?.failed) || 0 };
-}
+const BRIEF_BATCH_SIZE = 3;
 
+/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await onProgress("merging", "يدمج التغطيات المتكررة للحدث نفسه");
@@ -314,23 +314,42 @@ async function finishDesk(env, scanOpts, onProgress = async () => {}) {
     limit: 500,
     useAiMerge: result.found > 0 || result.updated > 0,
   });
-  await onProgress("summarizing", "يقرأ الذكاء الاصطناعي نصوص الصفحات المدمجة ويدققها");
-  const summarized = await translatePending(env, 12, scanOpts.mayorId || null);
-  const ai = await aiBriefState(env, scanOpts.mayorId);
-  if (ai.failed) {
-    await onProgress("ai_failed", `تعذر تلخيص ${ai.failed} خبر وسيعاد لاحقًا`);
-  } else if (ai.pending) {
-    await onProgress("ai_pending", `بقي ${ai.pending} خبر بانتظار قراءة AI`);
-  } else {
-    await onProgress("completed", `اكتمل: جديد ${result.found}، ملخص AI ${summarized}`);
-  }
+  const summary = await summarizeBatch(env, scanOpts.mayorId || null, onProgress);
   return {
     ...result,
     review,
-    summarized,
-    aiPending: ai.pending,
-    aiFailed: ai.failed,
+    summarized: summary.summarized,
+    aiFailed: summary.failed,
+    aiPending: summary.pending,
+    aiRetryAfterSeconds: summary.retryAfterSeconds,
   };
+}
+
+/** يلخص دفعة واحدة فقط، ويترك الباقي لمهمة تلخيص لاحقة في الطابور. */
+async function summarizeBatch(env, mayorId, onProgress = async () => {}) {
+  await onProgress("summarizing", "يقرأ الذكاء الاصطناعي نصوص الصفحات المدمجة ويدققها");
+  const summary = await translatePending(env, BRIEF_BATCH_SIZE, mayorId);
+  if (summary.pending > 0) {
+    await onProgress(
+      "ai_pending",
+      `لُخص ${summary.summarized}، وبقي ${summary.pending} خبر ويكمل تلقائيًا`,
+    );
+  } else if (summary.failed) {
+    await onProgress("ai_failed", `تعذر تلخيص ${summary.failed} خبر بعد المحاولات`);
+  } else {
+    await onProgress("completed", `اكتمل التلخيص: ${summary.summarized}`);
+  }
+  return summary;
+}
+
+async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+  if (!env.SCAN_QUEUE) return false;
+  const delaySeconds = Math.min(Math.max(Number(retryAfterSeconds) || 20, 20), 900);
+  await env.SCAN_QUEUE.send(
+    { type: "brief", mayorId, jobId },
+    { contentType: "json", delaySeconds },
+  );
+  return true;
 }
 
 async function finishAllOffices(env, type = "weekly") {
@@ -503,8 +522,45 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   return { jobId, queued: targets.length };
 }
 
+async function processBriefContinuation(env, message) {
+  const body = message.body || {};
+  const mayorId = body.mayorId || null;
+  const jobId = body.jobId || null;
+  try {
+    const summary = await summarizeBatch(env, mayorId);
+    if (summary.pending > 0 && (summary.summarized > 0 || summary.failed > 0)) {
+      await enqueueBriefContinuation(env, mayorId, jobId, summary.retryAfterSeconds);
+    }
+    if (jobId) {
+      await env.DB.prepare(
+        `UPDATE search_job_tasks
+         SET stage = ?, detail = ?
+         WHERE job_id = ? AND mayor_id = ?`,
+      )
+        .bind(
+          summary.pending > 0 ? "ai_pending" : summary.failed ? "ai_failed" : "completed",
+          summary.pending > 0
+            ? `بقي ${summary.pending} خبر ويكمل تلقائيًا`
+            : summary.failed
+              ? `تعذر تلخيص ${summary.failed} خبر`
+              : "اكتمل التلخيص",
+          jobId,
+          mayorId,
+        )
+        .run();
+    }
+    message.ack();
+  } catch {
+    message.retry({ delaySeconds: 30 });
+  }
+}
+
 async function processQueuedSearch(env, message) {
   const body = message.body || {};
+  if (body.type === "brief") {
+    await processBriefContinuation(env, message);
+    return;
+  }
   const mayorId = body.mayorId;
   if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
     message.ack();
@@ -552,16 +608,19 @@ async function processQueuedSearch(env, message) {
       query: body.query || "",
       mayorId,
     }, onProgress);
+    if (result.aiPending > 0) {
+      await enqueueBriefContinuation(env, mayorId, jobId, result.aiRetryAfterSeconds);
+    }
     if (jobId) {
-      const finalStage = result.aiFailed
-        ? "ai_failed"
-        : result.aiPending
-          ? "ai_pending"
+      const finalStage = result.aiPending
+        ? "ai_pending"
+        : result.aiFailed
+          ? "ai_failed"
           : "completed";
-      const finalDetail = result.aiFailed
-        ? `تعذر تلخيص ${result.aiFailed} خبر`
-        : result.aiPending
-          ? `بقي ${result.aiPending} خبر بانتظار AI`
+      const finalDetail = result.aiPending
+        ? `بقي ${result.aiPending} خبر ويكمل التلخيص تلقائيًا`
+        : result.aiFailed
+          ? `تعذر تلخيص ${result.aiFailed} خبر`
           : "اكتمل الرصد والتلخيص";
       await env.DB.prepare(
         `UPDATE search_job_tasks
@@ -656,6 +715,8 @@ async function publicHealth(env) {
       pending: Number(ai?.pending) || 0,
       failed: Number(ai?.failed) || 0,
       completed: Number(ai?.completed) || 0,
+      retryable: await pendingBriefCount(env),
+      maxAttempts: MAX_BRIEF_ATTEMPTS,
       errors: results || [],
     },
   };
@@ -797,9 +858,11 @@ async function handleApi(request, env) {
 
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
-    const result = await reviewInbox(env, { mayorId: body.mayor_id || null, limit: 500 });
-    const translated = await translatePending(env, 12, body.mayor_id || null);
-    return json({ ok: true, translated, ...result });
+    const mayorId = body.mayor_id || null;
+    const result = await reviewInbox(env, { mayorId, limit: 500 });
+    const summary = await summarizeBatch(env, mayorId);
+    if (summary.pending > 0) await enqueueBriefContinuation(env, mayorId, null);
+    return json({ ok: true, ...result, ai: summary });
   }
 
   if (path === "/api/search" && method === "POST") {

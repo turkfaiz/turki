@@ -8,60 +8,97 @@ import {
 
 export { arabicRatio, decodeEntities, splitHeadline };
 
-async function mapLimit(items, concurrency, fn) {
-  const results = new Array(items.length);
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length || 1) }, () => worker()),
-  );
-  return results;
+export const MAX_BRIEF_ATTEMPTS = 5;
+const CLAIM_TIMEOUT_MINUTES = 10;
+const RETRY_BACKOFF_MINUTES = 15;
+
+/** الصفوف التي تنتظر تلخيصًا موثوقًا: الوارد والمعتمد والمستبعد الموثوق المقروء. */
+export function briefScopeSql(alias = "items") {
+  return `(${alias}.status IN ('inbox', 'approved')
+      OR (
+        ${alias}.status = 'excluded'
+        AND ${alias}.publisher_tier IN (0, 1)
+        AND LENGTH(IFNULL(${alias}.article_text, '')) > 80
+      ))`;
 }
 
-export async function translatePending(env, limit = 12, mayorId = null) {
-  const aiReady = aiBriefEnabled(env);
-  if (!aiReady) return 0;
-  const targetEngine = aiBriefEngine(env);
-  const clauses = [
-    `(items.status IN ('inbox', 'approved')
-      OR (
-        items.status = 'excluded'
-        AND items.publisher_tier IN (0, 1)
-        AND LENGTH(IFNULL(items.article_text, '')) > 80
-      ))`,
-    "(items.brief_error IS NULL OR items.brief_attempted_at IS NULL OR items.brief_attempted_at <= datetime('now', '-30 minutes'))",
-  ];
-  const binds = [];
-  clauses.push("(items.trans_engine IS NULL OR items.trans_engine <> ?)");
-  binds.push(targetEngine);
+export function pendingBriefFilter(alias = "items") {
+  return `${briefScopeSql(alias)}
+    AND (${alias}.trans_engine IS NULL OR ${alias}.trans_engine <> ?)
+    AND IFNULL(${alias}.brief_attempts, 0) < ${MAX_BRIEF_ATTEMPTS}`;
+}
+
+export async function pendingBriefCount(env, mayorId = null) {
+  if (!aiBriefEnabled(env)) return 0;
+  const binds = [aiBriefEngine(env)];
+  let sql = `SELECT COUNT(*) AS pending FROM items WHERE ${pendingBriefFilter()}`;
   if (mayorId) {
-    clauses.push("items.mayor_id = ?");
+    sql += " AND items.mayor_id = ?";
+    binds.push(mayorId);
+  }
+  const row = await env.DB.prepare(sql).bind(...binds).first();
+  return Number(row?.pending) || 0;
+}
+
+/**
+ * Claims rows before calling Gemini so overlapping manual, review, and weekly
+ * runs cannot bill the same article twice.
+ */
+async function claimBriefRows(env, limit, mayorId, targetEngine) {
+  const claimId = crypto.randomUUID();
+  const binds = [claimId, targetEngine];
+  let where = `${pendingBriefFilter()}
+    AND (items.brief_claimed_at IS NULL
+      OR items.brief_claimed_at <= datetime('now', '-${CLAIM_TIMEOUT_MINUTES} minutes'))
+    AND (items.brief_error IS NULL
+      OR items.brief_attempted_at IS NULL
+      OR items.brief_attempted_at <= datetime('now', '-${RETRY_BACKOFF_MINUTES} minutes'))`;
+  if (mayorId) {
+    where += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
   binds.push(limit);
 
+  await env.DB.prepare(
+    `UPDATE items
+     SET brief_claim_id = ?, brief_claimed_at = datetime('now')
+     WHERE id IN (
+       SELECT items.id FROM items
+       WHERE ${where}
+       ORDER BY CASE WHEN items.brief_error IS NULL THEN 0 ELSE 1 END,
+                IFNULL(items.brief_attempts, 0) ASC,
+                COALESCE(items.published_at, items.created_at) DESC
+       LIMIT ?
+     )`,
+  )
+    .bind(...binds)
+    .run();
+
   const { results } = await env.DB.prepare(
     `SELECT items.id, items.title, items.snippet, items.article_text, items.url,
-            items.published_at, items.publisher_domain, items.title_ar, items.snippet_ar,
+            items.published_at, items.publisher_domain,
             mayors.name_ar, mayors.name_en, mayors.name_native,
             mayors.title_ar, mayors.city_ar, mayors.city_en
      FROM items
      JOIN mayors ON mayors.id = items.mayor_id
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY CASE WHEN items.brief_error IS NULL THEN 0 ELSE 1 END,
-              COALESCE(items.brief_attempted_at, '1970-01-01') ASC,
-              COALESCE(items.published_at, items.created_at) DESC
-     LIMIT ?`,
+     WHERE items.brief_claim_id = ?`,
   )
-    .bind(...binds)
+    .bind(claimId)
     .all();
-  const rows = results || [];
-  const completed = await mapLimit(rows, 3, async (row) => {
+  return results || [];
+}
+
+export async function translatePending(env, limit = 3, mayorId = null) {
+  if (!aiBriefEnabled(env)) {
+    return { summarized: 0, failed: 0, pending: 0, retryAfterSeconds: 0 };
+  }
+  const targetEngine = aiBriefEngine(env);
+  const rows = await claimBriefRows(env, limit, mayorId, targetEngine);
+
+  let summarized = 0;
+  let failed = 0;
+  let retryAfterSeconds = 0;
+  for (const row of rows) {
     try {
       const brief = await summarizeWithGemini(env, row, row);
       await env.DB.prepare(
@@ -69,27 +106,36 @@ export async function translatePending(env, limit = 12, mayorId = null) {
          SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
              brief_evidence = ?, brief_error = NULL,
              brief_attempted_at = datetime('now'),
-             brief_attempts = IFNULL(brief_attempts, 0) + 1
+             brief_attempts = IFNULL(brief_attempts, 0) + 1,
+             brief_claim_id = NULL, brief_claimed_at = NULL
          WHERE id = ?`,
       )
         .bind(brief.title_ar, brief.snippet_ar, brief.engine, brief.evidence, row.id)
         .run();
-      return true;
+      summarized += 1;
     } catch (error) {
       const message = String(error?.message || error).slice(0, 240);
-      const failed = pendingAiBrief(row, true);
+      retryAfterSeconds = Math.max(retryAfterSeconds, Number(error?.retryAfterSeconds) || 0);
+      const state = pendingAiBrief(row, true);
       await env.DB.prepare(
         `UPDATE items
          SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
              brief_evidence = NULL, brief_error = ?,
              brief_attempted_at = datetime('now'),
-             brief_attempts = IFNULL(brief_attempts, 0) + 1
+             brief_attempts = IFNULL(brief_attempts, 0) + 1,
+             brief_claim_id = NULL, brief_claimed_at = NULL
          WHERE id = ?`,
       )
-        .bind(failed.title_ar, failed.snippet_ar, failed.engine, message, row.id)
+        .bind(state.title_ar, state.snippet_ar, state.engine, message, row.id)
         .run();
-      return false;
+      failed += 1;
     }
-  });
-  return completed.filter(Boolean).length;
+  }
+
+  return {
+    summarized,
+    failed,
+    retryAfterSeconds,
+    pending: await pendingBriefCount(env, mayorId),
+  };
 }
