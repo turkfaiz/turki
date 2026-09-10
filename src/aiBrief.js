@@ -231,7 +231,7 @@ function providerErrorCode(payload) {
 async function callGemini(env, input, schema, fetcher) {
   const model = env.GEMINI_MODEL || DEFAULT_MODEL;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30000);
+  const timer = setTimeout(() => ctrl.abort(), 90000);
   let response;
   try {
     response = await fetcher(GEMINI_URL, {
@@ -293,6 +293,9 @@ export function buildAiBriefPrompt(item, mayor) {
     "أنت محرر نشرة رصد حكومية. استخرج الزبدة من نص الصفحة المرفق، لا من العنوان وحده.",
     "تعليمات إلزامية:",
     `- العمدة المقصود: ${mayor.name_ar} (${mayor.name_en})، ${mayor.title_ar} في ${mayor.city_ar}.`,
+    `- يجب أن يبدأ العنوان باسمه العربي حرفيًا هكذا: ${mayor.name_ar}.`,
+    `- اقتباس العنوان يجب أن يذكر اسمه بلغة المصدر: ${mayor.name_native || mayor.name_en}.`,
+    "- إن لم يذكر النص العمدة بالاسم فاختر جملة تذكره، ولا تؤلف اسمًا غير موجود.",
     "- اكتب عنوانًا عربيًا خبريًا محددًا: من فعل ماذا، وما الشيء أو المكان أو الرقم أو التاريخ المهم.",
     "- ممنوع العناوين العامة مثل: ملف، نشاط رسمي، متابعة خبر، موضوع مرتبط بالمنصب.",
     "- اكتب من حقيقة إلى أربع حقائق مرتبة. لا تكرر العنوان ولا تضف تفسيرًا أو رأيًا.",
