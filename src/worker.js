@@ -309,7 +309,11 @@ async function aiBriefState(env, mayorId) {
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await onProgress("merging", "يدمج التغطيات المتكررة للحدث نفسه");
-  const review = await reviewInbox(env, { mayorId: scanOpts.mayorId || null, limit: 500 });
+  const review = await reviewInbox(env, {
+    mayorId: scanOpts.mayorId || null,
+    limit: 500,
+    useAiMerge: result.found > 0 || result.updated > 0,
+  });
   await onProgress("summarizing", "يقرأ الذكاء الاصطناعي نصوص الصفحات المدمجة ويدققها");
   const summarized = await translatePending(env, 12, scanOpts.mayorId || null);
   const ai = await aiBriefState(env, scanOpts.mayorId);
@@ -364,6 +368,7 @@ async function enqueueAllOffices(env, type = "weekly") {
 const SEARCH_TOTAL_KEYS = [
   "found",
   "held",
+  "updated",
   "skippedStale",
   "skippedUnverified",
   "skippedUnrelated",
@@ -625,6 +630,37 @@ function authRequired() {
   });
 }
 
+async function publicHealth(env) {
+  const ai = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed
+     FROM items`,
+  ).first();
+  const { results } = await env.DB.prepare(
+    `SELECT brief_error AS code, COUNT(*) AS count
+     FROM items
+     WHERE brief_error IS NOT NULL
+     GROUP BY brief_error
+     ORDER BY count DESC
+     LIMIT 5`,
+  ).all();
+  return {
+    ok: true,
+    cron: "Sunday 06:00 Asia/Riyadh",
+    queue: Boolean(env.SCAN_QUEUE),
+    ai: {
+      configured: Boolean(env.GEMINI_API_KEY),
+      model: env.GEMINI_MODEL || null,
+      pending: Number(ai?.pending) || 0,
+      failed: Number(ai?.failed) || 0,
+      completed: Number(ai?.completed) || 0,
+      errors: results || [],
+    },
+  };
+}
+
 async function readBody(request) {
   try {
     return await request.json();
@@ -688,10 +724,6 @@ async function handleApi(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
-
-  if (path === "/api/health" && method === "GET") {
-    return json({ ok: true, cron: "Sunday 06:00 Asia/Riyadh" });
-  }
 
   if (path === "/api/mayors" && method === "GET") {
     const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
@@ -789,9 +821,17 @@ async function handleApi(request, env) {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/health" && request.method === "GET") {
+      try {
+        await ensureDb(env);
+        return json(await publicHealth(env));
+      } catch (error) {
+        return json({ ok: false, error: String(error.message || error) }, 500);
+      }
+    }
     if (!authorized(request, env)) return authRequired();
     await ensureDb(env);
-    const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
       try {
         return await handleApi(request, env);
