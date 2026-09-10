@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ai4" />
+    <link rel="stylesheet" href="/styles.css?v=queue1" />
   </head>
   <body>
     <div class="sheet">
@@ -61,7 +61,16 @@
         </select>
         <button type="submit" class="btn-search" id="search-btn">بحث</button>
       </form>
-      <p class="rule-note">مسار واحد ثابت. ابحث في كل المكاتب أو اختر مكتبًا واحدًا. النظام يفتح الصفحات ويقرأ نصها، يدمج مصادر الحدث، ثم يكتب AI الزبدة قبل ظهور الوارد. الأحد 06:00 نفس المسار تلقائيًا.</p>
+      <p class="rule-note">البحث اليدوي مباشر بالاسم والمنصب ويعمل في الخلفية دون تجميد الصفحة. المصادر الأسبوعية الأوسع لا تؤخر زر البحث.</p>
+
+      <section class="search-progress" id="search-progress" hidden aria-live="polite">
+        <div class="progress-head">
+          <strong id="progress-title">جاري الرصد</strong>
+          <span class="num" id="progress-count">0 / 0</span>
+        </div>
+        <div class="progress-track"><span id="progress-bar"></span></div>
+        <div class="progress-tasks" id="progress-tasks"></div>
+      </section>
 
       <section class="kpis">
         <article><span>بانتظار القرار</span><b class="num" id="stat-inbox">0</b></article>
@@ -88,6 +97,6 @@
         </aside>
       </section>
     </div>
-    <script src="/app.js?v=ai4"></script>
+    <script src="/app.js?v=queue1"></script>
   </body>
 </html>

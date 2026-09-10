@@ -232,16 +232,17 @@ function rssLooksFresh(row) {
   return isWithinWeek(row.published_at) !== false;
 }
 
-async function gatherForMayor(env, mayor, extraQuery) {
+async function gatherForMayor(env, mayor, extraQuery, scanType = "manual") {
   const q = buildSearchQueries(mayor, extraQuery);
   const errors = [];
   const buckets = [];
+  const manual = scanType === "manual";
   const jobs = [
     ["google_news", collectGoogleNews(q.native, mayor.gn_hl, mayor.gn_gl)],
     ["google_news_en", collectGoogleNews(q.english, "en", "US")],
     ["bing_news", collectBingNews(q.native, mayor.gn_hl)],
   ];
-  if (!String(extraQuery || "").trim()) {
+  if (!manual && !String(extraQuery || "").trim()) {
     jobs.unshift(["official_direct", collectOfficialSitemap(mayor)]);
   }
   if (q.official) {
@@ -254,10 +255,8 @@ async function gatherForMayor(env, mayor, extraQuery) {
       ],
     );
   }
-  jobs.push(
-    ["inoreader", collectInoreader(env, q.native)],
-    ["gdelt", collectGdelt(mayor, extraQuery)],
-  );
+  jobs.push(["inoreader", collectInoreader(env, q.native)]);
+  if (!manual) jobs.push(["gdelt", collectGdelt(mayor, extraQuery)]);
   const settled = await Promise.all(
     jobs.map(async ([label, promise]) => {
       try {
@@ -277,7 +276,10 @@ async function gatherForMayor(env, mayor, extraQuery) {
   return { rows: buckets.filter((row) => row.title && row.url && rssLooksFresh(row)), errors, queries: q };
 }
 
-export async function runScan(env, { type, query = "", mayorId = null }) {
+export async function runScan(env, { type, query = "", mayorId = null }, onProgress = null) {
+  const progress = async (stage, detail) => {
+    if (onProgress) await onProgress(stage, detail);
+  };
   const scanId = crypto.randomUUID();
   const started = new Date().toISOString();
   await env.DB.prepare(
@@ -286,6 +288,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
   )
     .bind(scanId, type, query || null, mayorId, started)
     .run();
+  await progress("discovering", "يجمع الإشارات من المصادر المتاحة");
 
   const targets = mayorId ? [mayorById(mayorId)].filter(Boolean) : MAYORS;
   if (!targets.length) {
@@ -326,12 +329,16 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     const chunk = targets.slice(i, i + 3);
     const part = await Promise.all(
       chunk.map(async (mayor) => {
-        const result = await gatherForMayor(env, mayor, query);
+        const result = await gatherForMayor(env, mayor, query, type);
         return { mayor, ...result };
       }),
     );
     gathered.push(...part);
   }
+  await progress(
+    "verifying",
+    `اكتشف ${gathered.reduce((sum, result) => sum + result.rows.length, 0)} رابطًا ويبدأ فتح الصفحات`,
+  );
 
   for (const { mayor, rows, errors } of gathered) {
     allErrors.push(...errors);
@@ -345,7 +352,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     }
     discovered += unique.length;
 
-    const verified = await mapLimit(unique, 3, async (row) => {
+    const verified = await mapLimit(unique, type === "manual" ? 5 : 3, async (row) => {
       try {
         const preview = classifyItem(row, mayor);
         if (preview.exclude_reason && preview.publisher_tier == null && row.source !== "official") {
@@ -488,6 +495,7 @@ export async function runScan(env, { type, query = "", mayorId = null }) {
     }
   }
 
+  await progress("saving", `قرأ ${opened} صفحة موثوقة ويحفظ النتائج`);
   await env.DB.prepare(
     `UPDATE scans SET finished_at = ?, found_count = ?, duplicate_count = ?, excluded_count = ?, error_count = ?, notes = ? WHERE id = ?`,
   )
