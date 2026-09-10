@@ -2,6 +2,7 @@ import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import { MAX_BRIEF_ATTEMPTS, pendingBriefCount, translatePending } from "./translate.js";
 import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
+import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
@@ -106,6 +107,22 @@ const SCHEMA_STATEMENTS = [
     mayor_id TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_publishers_domain ON publishers(domain)`,
+  `CREATE TABLE IF NOT EXISTS sources (
+    id TEXT PRIMARY KEY,
+    mayor_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    url TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    last_checked_at TEXT,
+    last_ok_at TEXT,
+    last_status TEXT,
+    last_items INTEGER DEFAULT 0,
+    consecutive_failures INTEGER DEFAULT 0
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sources_mayor ON sources(mayor_id, rank)`,
   `CREATE TABLE IF NOT EXISTS ai_budget (
     day TEXT PRIMARY KEY,
     calls INTEGER NOT NULL DEFAULT 0,
@@ -120,13 +137,15 @@ const SCHEMA_STATEMENTS = [
 ];
 
 let ready = false;
-const BOOTSTRAP_VERSION = "bootstrap-v10";
+const BOOTSTRAP_VERSION = "bootstrap-v11";
 
-async function upsertRows(env, prefix, rows, width, chunkSize) {
+async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    await env.DB.prepare(`${prefix} VALUES ${chunk.map(() => tuple).join(", ")}`)
+    await env.DB.prepare(
+      `${prefix} VALUES ${chunk.map(() => tuple).join(", ")} ${conflictClause}`,
+    )
       .bind(...chunk.flat())
       .run();
   }
@@ -195,11 +214,70 @@ async function ensureDb(env) {
     6,
     15,
   );
+  await seedSources(env);
   await migrateItems(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
     .run();
   ready = true;
+}
+
+/**
+ * السجل في الشيفرة هو المرجع، والجدول مرآة له تحمل بيانات الصحة. أي مصدر خرج
+ * من السجل يُحذف من الجدول حتى لا يبقى نطاق معتمد بالخطأ.
+ */
+async function seedSources(env) {
+  await upsertRows(
+    env,
+    `INSERT INTO sources (id, mayor_id, domain, name, tier, kind, url, rank)`,
+    APPROVED_SOURCES.map((source) => [
+      source.id,
+      source.mayor_id,
+      source.domain,
+      source.name,
+      source.tier,
+      source.kind,
+      source.url,
+      source.rank,
+    ]),
+    8,
+    10,
+    `ON CONFLICT(id) DO UPDATE SET
+       mayor_id = excluded.mayor_id, domain = excluded.domain, name = excluded.name,
+       tier = excluded.tier, kind = excluded.kind, url = excluded.url, rank = excluded.rank`,
+  );
+  const keep = APPROVED_SOURCES.map((source) => source.id);
+  await env.DB.prepare(
+    `DELETE FROM sources WHERE id NOT IN (${keep.map(() => "?").join(", ")})`,
+  )
+    .bind(...keep)
+    .run();
+}
+
+/** يسجّل ما حدث فعلًا لكل مصدر حتى تكون الحوكمة مبنية على واقع الإنتاج. */
+export async function recordSourceHealth(env, rows) {
+  if (!rows?.length) return;
+  const stmt = env.DB.prepare(
+    `UPDATE sources
+     SET last_checked_at = datetime('now'),
+         last_ok_at = CASE WHEN ? THEN datetime('now') ELSE last_ok_at END,
+         last_status = ?, last_items = ?,
+         consecutive_failures = CASE WHEN ? THEN 0 ELSE IFNULL(consecutive_failures, 0) + 1 END
+     WHERE id = ?`,
+  );
+  for (let i = 0; i < rows.length; i += 20) {
+    await env.DB.batch(
+      rows.slice(i, i + 20).map((row) =>
+        stmt.bind(
+          row.ok ? 1 : 0,
+          String(row.status || "").slice(0, 160),
+          Number(row.items) || 0,
+          row.ok ? 1 : 0,
+          row.id,
+        ),
+      ),
+    );
+  }
 }
 
 async function migrateItems(env) {
@@ -343,6 +421,7 @@ const CONTINUATION_DEFER_CEILING = 300;
 /** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
+  await recordSourceHealth(env, result.sourceHealth);
   await onProgress("merging", "يدمج التغطيات المتكررة للحدث نفسه");
   const review = await reviewInbox(env, {
     mayorId: scanOpts.mayorId || null,
@@ -862,6 +941,25 @@ async function stats(env) {
       pending: await pendingBriefCount(env),
       budget: await budgetState(env),
     },
+    registry: await registrySummary(env),
+  };
+}
+
+async function registrySummary(env) {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN last_ok_at IS NOT NULL AND IFNULL(consecutive_failures, 0) = 0
+                     THEN 1 ELSE 0 END) AS healthy,
+            SUM(CASE WHEN IFNULL(consecutive_failures, 0) >= 3 THEN 1 ELSE 0 END) AS failing,
+            SUM(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked
+     FROM sources`,
+  ).first();
+  return {
+    total: Number(row?.total) || 0,
+    healthy: Number(row?.healthy) || 0,
+    failing: Number(row?.failing) || 0,
+    unchecked: Number(row?.unchecked) || 0,
+    perOffice: MAX_SOURCES_PER_OFFICE,
   };
 }
 
@@ -873,6 +971,15 @@ async function handleApi(request, env) {
   if (path === "/api/mayors" && method === "GET") {
     const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
     return json({ mayors: results });
+  }
+
+  if (path === "/api/sources" && method === "GET") {
+    const { results } = await env.DB.prepare(
+      `SELECT sources.*, mayors.name_ar, mayors.city_ar
+       FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+       ORDER BY sources.mayor_id, sources.rank`,
+    ).all();
+    return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });
   }
 
   if (path === "/api/stats" && method === "GET") {

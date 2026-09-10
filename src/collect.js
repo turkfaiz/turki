@@ -1,6 +1,6 @@
 import { MAYORS, buildSearchQueries, isAboutMayor, mayorById } from "./mayors.js";
-import { publisherFeeds } from "./feeds.js";
-import { bingNewsRssUrl, decodeXml, googleNewsRssUrl, parseRssItems } from "./rss.js";
+import { APPROVED_SOURCES, isApprovedUrl, sourcesFor } from "./sources.js";
+import { decodeXml, parseRssItems } from "./rss.js";
 import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
 import { isWithinWeek, toIso } from "./time.js";
@@ -47,261 +47,139 @@ async function collectRss(url, sourceTag, language) {
   return parseRssItems(xml).slice(0, 50).map((item) => ({ ...item, source: sourceTag, language }));
 }
 
-async function collectGoogleNews(query, hl, gl) {
-  return collectRss(googleNewsRssUrl(query, hl, gl), "google_news", hl);
-}
+const ARTICLE_LINK_LIMIT = 40;
+const NON_ARTICLE_PATH =
+  /\.(?:jpe?g|png|gif|svg|webp|pdf|zip|docx?|xlsx?|mp[34]|css|js)$/i;
+const NAV_PATH =
+  /\/(?:tag|tags|category|categories|author|autor|search|login|register|contact|privacy|cookie|terms|feed|rss|sitemap|page)\//i;
+/** علامات نشرية بلغات المكاتب: عربية وإنجليزية وإيطالية وإسبانية ويونانية وألبانية ويابانية. */
+const NEWSROOM_PATH =
+  /news|notiz|notic|actual|article|story|press|media|comunic|akhbar|khabar|lajme|hodo|happyo|nea|eidisi|\/20\d{2}\//i;
 
-/** Bing wraps results in a click tracker that still carries the publisher URL. */
-export function unwrapBingUrl(url) {
+/**
+ * يستخرج روابط المقالات من صفحة أخبار الموقع نفسه. الاستخراج محصور في النطاق
+ * المعتمد ذاته، فلا تتسع قائمة المصادر ضمنًا عبر روابط خارجة.
+ */
+export function extractArticleLinks(html, baseUrl) {
+  let base;
   try {
-    const parsed = new URL(url);
-    if (!/(^|\.)bing\.com$/i.test(parsed.hostname)) return url;
-    const target = parsed.searchParams.get("url") || parsed.searchParams.get("u");
-    if (!target) return url;
-    const decoded = /^https?:\/\//i.test(target)
-      ? target
-      : decodeURIComponent(target.replace(/^a1/, ""));
-    return /^https?:\/\//i.test(decoded) ? decoded : url;
+    base = new URL(baseUrl);
   } catch {
-    return url;
+    return [];
   }
-}
-
-async function collectBingNews(query, language) {
-  const rows = await collectRss(bingNewsRssUrl(query), "bing_news", language);
-  return rows
-    .map((row) => {
-      const url = unwrapBingUrl(row.url);
-      return { ...row, url, publisher_url: url };
-    })
-    .filter((row) => !/(^|\.)bing\.com$/i.test(new URL(row.url, "https://x.invalid").hostname));
-}
-
-/** Allowlisted publisher feeds expose direct article links for verification. */
-async function collectPublisherFeeds(mayor) {
-  const feeds = publisherFeeds(mayor.id);
-  if (!feeds.length) return [];
-  const settled = await Promise.all(
-    feeds.map(async (url) => {
-      try {
-        return await collectRss(url, "publisher_feed", mayor.native_lang);
-      } catch {
-        return [];
-      }
-    }),
-  );
-  const rows = settled.flat();
-  if (!rows.length) throw new Error("publisher feeds unavailable");
-  return rows
-    .filter((row) => isAboutMayor(`${row.title} ${row.snippet || ""}`, mayor))
-    .map((row) => ({ ...row, publisher_url: row.url }));
-}
-
-/** Official newsroom feeds return real publisher links, unlike aggregator wrappers. */
-async function collectOfficialFeed(mayor) {
-  if (!mayor.official_host) return [];
-  const base = `https://${mayor.official_host}`;
-  const candidates = ["/rss.xml", "/rss", "/feed", "/feed.xml", "/news/rss.xml", "/en/rss.xml"];
-  const rows = [];
-  const failures = [];
-  for (const path of candidates) {
+  const host = base.hostname.replace(/^www\./i, "").toLowerCase();
+  /** مقالات غرفة الأخبار تسكن مجلدها، فمن خرج عنه يحتاج علامة نشرية صريحة. */
+  const newsroomDir = base.pathname.replace(/[^/]*$/, "");
+  const found = new Map();
+  for (const tag of String(html || "").match(/<a\b[^>]*href\s*=\s*["'][^"']+["'][^>]*>/gi) || []) {
+    const href = tag.match(/href\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href)) continue;
+    let url;
     try {
-      const feed = await collectRss(`${base}${path}`, "official", mayor.native_lang);
-      if (feed.length) {
-        rows.push(...feed.map((row) => ({ ...row, publisher_url: row.url })));
-        break;
-      }
-    } catch (error) {
-      failures.push(String(error.message || error));
+      url = new URL(decodeXml(href), base);
+    } catch {
+      continue;
     }
+    if (!/^https?:$/i.test(url.protocol)) continue;
+    const linkHost = url.hostname.replace(/^www\./i, "").toLowerCase();
+    if (linkHost !== host && !linkHost.endsWith(`.${host}`)) continue;
+    url.hash = "";
+    const path = url.pathname;
+    if (path === "/" || NON_ARTICLE_PATH.test(path) || NAV_PATH.test(path)) continue;
+    const segments = path.split("/").filter(Boolean);
+    const inNewsroom = newsroomDir.length > 1 && path.startsWith(newsroomDir);
+    if (!inNewsroom && !NEWSROOM_PATH.test(path)) continue;
+    const looksLikeArticle =
+      segments.length >= 2 ||
+      /\d{4,}/.test(url.search + path) ||
+      /-.*-/.test(segments.at(-1) || "");
+    if (!looksLikeArticle) continue;
+    const key = url.toString();
+    if (found.has(key)) continue;
+    const text = tag.match(/>([^<]{6,})$/)?.[1];
+    found.set(key, decodeXml(text || "").trim());
+    if (found.size >= ARTICLE_LINK_LIMIT) break;
   }
-  if (!rows.length && failures.length === candidates.length) {
-    throw new Error(`official feed unavailable: ${failures[0]}`);
-  }
-  return rows;
+  return [...found.entries()].map(([url, title]) => ({ url, title }));
 }
 
-export function parseSitemap(xml) {
-  const text = String(xml || "");
-  const index = /<sitemapindex\b/i.test(text);
-  const blockName = index ? "sitemap" : "url";
-  const blocks = text.match(new RegExp(`<${blockName}\\b[\\s\\S]*?<\\/${blockName}>`, "gi")) || [];
-  const rows = blocks
-    .map((block) => {
-      const loc = decodeXml((block.match(/<loc[^>]*>([\s\S]*?)<\/loc>/i) || [])[1] || "");
-      const lastmod = decodeXml(
-        (block.match(/<lastmod[^>]*>([\s\S]*?)<\/lastmod>/i) || [])[1] || "",
-      );
-      return { loc, lastmod };
-    })
-    .filter((row) => /^https?:\/\//i.test(row.loc));
-  return { index, rows };
-}
-
-function sitemapPriority(row) {
-  const url = row.loc.toLowerCase();
-  const topical = /news|press|media|actual|notic|comunic|article|story/.test(url) ? 0 : 1;
-  const recent = Date.parse(row.lastmod || "") || 0;
-  return topical * 1e16 - recent;
-}
-
-async function collectOfficialSitemap(mayor) {
-  if (!mayor.official_host) return [];
-  const base = `https://${mayor.official_host}`;
-  const sitemapUrls = new Set([`${base}/sitemap.xml`]);
-  try {
-    const robots = await fetchText(`${base}/robots.txt`, 8000);
-    for (const match of robots.matchAll(/^sitemap:\s*(https?:\/\/\S+)/gim)) {
-      sitemapUrls.add(match[1].trim());
-    }
-  } catch {
-    /* default sitemap can still work */
-  }
-
-  const pages = [];
-  let fetchedSitemaps = 0;
-  const failures = [];
-  for (const sitemapUrl of [...sitemapUrls].slice(0, 3)) {
-    try {
-      const parsed = parseSitemap(await fetchText(sitemapUrl, 10000));
-      fetchedSitemaps += 1;
-      if (!parsed.index) {
-        pages.push(...parsed.rows);
-        continue;
-      }
-      const children = [...parsed.rows].sort((a, b) => sitemapPriority(a) - sitemapPriority(b));
-      for (const child of children.slice(0, 4)) {
-        try {
-          const nested = parseSitemap(await fetchText(child.loc, 10000));
-          fetchedSitemaps += 1;
-          if (!nested.index) pages.push(...nested.rows);
-        } catch (error) {
-          failures.push(String(error.message || error));
-        }
-      }
-    } catch (error) {
-      failures.push(String(error.message || error));
-    }
-  }
-  if (!fetchedSitemaps) {
-    throw new Error(`sitemap unavailable${failures[0] ? `: ${failures[0]}` : ""}`);
-  }
-
-  const seen = new Set();
-  return pages
-    .filter((row) => row.lastmod && isWithinWeek(row.lastmod) === true)
-    .sort((a, b) => Date.parse(b.lastmod) - Date.parse(a.lastmod))
-    .filter((row) => {
-      if (seen.has(row.loc)) return false;
-      seen.add(row.loc);
-      return true;
-    })
-    .slice(0, 30)
-    .map((row) => ({
-      title: (() => {
-        try {
-          return (
-            decodeURIComponent(new URL(row.loc).pathname)
-              .split("/")
-              .filter(Boolean)
-              .pop()
-              ?.replace(/[-_]+/g, " ") || mayor.name_en
-          );
-        } catch {
-          return mayor.name_en;
-        }
-      })(),
-      url: row.loc,
-      published_at: row.lastmod,
-      date_is_discovery: true,
-      snippet: "",
-      source: "official",
-      language: mayor.native_lang,
-      publisher_name: mayor.title_en,
-      publisher_url: base,
-    }));
-}
-
-function inoreaderEnabled(env) {
-  return Boolean(env.INOREADER_APP_ID && env.INOREADER_APP_KEY && env.INOREADER_ACCESS_TOKEN);
-}
-
-async function collectInoreader(env, query) {
-  if (!inoreaderEnabled(env)) return [];
-  const url = `https://www.inoreader.com/reader/api/0/search/stream/0/search?q=${encodeURIComponent(query)}&output=json&num=50`;
-  const res = await fetch(url, {
-    headers: {
-      AppId: env.INOREADER_APP_ID,
-      AppKey: env.INOREADER_APP_KEY,
-      Authorization: `GoogleLogin auth=${env.INOREADER_ACCESS_TOKEN}`,
-    },
-  });
-  if (!res.ok) throw new Error(`Inoreader HTTP ${res.status}`);
-  const data = await res.json();
-  const items = data.items || data.Items || [];
-  return items.slice(0, 50).map((it) => ({
-    title: it.title || it.Title || "",
-    url: it.canonical?.[0]?.href || it.alternate?.[0]?.href || it.url || "",
-    published_at: it.published ? new Date(it.published * 1000).toISOString() : null,
-    snippet: (it.summary?.content || it.origin?.title || "").replace(/<[^>]+>/g, " ").trim(),
-    source: "inoreader",
-    language: "und",
-    publisher_name: it.origin?.title || "",
-    publisher_url: it.origin?.htmlUrl || it.canonical?.[0]?.href || "",
+async function collectApprovedPage(source, mayor) {
+  const html = await fetchText(source.url, 15000);
+  return extractArticleLinks(html, source.url).map((link) => ({
+    title: link.title || link.url,
+    url: link.url,
+    snippet: "",
+    published_at: "",
+    source: source.tier === 0 ? "official" : "approved_page",
+    language: mayor.native_lang,
+    publisher_url: link.url,
+    registry_id: source.id,
   }));
 }
 
-async function collectGdelt(mayor, extraQuery = "") {
-  const names =
-    mayor.name_en === mayor.name_native
-      ? `"${mayor.name_en}"`
-      : `("${mayor.name_en}" OR "${mayor.name_native}")`;
-  const extra = String(extraQuery || "").trim().replace(/"/g, " ");
-  const q = encodeURIComponent(extra ? `${names} "${extra}"` : names);
-  const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${q}&mode=artlist&maxrecords=50&timespan=7d&format=json&sort=datedesc`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const res = await fetch(url, {
-      headers: { "User-Agent": FETCH_HEADERS["User-Agent"], Accept: "application/json" },
-    });
-    if (res.status === 429 && attempt === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 5500));
-      continue;
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return (data.articles || []).map((art) => ({
-      title: art.title || "",
-      url: art.url || "",
-      published_at: art.seendate || null,
-      date_is_discovery: true,
-      snippet: art.title || "",
-      source: "gdelt",
-      language: "und",
-      publisher_name: "",
-      publisher_url: art.url || "",
-    }));
-  }
-  return [];
+async function collectApprovedFeed(source, mayor) {
+  const rows = await collectRss(
+    source.url,
+    source.tier === 0 ? "official" : "approved_feed",
+    mayor.native_lang,
+  );
+  return rows.map((row) => ({ ...row, publisher_url: row.url, registry_id: source.id }));
 }
 
-export function sourceStatus(env) {
+/**
+ * الرصد من سجل المصادر المعتمدة فقط. كل مصدر يُحاول على حدة وتُسجَّل صحته،
+ * فتعطُّل مصدر لا يوقف المكتب ويظهر للمستخدم بدل أن يُخفى.
+ */
+export async function collectApprovedSources(mayor) {
+  const sources = sourcesFor(mayor.id);
+  if (!sources.length) return { rows: [], health: [] };
+  const settled = await Promise.all(
+    sources.map(async (source) => {
+      const startedAt = Date.now();
+      try {
+        const rows =
+          source.kind === "page"
+            ? await collectApprovedPage(source, mayor)
+            : await collectApprovedFeed(source, mayor);
+        return {
+          source,
+          rows,
+          health: {
+            id: source.id,
+            ok: rows.length > 0,
+            status: rows.length ? "ok" : "empty",
+            items: rows.length,
+            ms: Date.now() - startedAt,
+          },
+        };
+      } catch (error) {
+        return {
+          source,
+          rows: [],
+          health: {
+            id: source.id,
+            ok: false,
+            status: String(error?.message || error).slice(0, 120),
+            items: 0,
+            ms: Date.now() - startedAt,
+          },
+        };
+      }
+    }),
+  );
+  const rows = settled
+    .flatMap((entry) => entry.rows)
+    .filter((row) => row.url && isApprovedUrl(row.url, mayor.id));
+  return { rows, health: settled.map((entry) => entry.health) };
+}
+
+export function sourceStatus(_env) {
   return {
-    inoreader: inoreaderEnabled(env) ? "ready" : "unconfigured",
-    google_news: "ready",
-    bing_news: "ready",
-    gdelt: "ready",
-    official: "ready",
+    registry: "ready",
+    approved_sources: APPROVED_SOURCES.length,
+    offices: MAYORS.length,
+    search_engines: "disabled",
   };
-}
-
-/** Google wraps links behind an encrypted redirect that is often rate limited. */
-export function isUnreadableWrapper(url) {
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
-    return host === "news.google.com" || host.endsWith(".news.google.com");
-  } catch {
-    return false;
-  }
 }
 
 function rssLooksFresh(row) {
@@ -309,40 +187,18 @@ function rssLooksFresh(row) {
   return isWithinWeek(row.published_at) !== false;
 }
 
-async function gatherForMayor(env, mayor, extraQuery, scanType = "manual") {
+async function gatherForMayor(_env, mayor, extraQuery) {
   const q = buildSearchQueries(mayor, extraQuery);
-  const errors = [];
-  const buckets = [];
-  const manual = scanType === "manual";
-  const jobs = [
-    ["official_feed", collectOfficialFeed(mayor)],
-    ["publisher_feeds", collectPublisherFeeds(mayor)],
-    ["bing_news", collectBingNews(q.native, mayor.gn_hl)],
-    ["bing_news_en", collectBingNews(q.english, "en")],
-    ["google_news", collectGoogleNews(q.native, mayor.gn_hl, mayor.gn_gl)],
-  ];
-  if (!manual && !String(extraQuery || "").trim()) {
-    jobs.push(["official_sitemap", collectOfficialSitemap(mayor)]);
-  }
-  jobs.push(["inoreader", collectInoreader(env, q.native)]);
-  if (!manual) jobs.push(["gdelt", collectGdelt(mayor, extraQuery)]);
-  const settled = await Promise.all(
-    jobs.map(async ([label, promise]) => {
-      try {
-        return { label, rows: await promise };
-      } catch (error) {
-        return { label, rows: [], error };
-      }
-    }),
-  );
-  for (const result of settled) {
-    if (result.error) {
-      errors.push(`${result.label}/${mayor.id}: ${result.error.message}`);
-    } else {
-      buckets.push(...result.rows);
-    }
-  }
-  return { rows: buckets.filter((row) => row.title && row.url && rssLooksFresh(row)), errors, queries: q };
+  const { rows, health } = await collectApprovedSources(mayor);
+  const errors = health
+    .filter((entry) => !entry.ok)
+    .map((entry) => `${entry.id}: ${entry.status}`);
+  return {
+    rows: rows.filter((row) => row.title && row.url && rssLooksFresh(row)),
+    errors,
+    health,
+    queries: q,
+  };
 }
 
 export async function runScan(env, { type, query = "", mayorId = null }, onProgress = null) {
@@ -393,6 +249,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
   let discovered = 0;
   let opened = 0;
   const allErrors = [];
+  const sourceHealth = [];
   const seen = new Set();
 
   const gathered = [];
@@ -411,13 +268,12 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     `اكتشف ${gathered.reduce((sum, result) => sum + result.rows.length, 0)} رابطًا ويبدأ فتح الصفحات`,
   );
 
-  for (const { mayor, rows, errors } of gathered) {
+  for (const { mayor, rows, errors, health } of gathered) {
     allErrors.push(...errors);
+    sourceHealth.push(...(health || []).map((entry) => ({ ...entry, mayor_id: mayor.id })));
     const unique = [];
     const urls = new Set();
-    const directRows = rows.filter((row) => !isUnreadableWrapper(row.url));
-    const usableRows = directRows.length ? directRows : rows;
-    for (const row of usableRows) {
+    for (const row of rows) {
       const key = `${row.url}|${row.title}`;
       if (urls.has(key)) continue;
       urls.add(key);
@@ -599,5 +455,6 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     discovered,
     opened,
     errors: allErrors,
+    sourceHealth,
   };
 }

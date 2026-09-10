@@ -171,9 +171,16 @@ async function loadStats() {
   $("stat-approved").textContent = num(mayorId ? row?.approved || 0 : s.approved);
   $("stat-excluded").textContent = num(mayorId ? row?.excluded || 0 : s.excluded);
   $("stat-dup").textContent = num(s.week?.duplicates);
-  applyPlatform(s.sources.inoreader === "ready" || s.sources.inoreader?.on, "led-inoreader", "src-inoreader");
-  applyPlatform(s.sources.google_news === "ready" || s.sources.google_news?.on !== false, "led-google", "src-google");
-  applyPlatform(s.sources.official === "ready" || s.sources.official?.on !== false, "led-official", "src-official");
+  const registry = s.registry || {};
+  const offices = (s.byMayor || []).length || 12;
+  setLed("led-registry", registry.failing === 0);
+  $("src-registry").textContent = registry.unchecked
+    ? `${num(registry.total)} مصدر · ${num(registry.perOffice)} لكل مكتب · بانتظار أول فحص`
+    : `${num(registry.healthy)} سليم من ${num(registry.total)}${registry.failing ? ` · متعطل ${num(registry.failing)}` : ""}`;
+  setLed("led-official", true);
+  $("src-official").textContent = `${num(offices)} غرفة أخبار رسمية في المرتبة الأولى`;
+  setLed("led-engines", false);
+  $("src-engines").textContent = "معطّلة بالحوكمة — لا يُفتح إلا نطاق معتمد";
   applyPlatform(s.sources.ai_brief === "ready", "led-ai", "src-ai");
   $("src-ai").textContent = aiSourceLabel(s);
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
@@ -192,12 +199,11 @@ function aiSourceLabel(s) {
   const budget = s.ai?.budget;
   const pending = Number(s.ai?.pending) || 0;
   if (budget?.blocked) {
-    return `الحصة مغلقة · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
+    return `توقف مؤقت — نفدت نداءات AI · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
   }
-  if (pending) {
-    return `يقرأ الصفحة · بقي ${num(pending)} · متبقٍ اليوم ${num(budget?.remaining)}`;
-  }
-  return `يقرأ الصفحة · متبقٍ اليوم ${num(budget?.remaining)}`;
+  const quota = `رصيد نداءات AI اليوم ${num(budget?.remaining)} من ${num(budget?.dailyLimit)}`;
+  if (pending) return `يقرأ ويلخص · بقي ${num(pending)} خبر · ${quota}`;
+  return `يقرأ ويلخص · ${quota}`;
 }
 
 function itemsQuery() {

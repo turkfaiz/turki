@@ -1,4 +1,5 @@
 import { MAYORS, isAboutMayor } from "./mayors.js";
+import { APPROVED_SOURCES } from "./sources.js";
 import { isAggregatorHost, publisherDomain, resolvePublisherDomain } from "./domain.js";
 import { pickConfidence } from "./dedup.js";
 import { REASON } from "./reasons.js";
@@ -133,6 +134,14 @@ export function buildPublishers() {
     out.push(item);
   };
 
+  /**
+   * سجل المصادر المعتمدة يأتي أولًا لأنه هو الحاكم: كل نطاق يسمح الرصد بفتحه
+   * يجب أن يكون موثوقًا بالضرورة، وإلا فتحنا صفحة ثم استبعدناها بلا معنى.
+   */
+  for (const source of APPROVED_SOURCES) {
+    const mayor = MAYORS.find((entry) => entry.id === source.mayor_id);
+    add(row(source.domain, source.name, source.tier, mayor?.country_code || null, source.mayor_id));
+  }
   for (const [domain, name] of GLOBAL) {
     add(row(domain, name, 1, null, null));
   }
