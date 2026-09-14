@@ -185,7 +185,7 @@ export const MAYORS = [
     country_code: "MA",
     gn_hl: "ar",
     gn_gl: "MA",
-    official_host: "rabat.ma",
+    official_host: "mairiederabat.ma",
   },
   {
     id: "athens",
