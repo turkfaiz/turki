@@ -1,4 +1,4 @@
-import { MAYORS, buildSearchQueries, isAboutMayor, mayorById } from "./mayors.js";
+import { MAYORS, buildSearchQueries, isAboutMayor, matchesTopic, mayorById } from "./mayors.js";
 import { APPROVED_SOURCES, isApprovedUrl, sourcesFor } from "./sources.js";
 import { decodeXml, parseRssItems } from "./rss.js";
 import { fingerprint, normalizeTitle } from "./dedup.js";
@@ -193,12 +193,27 @@ async function gatherForMayor(_env, mayor, extraQuery) {
   const errors = health
     .filter((entry) => !entry.ok)
     .map((entry) => `${entry.id}: ${entry.status}`);
+  const usable = rows.filter((row) => row.title && row.url && rssLooksFresh(row));
+
+  /**
+   * موضوع البحث كان يُبنى في الاستعلامات ثم يُهمل بعد إلغاء محركات البحث، فلا
+   * يغيّر النتيجة إطلاقًا. الآن يصفّي ما يُجمع قبل الحفظ، بمطابقة كل كلماته.
+   */
+  const topic = String(extraQuery || "").trim();
+  const matched = topic ? usable.filter((row) => matchesTopic(topicText(row), topic)) : usable;
+
   return {
-    rows: rows.filter((row) => row.title && row.url && rssLooksFresh(row)),
+    rows: matched,
     errors,
     health,
     queries: q,
+    topic,
+    skippedTopic: usable.length - matched.length,
   };
+}
+
+function topicText(row) {
+  return [row.title, row.snippet, row.article_text].filter(Boolean).join(" ");
 }
 
 export async function runScan(env, { type, query = "", mayorId = null }, onProgress = null) {
@@ -248,6 +263,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
   let updated = 0;
   let discovered = 0;
   let opened = 0;
+  let skippedTopic = 0;
   const allErrors = [];
   const sourceHealth = [];
   const seen = new Set();
@@ -268,8 +284,9 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     `اكتشف ${gathered.reduce((sum, result) => sum + result.rows.length, 0)} رابطًا ويبدأ فتح الصفحات`,
   );
 
-  for (const { mayor, rows, errors, health } of gathered) {
+  for (const { mayor, rows, errors, health, skippedTopic: topicDrops } of gathered) {
     allErrors.push(...errors);
+    skippedTopic += Number(topicDrops) || 0;
     sourceHealth.push(...(health || []).map((entry) => ({ ...entry, mayor_id: mayor.id })));
     const unique = [];
     const urls = new Set();
@@ -454,6 +471,7 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
     updated,
     discovered,
     opened,
+    skippedTopic,
     errors: allErrors,
     sourceHealth,
   };

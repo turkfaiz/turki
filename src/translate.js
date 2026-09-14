@@ -1,4 +1,15 @@
 import { arabicRatio, decodeEntities, splitHeadline } from "./text.js";
+import { availableAiCalls } from "./aiBudget.js";
+import { readSourceDocuments } from "./sourceDocuments.js";
+import {
+  claimVerifications,
+  deferVerification,
+  recordVerificationFailure,
+  recordVerificationPass,
+  saveBriefVersion,
+  sourceHash,
+  verificationBacklog,
+} from "./versions.js";
 import {
   BRIEF_STATE,
   aiBriefEnabled,
@@ -7,6 +18,7 @@ import {
   pendingAiBrief,
   summarizeWithGemini,
   transientAiError,
+  verifyBriefSemantics,
 } from "./aiBrief.js";
 
 export { arabicRatio, decodeEntities, splitHeadline };
@@ -34,6 +46,37 @@ export function pendingBriefFilter(alias = "items") {
     AND IFNULL(${alias}.brief_attempts, 0) < ${MAX_BRIEF_ATTEMPTS}`;
 }
 
+/** المؤهل للتنفيذ الآن: معلّق وحلّ وقت استئنافه. */
+export function eligibleBriefFilter(alias = "items") {
+  return `${pendingBriefFilter(alias)}
+    AND (${alias}.brief_after IS NULL OR ${alias}.brief_after <= datetime('now'))`;
+}
+
+/**
+ * يفصل ما ينتظر عن ما يمكن تنفيذه الآن، ويعيد أقرب وقت صالح، فلا تُجدول رسائل
+ * لا عمل لها ولا يُقرأ الانتظار كأنه تعذر.
+ */
+export async function briefBacklog(env, mayorId = null) {
+  const binds = [aiBriefEngine(env)];
+  let sql = `SELECT
+       COUNT(*) AS pending,
+       SUM(CASE WHEN items.brief_after IS NULL OR items.brief_after <= datetime('now')
+                THEN 1 ELSE 0 END) AS eligible,
+       MIN(CASE WHEN items.brief_after IS NULL OR items.brief_after <= datetime('now')
+                THEN NULL ELSE items.brief_after END) AS next_at
+     FROM items WHERE ${pendingBriefFilter()}`;
+  if (mayorId) {
+    sql += " AND items.mayor_id = ?";
+    binds.push(mayorId);
+  }
+  const row = await env.DB.prepare(sql).bind(...binds).first();
+  return {
+    pending: Number(row?.pending) || 0,
+    eligible: Number(row?.eligible) || 0,
+    nextAt: row?.next_at || null,
+  };
+}
+
 export async function pendingBriefCount(env, mayorId = null) {
   const binds = [aiBriefEngine(env)];
   let sql = `SELECT COUNT(*) AS pending FROM items WHERE ${pendingBriefFilter()}`;
@@ -53,7 +96,7 @@ export async function pendingBriefCount(env, mayorId = null) {
 async function claimBriefRows(env, limit, mayorId, targetEngine) {
   const claimId = crypto.randomUUID();
   const binds = [claimId, targetEngine];
-  let where = `${pendingBriefFilter()}
+  let where = `${eligibleBriefFilter()}
     AND (items.brief_claimed_at IS NULL
       OR items.brief_claimed_at <= datetime('now', '-${CLAIM_TIMEOUT_MINUTES} minutes'))
     AND (items.brief_error IS NULL
@@ -63,10 +106,14 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
     where += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
+  /**
+   * التناوب بين المكاتب لا معنى له عند تحديد مكتب واحد، وبند ترتيب ثابت يشوّش
+   * الترتيب المقصود، فيُحذف بدل تمرير قيمة صورية.
+   */
   const fairness = mayorId
-    ? "0"
+    ? ""
     : `(SELECT COUNT(*) FROM items done
-        WHERE done.mayor_id = items.mayor_id AND done.trans_engine = ?)`;
+        WHERE done.mayor_id = items.mayor_id AND done.trans_engine = ?) ASC,`;
   if (!mayorId) binds.push(targetEngine);
   binds.push(limit);
 
@@ -77,7 +124,7 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
        SELECT items.id FROM items
        WHERE ${where}
        ORDER BY CASE WHEN items.brief_error IS NULL THEN 0 ELSE 1 END,
-                ${fairness} ASC,
+                ${fairness}
                 IFNULL(items.brief_attempts, 0) ASC,
                 COALESCE(items.published_at, items.created_at) DESC
        LIMIT ?
@@ -88,7 +135,9 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
 
   const { results } = await env.DB.prepare(
     `SELECT items.id, items.title, items.snippet, items.article_text, items.url,
-            items.published_at, items.publisher_domain,
+            items.published_at, items.publisher_domain, items.source,
+            items.source_documents, items.merged_sources,
+            items.approved_version_id, items.source_hash,
             mayors.name_ar, mayors.name_en, mayors.name_native,
             mayors.title_ar, mayors.city_ar, mayors.city_en
      FROM items
@@ -108,18 +157,100 @@ async function releaseClaims(env, ids) {
   await env.DB.batch(ids.map((id) => stmt.bind(id)));
 }
 
+/**
+ * يُحفظ الموجز فور إنتاجه كنسخة مستقلة، قبل أي تدقيق، فلا يُفقد ولا يُعاد
+ * إنتاجه إن تعذّر النداء الثاني. والنسخة المعتمدة سابقًا لا تُمسّ: إن تغيّر
+ * المصدر نشأت نسخة جديدة تحتاج مراجعة، وبقي المعتمد وأدلته كما هما.
+ */
 async function storeBrief(env, row, brief) {
+  const hash = await sourceHash(brief.sourceText || row.article_text || "");
+  const versionId = await saveBriefVersion(env, {
+    itemId: row.id,
+    brief,
+    hash,
+    sent: brief.sent,
+  });
+  const changedUnderApproval = Boolean(row.approved_version_id) && row.source_hash !== hash;
+
   await env.DB.prepare(
     `UPDATE items
      SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
          brief_evidence = ?, brief_error = NULL,
          brief_attempted_at = datetime('now'),
          brief_attempts = IFNULL(brief_attempts, 0) + 1,
-         brief_claim_id = NULL, brief_claimed_at = NULL
+         brief_after = NULL, brief_claim_id = NULL, brief_claimed_at = NULL,
+         current_version_id = ?, source_hash = ?,
+         needs_review = CASE WHEN ? THEN 1 ELSE IFNULL(needs_review, 0) END
      WHERE id = ?`,
   )
-    .bind(brief.title_ar, brief.snippet_ar, brief.engine, brief.evidence, row.id)
+    .bind(
+      brief.title_ar,
+      brief.snippet_ar,
+      brief.engine,
+      brief.evidence,
+      versionId,
+      hash,
+      changedUnderApproval ? 1 : 0,
+      row.id,
+    )
     .run();
+  return versionId;
+}
+
+/**
+ * مرحلة التدقيق: تعمل على نسخ محفوظة، فتأجيلها لا يُفقد شيئًا ولا يعيد إنتاج
+ * الموجز. النتيجة تُكتب على النسخة نفسها مع وقت استئناف عند التأجيل.
+ */
+export async function verifyPending(env, limit = 1, fetcher = undefined) {
+  if (!aiBriefEnabled(env)) {
+    return { verified: 0, rejected: 0, deferred: 0, ...(await verificationBacklog(env)) };
+  }
+  const capacity = await availableAiCalls(env, "brief");
+  if (capacity <= 0) {
+    const backlog = await verificationBacklog(env);
+    return { verified: 0, rejected: 0, deferred: backlog.eligible > 0 ? 1 : 0, ...backlog };
+  }
+  const rows = await claimVerifications(env, Math.min(limit, capacity));
+  let verified = 0;
+  let rejected = 0;
+  let deferred = 0;
+
+  for (const version of rows) {
+    try {
+      const checked = await verifyBriefSemantics(
+        env,
+        {
+          title_ar: version.title_ar,
+          snippet_ar: version.snippet_ar,
+          evidence: version.evidence,
+          engine: version.engine,
+        },
+        fetcher,
+      );
+      await recordVerificationPass(env, version.id, checked.snippet_ar, checked.evidence);
+      await env.DB.prepare(
+        `UPDATE items SET snippet_ar = ?, brief_evidence = ?
+         WHERE id = ? AND current_version_id = ?`,
+      )
+        .bind(checked.snippet_ar, checked.evidence, version.item_id, version.id)
+        .run();
+      verified += 1;
+    } catch (error) {
+      if (isDeferredAiError(error) || transientAiError(error)) {
+        await deferVerification(
+          env,
+          version.id,
+          Number(error?.retryAfterSeconds) || 60,
+          String(error?.message || error),
+        );
+        deferred += 1;
+        break;
+      }
+      await recordVerificationFailure(env, version.id, String(error?.message || error));
+      rejected += 1;
+    }
+  }
+  return { verified, rejected, deferred, ...(await verificationBacklog(env)) };
 }
 
 /**
@@ -132,18 +263,37 @@ async function storeBriefProblem(env, row, error) {
   const transient = deferred || transientAiError(error);
   const state = pendingAiBrief(row, transient ? BRIEF_STATE.DEFERRED : BRIEF_STATE.FAILED);
   const note = String(error?.message || error).slice(0, 240);
+
+  if (deferred) {
+    /**
+     * انتظار الميزانية قرار جدولة لا عيب في الخبر. تسجيله خطأً كان يُخضعه
+     * لتراجع الأخطاء الطويل، فيُحجب ربع ساعة بسبب انتظار ثوانٍ.
+     */
+    const wait = Math.max(1, Math.round(Number(error?.retryAfterSeconds) || 30));
+    await env.DB.prepare(
+      `UPDATE items
+       SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
+           brief_error = NULL, brief_after = datetime('now', ?),
+           brief_claim_id = NULL, brief_claimed_at = NULL
+       WHERE id = ?`,
+    )
+      .bind(state.title_ar, state.snippet_ar, state.engine, `+${wait} seconds`, row.id)
+      .run();
+    return { deferred: true, transient: true, waitSeconds: wait };
+  }
+
   await env.DB.prepare(
     `UPDATE items
      SET title_ar = ?, snippet_ar = ?, trans_engine = ?,
          brief_evidence = NULL, brief_error = ?,
          brief_attempted_at = datetime('now'),
-         brief_attempts = IFNULL(brief_attempts, 0) + ?,
+         brief_attempts = IFNULL(brief_attempts, 0) + 1,
          brief_claim_id = NULL, brief_claimed_at = NULL
      WHERE id = ?`,
   )
-    .bind(state.title_ar, state.snippet_ar, state.engine, note, deferred ? 0 : 1, row.id)
+    .bind(state.title_ar, state.snippet_ar, state.engine, note, row.id)
     .run();
-  return { deferred, transient };
+  return { deferred: false, transient };
 }
 
 /**
@@ -167,7 +317,7 @@ async function markUnconfigured(env, mayorId) {
   await env.DB.prepare(sql).bind(...binds).run();
 }
 
-export async function translatePending(env, limit = 2, mayorId = null) {
+export async function translatePending(env, limit = 2, mayorId = null, fetcher = undefined) {
   if (!aiBriefEnabled(env)) {
     await markUnconfigured(env, mayorId);
     return {
@@ -180,7 +330,20 @@ export async function translatePending(env, limit = 2, mayorId = null) {
     };
   }
   const targetEngine = aiBriefEngine(env);
-  const rows = await claimBriefRows(env, limit, mayorId, targetEngine);
+  const capacity = await availableAiCalls(env, "brief");
+  if (capacity <= 0) {
+    const backlog = await briefBacklog(env, mayorId);
+    return {
+      summarized: 0,
+      failed: 0,
+      deferred: backlog.eligible > 0 ? 1 : 0,
+      pending: backlog.pending,
+      eligible: backlog.eligible,
+      nextAt: backlog.nextAt,
+      retryAfterSeconds: 0,
+    };
+  }
+  const rows = await claimBriefRows(env, Math.min(limit, capacity), mayorId, targetEngine);
 
   let summarized = 0;
   let failed = 0;
@@ -190,7 +353,8 @@ export async function translatePending(env, limit = 2, mayorId = null) {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     try {
-      await storeBrief(env, row, await summarizeWithGemini(env, row, row));
+      const documents = readSourceDocuments(row);
+      await storeBrief(env, row, await summarizeWithGemini(env, row, row, fetcher, documents));
       summarized += 1;
     } catch (error) {
       const outcome = await storeBriefProblem(env, row, error);
@@ -205,11 +369,14 @@ export async function translatePending(env, limit = 2, mayorId = null) {
     }
   }
 
+  const backlog = await briefBacklog(env, mayorId);
   return {
     summarized,
     failed,
     deferred,
     retryAfterSeconds,
-    pending: await pendingBriefCount(env, mayorId),
+    pending: backlog.pending,
+    eligible: backlog.eligible,
+    nextAt: backlog.nextAt,
   };
 }

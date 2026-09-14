@@ -125,3 +125,18 @@ test("continuation delays stay inside safe bounds", () => {
   assert.equal(continuationDelaySeconds({ retryAfterSeconds: 45 }), 45);
   assert.equal(continuationDelaySeconds({ retryAfterSeconds: 99999 }), 900);
 });
+
+test("continuation waits for the earliest eligible time instead of polling", () => {
+  const soon = new Date(Date.now() + 90000).toISOString().slice(0, 19).replace("T", " ");
+  assert.equal(
+    continuationDelaySeconds({ retryAfterSeconds: 0, nextAt: soon }) >= 80,
+    true,
+    "a known resume time must be respected rather than replaced by the floor",
+  );
+  // بلا وقت معروف يبقى الحد الأدنى، فلا تتوقف السلسلة.
+  assert.equal(continuationDelaySeconds({ retryAfterSeconds: 0 }), 10);
+  // لا تُعاد جدولة انتظار طويل؛ تتركه مهمة التصريف الدورية.
+  const late = new Date(Date.now() + 4 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
+  assert.equal(shouldContinueBriefs({ pending: 3, deferred: 1, nextAt: late }), false);
+  assert.equal(shouldContinueBriefs({ pending: 3, deferred: 1, nextAt: soon }), true);
+});

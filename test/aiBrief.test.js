@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   BRIEF_STATE,
+  verifyBriefSemantics,
   aiBriefEnabled,
   buildAiBriefPrompt,
   clusterWithGemini,
@@ -99,19 +100,18 @@ test("Gemini brief accepts only facts backed by exact page quotes", async () => 
     };
   };
 
-  const brief = await summarizeWithGemini(
-    aiEnv({ AI_VERIFY_BRIEFS: "1" }),
-    article,
-    turin,
-    fetcher,
-  );
+  const brief = await summarizeWithGemini(aiEnv(), article, turin, fetcher);
   assert.equal(brief.engine, "brief-ai-gemini-v2:gemini-test");
   assert.match(brief.title_ar, /ستيفانو لو روسو/);
   assert.match(brief.snippet_ar, /12 سبتمبر/);
   assert.match(brief.evidence, /La festa è prevista/);
-  assert.equal(requestBodies.length, 2);
+  // التلخيص نداء واحد لا يدقّق؛ التدقيق مرحلة لاحقة محفوظة.
+  assert.equal(requestBodies.length, 1);
   assert.equal(requestBodies[0].store, false);
   assert.equal(requestBodies[0].response_format.mime_type, "application/json");
+  // ما أُرسل فعلًا يُعاد مع الموجز حتى يُحفظ مع النسخة.
+  assert.ok(Array.isArray(brief.sent.excerpts) && brief.sent.excerpts.length >= 1);
+  assert.ok(brief.sent.sourceIds.length >= 1);
 });
 
 test("AI brief rejects a headline whose evidence is absent from the page", () => {
@@ -171,55 +171,93 @@ test("AI brief requires the mayor in the Arabic headline and an exact quote", ()
   );
 });
 
-test("a second AI pass rejects a claim contradicted by its quote", async () => {
-  let call = 0;
+test("the verification stage rejects a claim its own quote contradicts", async () => {
   const fetcher = async () => ({
     ok: true,
     status: 200,
     async json() {
-      call += 1;
-      const payload =
-        call === 1
-          ? {
-              headline_ar: "ستيفانو لو روسو يعلن حالة طوارئ في تورينو",
-              headline_evidence: "Stefano Lo Russo: non è un'emergenza.",
-              facts: [
-                {
-                  fact_ar: "ستُفحص الشبكة غدًا.",
-                  evidence: "La rete sarà controllata domani.",
-                },
-              ],
-              topic_ar: "الكهرباء",
-            }
-          : {
-              headline_supported: false,
-              facts: [{ index: 0, supported: true }],
-            };
       return {
         steps: [
           {
             type: "model_output",
-            content: [{ type: "text", text: JSON.stringify(payload) }],
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  headline_supported: false,
+                  facts: [{ index: 0, supported: true }],
+                }),
+              },
+            ],
           },
         ],
       };
     },
   });
   await assert.rejects(
-    summarizeWithGemini(
-      aiEnv({ AI_VERIFY_BRIEFS: "1" }),
+    verifyBriefSemantics(
+      aiEnv(),
       {
-        ...article,
-        title: "Stefano Lo Russo: non è un'emergenza",
-        article_text:
-          "Stefano Lo Russo: non è un'emergenza. La rete sarà controllata domani.",
+        title_ar: "ستيفانو لو روسو يعلن حالة طوارئ في تورينو",
+        snippet_ar: "ستُفحص الشبكة غدًا.",
+        engine: "brief-ai-gemini-v2:gemini-test",
+        evidence: JSON.stringify({
+          headline: "Stefano Lo Russo: non è un'emergenza.",
+          facts: ["La rete sarà controllata domani."],
+        }),
       },
-      turin,
       fetcher,
     ),
     /ai_headline_not_supported/,
   );
 });
+
+test("an exact quote alone is not proof the Arabic claim is true", async () => {
+  // الاقتباس موجود حرفيًا، لكن الادعاء العربي يقلب معناه، فالتدقيق يرفضه.
+  const grounded = validateAiBrief(
+    {
+      headline_ar: "ستيفانو لو روسو يعلن حالة طوارئ في تورينو",
+      headline_evidence: "Stefano Lo Russo dichiara lo stato di emergenza.",
+      facts: [
+        { fact_ar: "لن تُفحص الشبكة غدًا.", evidence: "La rete sarà controllata domani." },
+      ],
+      topic_ar: "الكهرباء",
+    },
+    "Stefano Lo Russo dichiara lo stato di emergenza. La rete sarà controllata domani.",
+    turin,
+    "brief-ai-gemini-v2:gemini-test",
+  );
+  assert.ok(grounded.title_ar, "local grounding passes because the quote is verbatim");
+
+  const fetcher = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        steps: [
+          {
+            type: "model_output",
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  headline_supported: true,
+                  facts: [{ index: 0, supported: false }],
+                }),
+              },
+            ],
+          },
+        ],
+      };
+    },
+  });
+  await assert.rejects(
+    verifyBriefSemantics(aiEnv(), grounded, fetcher),
+    /ai_facts_not_supported/,
+    "a negated claim must not survive verification",
+  );
+});
+
 
 test("AI clustering can merge one event reported in different scripts", async () => {
   const items = [

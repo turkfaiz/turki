@@ -1,234 +1,150 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { ensureDb } from "../src/worker.js";
 import { MAX_BRIEF_ATTEMPTS, translatePending } from "../src/translate.js";
-import { fakeBudgetDb } from "./helpers/aiEnv.js";
+import { createTestD1 } from "./helpers/d1.js";
 
 /**
- * Recognises the statements translate.js issues against the items table and
- * applies their intent to an in-memory list, so brief bookkeeping can be
- * asserted without a live D1 instance.
+ * These paths are SQL, so they run against a real engine. The previous
+ * hand-written double never parsed a statement, which is how an ordering clause
+ * and a fifteen minute lockout both passed review.
  */
-function fakeItemsDb(rows, budgetStore = { row: null }) {
-  const budget = fakeBudgetDb(budgetStore);
-  const eligible = (row, engine) =>
-    row.trans_engine !== engine && (row.brief_attempts || 0) < MAX_BRIEF_ATTEMPTS;
+const ARTICLE =
+  "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma. La festa è prevista sabato 12 settembre.";
 
-  return {
-    __rows: rows,
-    __budget: budgetStore,
-    async batch(statements) {
-      for (const statement of statements) await statement.run();
-      return [];
-    },
-    prepare(sql) {
-      if (/ai_budget/.test(sql)) return budget.prepare(sql);
-      return {
-        bind(...binds) {
-          return {
-            async run() {
-              if (/SET brief_claim_id = \?, brief_claimed_at/.test(sql)) {
-                const [claimId, engine] = binds;
-                const limit = Number(binds.at(-1));
-                rows
-                  .filter((row) => eligible(row, engine) && !row.brief_claim_id)
-                  .slice(0, limit)
-                  .forEach((row) => {
-                    row.brief_claim_id = claimId;
-                  });
-                return { meta: { changes: 1 } };
-              }
-              if (/brief_evidence = \?, brief_error = NULL/.test(sql)) {
-                const [titleAr, snippetAr, engine, evidence, id] = binds;
-                const row = rows.find((entry) => entry.id === id);
-                Object.assign(row, {
-                  title_ar: titleAr,
-                  snippet_ar: snippetAr,
-                  trans_engine: engine,
-                  brief_evidence: evidence,
-                  brief_error: null,
-                  brief_attempts: (row.brief_attempts || 0) + 1,
-                  brief_claim_id: null,
-                });
-                return { meta: { changes: 1 } };
-              }
-              if (/brief_evidence = NULL, brief_error = \?/.test(sql)) {
-                const [titleAr, snippetAr, engine, note, increment, id] = binds;
-                const row = rows.find((entry) => entry.id === id);
-                Object.assign(row, {
-                  title_ar: titleAr,
-                  snippet_ar: snippetAr,
-                  trans_engine: engine,
-                  brief_error: note,
-                  brief_attempts: (row.brief_attempts || 0) + Number(increment),
-                  brief_claim_id: null,
-                });
-                return { meta: { changes: 1 } };
-              }
-              if (/SET brief_claim_id = NULL, brief_claimed_at = NULL WHERE id = \?/.test(sql)) {
-                const row = rows.find((entry) => entry.id === binds[0]);
-                if (row) row.brief_claim_id = null;
-                return { meta: { changes: 1 } };
-              }
-              throw new Error(`unexpected sql: ${sql}`);
+function insertPending(db, id, extra = "") {
+  db.exec(`
+    INSERT INTO items (
+      id, mayor_id, source, title, title_normalized, url, published_at, snippet,
+      title_ar, snippet_ar, language, confidence, status, fingerprint, trans_engine,
+      publisher_domain, publisher_tier, article_text, source_count, brief_attempts
+    ) VALUES (
+      '${id}', 'turin', 'approved_feed',
+      'Lo Russo inaugura via Roma', 'lo russo inaugura via roma',
+      'https://www.comune.torino.it/${id}', datetime('now','-1 days'), 'snippet',
+      'بانتظار قراءة الذكاء الاصطناعي — ستيفانو لو روسو', '', 'it', 'raw', 'inbox',
+      'fp-${id}', 'brief-pending', 'comune.torino.it', 0,
+      '${ARTICLE}', 1, 0
+    );
+    ${extra}
+  `);
+}
+
+async function desk(overrides = {}) {
+  const db = createTestD1();
+  const env = {
+    DB: db,
+    GEMINI_API_KEY: "test",
+    GEMINI_MODEL: "gemini-test",
+    AI_DAILY_LIMIT: "1000",
+    AI_MIN_INTERVAL_MS: "0",
+    ...overrides,
+  };
+  await ensureDb(env);
+  return { db, env };
+}
+
+const grounded = async () => ({
+  ok: true,
+  status: 200,
+  async json() {
+    return {
+      steps: [
+        {
+          type: "model_output",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
+                headline_evidence:
+                  "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
+                facts: [
+                  {
+                    fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
+                    evidence: "La festa è prevista sabato 12 settembre.",
+                  },
+                ],
+                topic_ar: "افتتاح شارع",
+              }),
             },
-            async first() {
-              if (/COUNT\(\*\) AS pending/.test(sql)) {
-                return { pending: rows.filter((row) => eligible(row, binds[0])).length };
-              }
-              throw new Error(`unexpected sql: ${sql}`);
-            },
-            async all() {
-              if (/WHERE items\.brief_claim_id = \?/.test(sql)) {
-                return { results: rows.filter((row) => row.brief_claim_id === binds[0]) };
-              }
-              throw new Error(`unexpected sql: ${sql}`);
-            },
-          };
+          ],
         },
-      };
-    },
-  };
-}
-
-function articleRow(id) {
-  return {
-    id,
-    title: "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma",
-    snippet: "La festa è prevista sabato 12 settembre.",
-    article_text:
-      "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma. La festa è prevista sabato 12 settembre.",
-    name_ar: "ستيفانو لو روسو",
-    name_en: "Stefano Lo Russo",
-    name_native: "Stefano Lo Russo",
-    title_ar: "",
-    city_ar: "تورينو",
-    city_en: "Turin",
-    brief_attempts: 0,
-    trans_engine: "brief-pending",
-    brief_claim_id: null,
-  };
-}
-
-test("an exhausted AI budget defers articles without spending their retries", async () => {
-  const rows = [articleRow("a"), articleRow("b")];
-  const db = fakeItemsDb(rows);
-  const env = {
-    GEMINI_API_KEY: "secret",
-    GEMINI_MODEL: "gemini-test",
-    AI_DAILY_LIMIT: "1",
-    AI_MIN_INTERVAL_MS: "0",
-    DB: db,
-  };
-  // استهلاك الحصة الوحيدة قبل بدء الدفعة.
-  await env.DB.prepare(
-    `INSERT INTO ai_budget (day, calls, last_call_at) VALUES (?, 1, datetime('now'))
-     ON CONFLICT(day) DO UPDATE SET calls = ai_budget.calls + 1, last_call_at = datetime('now')`,
-  )
-    .bind("2026-09-10", 1, "-0.000 seconds")
-    .run();
-
-  const summary = await translatePending(env, 2, null);
-  assert.equal(summary.summarized, 0);
-  assert.equal(summary.failed, 0);
-  assert.equal(summary.deferred, 1);
-  assert.equal(summary.pending, 2);
-  assert.equal(rows[0].trans_engine, "brief-deferred");
-  assert.equal(rows[0].brief_attempts, 0, "الحصة ليست خطأ في الخبر");
-  assert.equal(rows[0].snippet_ar, "", "لا يُختلق أي محتوى أثناء الانتظار");
-  assert.equal(rows[1].brief_claim_id, null, "بقية الصفوف تُحرَّر لتشغيل لاحق");
-  assert.equal(rows[1].brief_attempts, 0);
+      ],
+    };
+  },
 });
 
-test("a grounded answer is stored as a real Arabic brief and leaves nothing pending", async () => {
-  const rows = [articleRow("a")];
-  const env = {
-    GEMINI_API_KEY: "secret",
-    GEMINI_MODEL: "gemini-test",
-    AI_DAILY_LIMIT: "50",
-    AI_MIN_INTERVAL_MS: "0",
-    DB: fakeItemsDb(rows),
-  };
-  globalThis.fetch = async () => ({
-    ok: true,
-    status: 200,
-    async json() {
-      return {
-        steps: [
-          {
-            type: "model_output",
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
-                  headline_evidence:
-                    "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
-                  facts: [
-                    {
-                      fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
-                      evidence: "La festa è prevista sabato 12 settembre.",
-                    },
-                  ],
-                  topic_ar: "افتتاح شارع للمشاة",
-                }),
-              },
-            ],
-          },
-        ],
-      };
-    },
-  });
+test("a grounded answer becomes a stored Arabic brief with nothing left pending", async () => {
+  const { db, env } = await desk();
+  insertPending(db, "a");
 
-  const summary = await translatePending(env, 1, null);
+  const summary = await translatePending(env, 1, null, grounded);
   assert.equal(summary.summarized, 1);
-  assert.equal(summary.deferred, 0);
   assert.equal(summary.failed, 0);
+  assert.equal(summary.deferred, 0);
   assert.equal(summary.pending, 0);
-  assert.equal(rows[0].trans_engine, "brief-ai-gemini-v2:gemini-test");
-  assert.match(rows[0].title_ar, /ستيفانو لو روسو يفتتح/);
-  assert.match(rows[0].snippet_ar, /12 سبتمبر/);
-  assert.equal(rows[0].brief_error, null);
+
+  const row = db.one(`SELECT * FROM items WHERE id = 'a'`);
+  assert.equal(row.trans_engine, "brief-ai-gemini-v2:gemini-test");
+  assert.match(row.title_ar, /ستيفانو لو روسو يفتتح/);
+  assert.match(row.snippet_ar, /12 سبتمبر/);
+  assert.equal(row.brief_error, null);
+  assert.equal(row.brief_after, null, "a delivered brief carries no resume time");
+  assert.equal(row.brief_claim_id, null, "the claim is released");
 });
 
-test("a genuinely ungrounded answer counts as an attempt and ends in a failed state", async () => {
-  const rows = [articleRow("a")];
-  const db = fakeItemsDb(rows);
-  const env = {
-    GEMINI_API_KEY: "secret",
-    GEMINI_MODEL: "gemini-test",
-    AI_DAILY_LIMIT: "50",
-    AI_MIN_INTERVAL_MS: "0",
-    DB: db,
-  };
-  globalThis.fetch = async () => ({
-    ok: true,
-    status: 200,
-    async json() {
-      return {
-        steps: [
-          {
-            type: "model_output",
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  headline_ar: "ستيفانو لو روسو يعلن مشروعًا لم يُذكر",
-                  headline_evidence: "This sentence is absent from the page.",
-                  facts: [{ fact_ar: "حقيقة مختلقة.", evidence: "also absent" }],
-                  topic_ar: "مشروع",
-                }),
-              },
-            ],
-          },
-        ],
-      };
-    },
-  });
+test("an exhausted daily allowance leaves articles waiting, not failed", async () => {
+  const { db, env } = await desk({ AI_DAILY_LIMIT: "1" });
+  insertPending(db, "a");
+  insertPending(db, "b");
 
-  const summary = await translatePending(env, 1, null);
-  assert.equal(summary.failed, 1);
-  assert.equal(summary.deferred, 0);
-  assert.equal(rows[0].trans_engine, "brief-ai-error");
-  assert.equal(rows[0].brief_attempts, 1);
-  assert.match(rows[0].brief_error, /ai_ungrounded_headline/);
+  const first = await translatePending(env, 2, null, grounded);
+  assert.equal(first.summarized, 1);
+  const second = await translatePending(env, 2, null, grounded);
+  assert.equal(second.summarized, 0);
+  assert.equal(second.failed, 0, "no allowance is never an article failure");
+  assert.equal(second.pending, 1);
+
+  const waiting = db.one(`SELECT * FROM items WHERE trans_engine <> 'brief-ai-gemini-v2:gemini-test'`);
+  assert.equal(waiting.brief_attempts, 0, "an attempt is not spent on scheduling");
+  assert.equal(waiting.brief_error, null);
+});
+
+test("only a single mayor is claimed when the desk is scoped to one office", async () => {
+  const { db, env } = await desk();
+  insertPending(db, "turin-1");
+  db.exec(`
+    INSERT INTO items (
+      id, mayor_id, source, title, title_normalized, url, published_at, snippet,
+      title_ar, snippet_ar, language, confidence, status, fingerprint, trans_engine,
+      publisher_domain, publisher_tier, article_text, source_count, brief_attempts
+    ) VALUES (
+      'seoul-1', 'seoul', 'approved_feed', 'Oh Se-hoon opens a park',
+      'oh se-hoon opens a park', 'https://www.yna.co.kr/x', datetime('now','-1 days'),
+      'snippet', 'بانتظار', '', 'ko', 'raw', 'inbox', 'fp-seoul-1', 'brief-pending',
+      'yna.co.kr', 1, 'Oh Se-hoon opened a park in Seoul today.', 1, 0
+    );
+  `);
+
+  const summary = await translatePending(env, 5, "turin", grounded);
+  assert.equal(summary.summarized, 1, "the scoped office is summarised");
+  assert.equal(
+    db.one(`SELECT trans_engine FROM items WHERE id = 'seoul-1'`).trans_engine,
+    "brief-pending",
+    "another office is untouched by a scoped run",
+  );
+});
+
+test("an article stops being retried once it spends every attempt", async () => {
+  const { db, env } = await desk();
+  insertPending(
+    db,
+    "a",
+    `UPDATE items SET brief_attempts = ${MAX_BRIEF_ATTEMPTS}, brief_error = 'ai_invalid_json',
+       trans_engine = 'brief-ai-error' WHERE id = 'a';`,
+  );
+  const summary = await translatePending(env, 5, null, grounded);
+  assert.equal(summary.summarized, 0);
+  assert.equal(summary.pending, 0, "an exhausted article is no longer counted as waiting work");
 });
