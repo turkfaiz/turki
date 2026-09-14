@@ -48,12 +48,13 @@ function displayTitle(it) {
 /** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
-  if (engine.startsWith("brief-ai-gemini-v2:")) {
+  if (/^brief-ai-[a-z0-9]+-v2:/i.test(engine)) {
     if (item.verify_state === "passed") return "موجز مدقَّق — مسند ومُتحقق دلاليًا";
     if (item.verify_state === "failed") return "موجز مرفوض في التدقيق";
     return "موجز مسند — بانتظار التدقيق الدلالي";
   }
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
+  if (engine === "brief-working") return "يُقرأ الآن";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
 }
@@ -65,9 +66,11 @@ function briefErrorReason(code) {
   const rules = [
     [/ai_deferred:daily_limit|ai_http_429.*day|daily/i, "نفدت حصة نداءات الذكاء الاصطناعي لليوم، ويستأنف تلقائيًا بعد تصفير الحصة."],
     [/ai_deferred:rate_pacing/i, "تباعد مقصود بين النداءات لحماية حد الدقيقة، ويكمل تلقائيًا."],
-    [/ai_deferred|ai_http_429/i, "المزوّد رفض الطلب مؤقتًا لتجاوز الحد، والنظام في تهدئة ثم يعيد المحاولة."],
+    [/ai_deferred:provider_unpaid|ai_http_402/i, "هذا النموذج رفض الطلب لأن الحساب غير مدفوع أو غير مقبول. المسار وُقف وأُعيدت الأخبار للنماذج التي ما زالت تعمل."],
+    [/ai_deferred:provider_rejected|ai_http_40[013]/i, "هذا النموذج رفض شكل الطلب. المسار وُقف مؤقتًا وأُعيدت الأخبار لفتحة أخرى."],
     [/ai_http_5\d\d|provider_error/i, "خطأ مؤقت في خدمة الذكاء الاصطناعي، وتُعاد المحاولة."],
     [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
+    [/subrequest|too many subrequests|worker invocation/i, "توقف النداء لأن جلب الصفحات والقراءة وقعا في نفس التشغيل وتجاوزا حد طلبات العامل. القراءة صارت في مسار مستقل وتُعاد تلقائيًا."],
     [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
     [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
     [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
@@ -83,7 +86,7 @@ function briefErrorReason(code) {
 
 function briefErrorBox(item) {
   const engine = String(item.trans_engine || "");
-  if (!item.brief_error || engine.startsWith("brief-ai-gemini-v2:")) return "";
+  if (!item.brief_error || (/^brief-ai-[a-z0-9]+-v2:/i.test(engine))) return "";
   const attempts = Number(item.brief_attempts) || 0;
   const exhausted = attempts >= 5;
   const heading = exhausted
@@ -251,10 +254,17 @@ function toolIcon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
 }
 
-/** رقاقة أداة: أيقونة، واسم، ونقطة حالة تفاعلية تكشف تفصيل عملها. */
+/** رقاقة أداة: أيقونة، واسم، ونقطة حالة. السجل المتعثر يعمل، فلا يُوسم متوقفًا. */
+function toolStateLabel(ok) {
+  if (ok === null) return "معطّلة بالحوكمة";
+  if (ok === true) return "تعمل";
+  if (ok === "warn") return "تعمل · بعضها متعثر";
+  return "متوقفة";
+}
+
 function toolChip(tool) {
-  const tone = tool.ok === null ? "off" : tool.ok ? "ok" : "bad";
-  const label = tool.ok === null ? "معطّلة بالحوكمة" : tool.ok ? "تعمل" : "متوقفة";
+  const tone = tool.ok === null ? "off" : tool.ok === true ? "ok" : tool.ok === "warn" ? "warn" : "bad";
+  const label = toolStateLabel(tool.ok);
   return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
       aria-expanded="false" title="${escapeHtml(label)}">
       <span class="tool-icon">${toolIcon(tool.icon)}</span>
@@ -290,6 +300,53 @@ function sourceTitle(source) {
       ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
       : "لم يُشغّل بعد في هذه البيئة";
   return `${role}\n${curated}\n${runtime}`;
+}
+
+function providerFromItem(item) {
+  const names = { gemini: "جيميني", deepseek: "ديبسيك", qwen: "كوين" };
+  const engine = String(item.trans_engine || "");
+  const match = engine.match(/^brief-ai-([a-z0-9]+)-v2:(.+)$/i);
+  if (match) {
+    return { id: match[1].toLowerCase(), model: match[2], name: names[match[1].toLowerCase()] || match[1] };
+  }
+  const id = String(item.brief_provider || "");
+  if (id) return { id, model: "", name: names[id] || id };
+  return null;
+}
+
+function renderProviderLanes(providers) {
+  const lanes = providers?.lanes || [];
+  if (!lanes.length) return "";
+  return `
+    <section class="board-section provider-board">
+      <h4>٦ · نماذج القراءة — الربط من Cloudflare</h4>
+      <p class="diag-note">كل خبر يُسند لفتحة واحدة قبل القراءة. رقم الطابور خاص بهذه الفتحة، وجاري العمل يظهر طالما النداء لم يُغلق. إن رُفض المحتوى عند نموذج يُمرَّر تلقائيًا للنموذج التالي.</p>
+      <div class="provider-grid">
+        ${lanes.map((lane) => {
+          const budget = lane.budget || {};
+          const tone = !lane.hasKey ? "is-bad" : !lane.bound || budget.blocked ? "is-warn" : "is-good";
+          const state = !lane.hasKey
+            ? `ضع السر ${lane.vars.key} في Cloudflare`
+            : !lane.enabled
+              ? `موقوف من ${lane.vars.enabled}`
+              : budget.blocked
+                ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+                : `${lane.model} · يعمل`;
+          return `<article class="provider-card ${tone}">
+            <b>${escapeHtml(lane.nameAr)}</b>
+            <small>${escapeHtml(state)}</small>
+            <ul class="provider-counts">
+              <li><span>في الطابور</span><b class="num">${num(lane.queued)}</b></li>
+              <li><span>جاري العمل</span><b class="num">${num(lane.inProgress)}</b></li>
+              <li><span>مكتمل</span><b class="num">${num(lane.completed)}</b></li>
+              <li><span>تعذر</span><b class="num">${num(lane.failed)}</b></li>
+            </ul>
+            <div class="meter"><span style="width:${Math.round(pct(budget.remaining, budget.dailyLimit))}%"></span></div>
+            <small class="readout-note">الرصيد ${num(budget.remaining)} / ${num(budget.dailyLimit)} · تباعد ${num(Math.round((lane.minIntervalMs || 0) / 100) / 10)} ث</small>
+          </article>`;
+        }).join("")}
+      </div>
+    </section>`;
 }
 
 function renderDiagnostics(d) {
@@ -417,7 +474,7 @@ function renderDiagnostics(d) {
           نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
         </p>
       </section>
-    </div>`;
+    </div>` + renderProviderLanes(d.providers);
 }
 
 async function loadDiagnostics() {
@@ -429,6 +486,16 @@ async function loadDiagnostics() {
     $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
   }
 }
+
+let diagPoll = 0;
+$("diagnostics").addEventListener("toggle", () => {
+  window.clearInterval(diagPoll);
+  if (!$("diagnostics").open) return;
+  loadDiagnostics();
+  diagPoll = window.setInterval(() => {
+    if ($("diagnostics").open) loadDiagnostics();
+  }, 4000);
+});
 
 $("diag-body").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tool]");
@@ -520,6 +587,12 @@ async function loadDetail(id) {
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
       ${briefErrorBox(item)}
+      ${(() => {
+        const reader = providerFromItem(item);
+        return reader
+          ? `<p class="source-line">المراجع: ${escapeHtml(reader.name)}${reader.model ? ` · ${escapeHtml(reader.model)}` : ""}</p>`
+          : "";
+      })()}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
@@ -614,6 +687,7 @@ const STAGE_LABELS = {
   verifying: "فتح الروابط والتحقق",
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
+  assigning: "توزيع الأخبار على نماذج القراءة",
   summarizing: "قراءة وتدقيق AI",
   ai_pending: "بانتظار إكمال قراءة AI",
   ai_waiting_quota: "بانتظار حصة AI — يستأنف تلقائيًا",

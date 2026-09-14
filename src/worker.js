@@ -2,11 +2,14 @@ import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import {
   MAX_BRIEF_ATTEMPTS,
+  assignPendingLanes,
   briefBacklog,
   pendingBriefCount,
+  slotsWithCapacity,
   translatePending,
   verifyPending,
 } from "./translate.js";
+import { providerLaneSnapshot } from "./aiDispatch.js";
 import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
 import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
@@ -20,6 +23,7 @@ import {
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
+import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -84,10 +88,12 @@ const SCHEMA_STATEMENTS = [
     brief_claim_id TEXT,
     brief_claimed_at TEXT,
     brief_after TEXT,
+    brief_provider TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC)`,
   `CREATE TABLE IF NOT EXISTS search_jobs (
@@ -147,6 +153,15 @@ const SCHEMA_STATEMENTS = [
     blocked_until TEXT,
     block_reason TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+    day TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    last_call_at TEXT,
+    blocked_until TEXT,
+    block_reason TEXT,
+    PRIMARY KEY (day, provider)
+  )`,
   `CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT
@@ -154,7 +169,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v13";
+const BOOTSTRAP_VERSION = "bootstrap-v16";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -179,6 +194,26 @@ async function migrateSearchJobs(env) {
   }
 }
 
+async function migrateAiProviderBudget(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+      day TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      calls INTEGER NOT NULL DEFAULT 0,
+      last_call_at TEXT,
+      blocked_until TEXT,
+      block_reason TEXT,
+      PRIMARY KEY (day, provider)
+    )`,
+  ).run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO ai_provider_budget
+       (day, provider, calls, last_call_at, blocked_until, block_reason)
+     SELECT day, 'gemini', calls, last_call_at, blocked_until, block_reason
+     FROM ai_budget`,
+  ).run();
+}
+
 const REQUIRED_TABLES = [
   "mayors",
   "items",
@@ -188,6 +223,7 @@ const REQUIRED_TABLES = [
   "publishers",
   "sources",
   "ai_budget",
+  "ai_provider_budget",
   "brief_versions",
   "approvals",
 ];
@@ -262,6 +298,7 @@ export async function ensureDb(env) {
   );
   await seedSources(env);
   await migrateItems(env);
+  await migrateAiProviderBudget(env);
   await migrateVersions(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
@@ -418,6 +455,12 @@ async function migrateItems(env) {
   if (!names.has("brief_claimed_at")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claimed_at TEXT`).run();
   }
+  if (!names.has("brief_provider")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_provider TEXT`).run();
+  }
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
+  ).run();
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -502,6 +545,56 @@ async function migrateItems(env) {
       .bind(repairEpoch)
       .run();
   }
+  /**
+   * حد طلبات العامل وألقاب غير المسندة أُغلقت كتعذر نهائي بينما المشكلة في
+   * التشغيل أو في نموذج واحد. تُعاد للتوزيع على الفتحات الحية.
+   */
+  const dispatchEpoch = "lane-dispatch-v1";
+  const currentDispatch = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'dispatch_epoch'`).first();
+  if (currentDispatch?.v !== dispatchEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine IN ('brief-ai-error', 'brief-deferred', 'brief-working')
+          OR brief_error LIKE '%subrequest%'
+          OR brief_error LIKE '%Too many%'
+          OR brief_error LIKE '%Worker invocation%'
+          OR brief_error LIKE 'ai_ungrounded%'
+          OR brief_error LIKE 'ai_has_no_grounded%'`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('dispatch_epoch', ?)`)
+      .bind(dispatchEpoch)
+      .run();
+  }
+  /**
+   * 402/400 من ديبسيك أو كوين ليسا عيب الصفحة. حُسبتا محاولة وأُغلق الخبر.
+   * بعد اعتبارها عطل فتحة تُعاد الصفوف لتقرأها النماذج العاملة.
+   */
+  const slotFaultEpoch = "provider-slot-fault-v1";
+  const currentSlotFault = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'slot_fault_epoch'`).first();
+  if (currentSlotFault?.v !== slotFaultEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine = 'brief-ai-error'
+         AND (brief_error LIKE 'ai_http_40%'
+           OR brief_error LIKE 'ai_ungrounded%'
+           OR brief_error LIKE 'ai_has_no_grounded%')`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('slot_fault_epoch', ?)`)
+      .bind(slotFaultEpoch)
+      .run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -510,7 +603,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
   items.brief_evidence, items.brief_error, items.brief_attempted_at, items.brief_attempts,
-  items.current_version_id, items.approved_version_id, items.needs_review,
+  items.brief_provider, items.current_version_id, items.approved_version_id, items.needs_review,
   (SELECT verify_state FROM brief_versions
     WHERE brief_versions.id = items.current_version_id) AS verify_state,
   (SELECT verify_detail FROM brief_versions
@@ -523,14 +616,17 @@ const WEEKLY_CRON = "0 3 * * SUN";
 const ITEM_WINDOW_DAYS = 7;
 const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
-const DRAIN_MAX_BRIEFS = 12;
-const DRAIN_MAX_MS = 45000;
+const DRAIN_MAX_BRIEFS = 8;
+const DRAIN_MAX_MS = 40000;
 const CONTINUATION_MIN_SECONDS = 10;
 const CONTINUATION_MAX_SECONDS = 900;
 /** التأجيل الطويل (كنفاد حصة اليوم) يُترك لمهمة التصريف الدورية لا للطابور. */
 const CONTINUATION_DEFER_CEILING = 300;
 
-/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
+/**
+ * جمع الصفحات منفصل عن القراءة. خلطهما في نفس تشغيل العامل يستنفد حد
+ * الطلبات الخمسين فيتوقف النداء ويُسجَّل اعتذارًا على الخبر.
+ */
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await recordSourceHealth(env, result.sourceHealth);
@@ -538,17 +634,20 @@ async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const review = await reviewInbox(env, {
     mayorId: scanOpts.mayorId || null,
     limit: 500,
-    useAiMerge: result.found > 0 || result.updated > 0,
+    useAiMerge: false,
   });
-  const summary = await summarizeBatch(env, scanOpts.mayorId || null, onProgress);
+  await onProgress("assigning", "يوزّع الأخبار على نماذج القراءة");
+  const lanes = await assignPendingLanes(env, scanOpts.mayorId || null);
+  const backlog = await briefBacklog(env, scanOpts.mayorId || null);
   return {
     ...result,
     review,
-    summarized: summary.summarized,
-    aiFailed: summary.failed,
-    aiDeferred: summary.deferred,
-    aiPending: summary.pending,
-    aiRetryAfterSeconds: summary.retryAfterSeconds,
+    assigned: lanes.assigned,
+    summarized: 0,
+    aiFailed: 0,
+    aiDeferred: 0,
+    aiPending: backlog.pending,
+    aiRetryAfterSeconds: 0,
   };
 }
 
@@ -619,13 +718,20 @@ export function shouldContinueBriefs(summary) {
   return wait <= CONTINUATION_DEFER_CEILING;
 }
 
-async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+async function enqueueBriefPump(env, { jobId = null, delaySeconds = 0 } = {}) {
   if (!env.SCAN_QUEUE) return false;
   await env.SCAN_QUEUE.send(
-    { type: "brief", mayorId, jobId },
-    { contentType: "json", delaySeconds: continuationDelaySeconds({ retryAfterSeconds }) },
+    { type: "brief", mayorId: null, jobId },
+    { contentType: "json", delaySeconds: Math.max(0, Number(delaySeconds) || 0) },
   );
   return true;
+}
+
+async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+  return enqueueBriefPump(env, {
+    jobId,
+    delaySeconds: continuationDelaySeconds({ retryAfterSeconds }),
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -636,7 +742,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = DRAIN_MAX_MS } = {}) {
   const startedAt = Date.now();
-  const { minIntervalMs } = budgetSettings(env);
   const totals = {
     summarized: 0,
     failed: 0,
@@ -646,9 +751,12 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     pending: 0,
     rounds: 0,
   };
+  await assignPendingLanes(env);
   while (totals.summarized + totals.failed < maxBriefs && Date.now() - startedAt < maxMs) {
-    const summary = await translatePending(env, 1, null);
-    const checked = await verifyPending(env, 1);
+    const ready = await slotsWithCapacity(env, "brief");
+    const batch = Math.max(1, Math.min(BRIEF_BATCH_SIZE, ready.length || 1));
+    const summary = await translatePending(env, batch, null);
+    const checked = await verifyPending(env, batch);
     totals.verified += checked.verified;
     totals.rejected += checked.rejected;
     totals.rounds += 1;
@@ -656,10 +764,17 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     totals.failed += summary.failed;
     totals.deferred += summary.deferred;
     totals.pending = summary.pending;
-    if (summary.deferred > 0) break;
     if (summary.pending === 0 && checked.pending === 0) break;
-    if (summary.summarized === 0 && summary.failed === 0 && checked.verified === 0) break;
-    if (minIntervalMs > 0) await sleep(minIntervalMs + 250);
+    const still = await slotsWithCapacity(env, "brief");
+    if (still.length) continue;
+    const waitMs = Math.max(Number(budgetSettings(env).minIntervalMs) || 0, 1000);
+    if (Date.now() - startedAt + waitMs >= maxMs) {
+      if (summary.pending > 0) {
+        await enqueueBriefPump(env, { delaySeconds: Math.max(1, Math.ceil(waitMs / 1000)) });
+      }
+      break;
+    }
+    await sleep(waitMs + 250);
   }
   return totals;
 }
@@ -680,8 +795,11 @@ async function finishAllOffices(env, type = "weekly") {
       } else {
         errors.push(`${chunk[index].id}: ${String(result.reason?.message || result.reason)}`);
       }
-    });
+    }    );
   }
+  await assignPendingLanes(env);
+  if (env.SCAN_QUEUE) await enqueueBriefPump(env);
+  else await drainBriefs(env);
   return { offices: results.length, failed: errors.length, errors, results };
 }
 
@@ -837,22 +955,23 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
 
 async function processBriefContinuation(env, message) {
   const body = message.body || {};
-  const mayorId = body.mayorId || null;
   const jobId = body.jobId || null;
   try {
-    const summary = await summarizeBatch(env, mayorId);
-    if (shouldContinueBriefs(summary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, summary.retryAfterSeconds);
-    }
-    if (jobId) {
-      const { stage, detail } = briefStage(summary);
-      await env.DB.prepare(
-        `UPDATE search_job_tasks
-         SET stage = ?, detail = ?
-         WHERE job_id = ? AND mayor_id = ?`,
-      )
-        .bind(stage, detail, jobId, mayorId)
-        .run();
+    await assignPendingLanes(env);
+    const summary = await summarizeBatch(env, null);
+    await verifyPending(env, BRIEF_BATCH_SIZE);
+    await assignPendingLanes(env);
+    const leftover = await briefBacklog(env);
+    if (leftover.eligible > 0) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: summary.summarized > 0 || summary.failed > 0 ? 0 : 5,
+      });
+    } else if (shouldContinueBriefs({ ...summary, pending: leftover.pending, nextAt: leftover.nextAt })) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: continuationDelaySeconds({ ...summary, nextAt: leftover.nextAt }),
+      });
     }
     message.ack();
   } catch {
@@ -913,26 +1032,23 @@ async function processQueuedSearch(env, message) {
       query: body.query || "",
       mayorId,
     }, onProgress);
-    const briefSummary = {
-      summarized: result.summarized,
-      failed: result.aiFailed,
-      deferred: result.aiDeferred,
-      pending: result.aiPending,
-      retryAfterSeconds: result.aiRetryAfterSeconds,
-    };
-    if (shouldContinueBriefs(briefSummary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, result.aiRetryAfterSeconds);
+    if (result.aiPending > 0) {
+      await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
     }
     if (jobId) {
-      const { stage: finalStage, detail: finalDetail } = briefStage(briefSummary);
+      const finalDetail = result.assigned
+        ? `جُمعت الأخبار ووُزّع ${result.assigned} خبرًا على نماذج القراءة`
+        : result.aiPending
+          ? `جُمعت الأخبار وبقي ${result.aiPending} خبرًا في طابور القراءة`
+          : "اكتمل الجمع ولا أخبار معلّقة للقراءة";
       await env.DB.prepare(
         `UPDATE search_job_tasks
          SET status = 'completed', finished_at = datetime('now'),
-             stage = ?, detail = ?,
+             stage = 'completed', detail = ?,
              result_json = ?, error = NULL
          WHERE job_id = ? AND mayor_id = ?`,
       )
-        .bind(finalStage, finalDetail, JSON.stringify(result), jobId, mayorId)
+        .bind(finalDetail, JSON.stringify(result), jobId, mayorId)
         .run();
       await refreshSearchJobStatus(env, jobId);
     }
@@ -984,7 +1100,7 @@ export function reviewerOf(request, env) {
 }
 
 export function authorized(request, env) {
-  if (!env.DASHBOARD_PASSWORD) return !env.GEMINI_API_KEY;
+  if (!env.DASHBOARD_PASSWORD) return !anyAiKey(env);
   const header = request.headers.get("Authorization") || "";
   if (!header.startsWith("Basic ")) return false;
   try {
@@ -1013,7 +1129,7 @@ async function publicHealth(env) {
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-unconfigured' THEN 1 ELSE 0 END) AS unconfigured,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed
      FROM items`,
   ).first();
   const { results } = await env.DB.prepare(
@@ -1030,7 +1146,7 @@ async function publicHealth(env) {
     briefDrainCron: "every 10 minutes",
     queue: Boolean(env.SCAN_QUEUE),
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       pending: Number(ai?.pending) || 0,
       waitingQuota: Number(ai?.waitingQuota) || 0,
@@ -1099,10 +1215,10 @@ async function stats(env) {
     week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
     sources: {
       ...sourceStatus(env),
-      ai_brief: env.GEMINI_API_KEY ? "ready" : "unconfigured",
+      ai_brief: aiBriefEnabled(env) ? "ready" : "unconfigured",
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       pending: await pendingBriefCount(env),
       budget: await budgetState(env),
     },
@@ -1110,11 +1226,15 @@ async function stats(env) {
   };
 }
 
+async function providerLanes(env) {
+  return providerLaneSnapshot(env, await briefBacklog(env));
+}
+
 /** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
 async function diagnostics(env) {
   const brief = await env.DB.prepare(
     `SELECT
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed,
        SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
@@ -1158,8 +1278,7 @@ async function diagnostics(env) {
         id: "registry",
         name: "سجل المصادر",
         icon: "list",
-        ok: registry.failing === 0,
-        detail: `${registry.total} نطاقًا معتمدًا · ${registry.perOffice} لكل مكتب · مُتحقق منها بالفحص ${registry.verified}`,
+        ...registryChip(registry),
       },
       {
         id: "reader",
@@ -1232,7 +1351,7 @@ async function diagnostics(env) {
       errors: errors || [],
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       budget,
     },
@@ -1252,6 +1371,29 @@ async function diagnostics(env) {
     sources: sources || [],
     lastScan: lastScan || null,
     queue: Boolean(env.SCAN_QUEUE),
+    providers: await providerLanes(env),
+  };
+}
+
+export function registryChip(registry) {
+  const failing = Number(registry?.failing) || 0;
+  const total = Number(registry?.total) || 0;
+  const verified = Number(registry?.verified) || 0;
+  const perOffice = Number(registry?.perOffice) || 3;
+  if (!total) {
+    return { ok: false, detail: "السجل فارغ — لا نطاقات معتمدة." };
+  }
+  if (failing > 0) {
+    return {
+      ok: "warn",
+      detail:
+        `السجل يعمل ولم يُوقف. ${failing} مصدرًا من ${total} تعثر ثلاث مرات متتالية عند الجلب ` +
+        `(غالبًا رفض 403 أو مهلة من موقع البلدية). باقي المصادر تُقرأ كالمعتاد.`,
+    };
+  }
+  return {
+    ok: true,
+    detail: `${total} نطاقًا معتمدًا · ${perOffice} لكل مكتب · مُتحقق منها بالفحص ${verified}`,
   };
 }
 
@@ -1294,7 +1436,8 @@ async function handleApi(request, env) {
     await env.DB.prepare(
       `UPDATE items
        SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
-           brief_claim_id = NULL, brief_claimed_at = NULL, trans_engine = 'brief-pending'
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           trans_engine = 'brief-pending'
        WHERE id = ?`,
     )
       .bind(retryMatch[1])
@@ -1423,10 +1566,11 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const mayorId = body.mayor_id || null;
-    const result = await reviewInbox(env, { mayorId, limit: 500 });
-    const summary = await summarizeBatch(env, mayorId);
-    if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, mayorId, null);
-    return json({ ok: true, ...result, ai: summary });
+    const result = await reviewInbox(env, { mayorId, limit: 500, useAiMerge: false });
+    await assignPendingLanes(env, mayorId);
+    const backlog = await briefBacklog(env, mayorId);
+    if (backlog.pending > 0) await enqueueBriefPump(env);
+    return json({ ok: true, ...result, ai: backlog });
   }
 
   if (path === "/api/admin/reset" && method === "POST") {
@@ -1513,6 +1657,8 @@ export default {
         await pruneAiBudget(env);
         await pruneOldItems(env);
         await drainBriefs(env);
+        const leftover = await briefBacklog(env);
+        if (leftover.pending > 0) await enqueueBriefPump(env);
       })(),
     );
   },
