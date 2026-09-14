@@ -178,6 +178,14 @@ export async function blockAiCalls(
 export async function noteAiFailure(env, error, providerId = DEFAULT_PROVIDER) {
   const id = resolveProviderId(env, providerId);
   const status = Number(error?.status) || 0;
+  if (status === 400 || status === 401 || status === 402 || status === 403) {
+    return blockAiCalls(
+      env,
+      1800,
+      status === 402 ? "provider_unpaid" : "provider_rejected",
+      id,
+    );
+  }
   if (status !== 429 && status < 500) return 0;
   if (status >= 500) {
     return blockAiCalls(env, error?.retryAfterSeconds || 30, "provider_error", id);

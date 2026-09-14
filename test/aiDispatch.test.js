@@ -197,3 +197,39 @@ test("three bound slots read three assigned pages in one round", async () => {
   assert.equal(engines.filter((engine) => engine.startsWith("brief-ai-deepseek-")).length, 1);
   assert.equal(engines.filter((engine) => engine.startsWith("brief-ai-qwen-")).length, 1);
 });
+
+test("a 402 from DeepSeek defers the page so Gemini can still read it", async () => {
+  const { db, env } = await desk();
+  insertPending(db, "a");
+  db.exec(`UPDATE items SET brief_provider = 'deepseek' WHERE id = 'a'`);
+
+  const fetcher = async (url, options) => {
+    if (String(url).includes("chat/completions")) {
+      const body = JSON.parse(options.body);
+      if (body.model === "deepseek-flash") {
+        return {
+          ok: false,
+          status: 402,
+          headers: { get: () => null },
+          async json() {
+            return { error: { type: "invalid_request_error", message: "Insufficient Balance" } };
+          },
+        };
+      }
+      return openaiShape(FACTS);
+    }
+    return geminiShape(FACTS);
+  };
+
+  const first = await translatePending(env, 3, null, fetcher);
+  assert.equal(first.failed, 0, "a slot billing fault must not fail the article");
+  assert.ok(first.deferred >= 1);
+  const mid = db.one(`SELECT brief_attempts, trans_engine, brief_error FROM items WHERE id = 'a'`);
+  assert.equal(mid.brief_attempts, 0);
+  assert.equal(mid.brief_error, null);
+  assert.equal(mid.trans_engine, "brief-deferred");
+
+  const second = await translatePending(env, 3, null, fetcher);
+  assert.equal(second.summarized, 1);
+  assert.match(db.one(`SELECT trans_engine FROM items WHERE id = 'a'`).trans_engine, /gemini|qwen/);
+});

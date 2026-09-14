@@ -207,6 +207,7 @@ test("failure codes are explained in Arabic instead of shown raw", () => {
   assert.match(briefErrorReason("article_text_too_short"), /أقصر/);
   assert.match(briefErrorReason("The operation was aborted"), /المهلة/);
   assert.match(briefErrorReason("Too many subrequests by single Worker invocation"), /مسار مستقل/);
+  assert.match(briefErrorReason("ai_http_402:invalid_request_error"), /غير مدفوع/);
   assert.equal(briefErrorReason(""), "");
 });
 

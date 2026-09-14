@@ -169,7 +169,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v15";
+const BOOTSTRAP_VERSION = "bootstrap-v16";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -569,6 +569,30 @@ async function migrateItems(env) {
     ).run();
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('dispatch_epoch', ?)`)
       .bind(dispatchEpoch)
+      .run();
+  }
+  /**
+   * 402/400 من ديبسيك أو كوين ليسا عيب الصفحة. حُسبتا محاولة وأُغلق الخبر.
+   * بعد اعتبارها عطل فتحة تُعاد الصفوف لتقرأها النماذج العاملة.
+   */
+  const slotFaultEpoch = "provider-slot-fault-v1";
+  const currentSlotFault = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'slot_fault_epoch'`).first();
+  if (currentSlotFault?.v !== slotFaultEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine = 'brief-ai-error'
+         AND (brief_error LIKE 'ai_http_40%'
+           OR brief_error LIKE 'ai_ungrounded%'
+           OR brief_error LIKE 'ai_has_no_grounded%')`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('slot_fault_epoch', ?)`)
+      .bind(slotFaultEpoch)
       .run();
   }
 }

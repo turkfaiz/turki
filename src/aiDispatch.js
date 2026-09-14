@@ -105,7 +105,7 @@ export async function assignPendingLanes(env, mayorId = null) {
   if (openIds.length && openIds.length < allIds.length) {
     const parked = allIds.filter((id) => !openIds.includes(id));
     const binds = [...parked];
-    let sql = `UPDATE items SET brief_provider = NULL
+    let sql = `UPDATE items SET brief_provider = NULL, brief_after = NULL, trans_engine = '${BRIEF_STATE.PENDING}'
        WHERE ${waitingBriefFilter()}
          AND brief_provider IN (${parked.map(() => "?").join(", ")})`;
     if (mayorId) {

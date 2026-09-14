@@ -270,7 +270,7 @@ export function transientAiError(error) {
   const message = String(error?.message || error || "");
   if (error?.name === "AbortError") return true;
   if (workerLimitError(error)) return true;
-  if (/^ai_http_(408|429|5\d\d)/.test(message)) return true;
+  if (/^ai_http_(400|401|402|403|408|429|5\d\d)/.test(message)) return true;
   return /network|fetch failed|connection|socket|ECONNRESET|ETIMEDOUT/i.test(message);
 }
 
