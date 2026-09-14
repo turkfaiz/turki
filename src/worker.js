@@ -616,8 +616,8 @@ const WEEKLY_CRON = "0 3 * * SUN";
 const ITEM_WINDOW_DAYS = 7;
 const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
-const DRAIN_MAX_BRIEFS = 6;
-const DRAIN_MAX_MS = 25000;
+const DRAIN_MAX_BRIEFS = 8;
+const DRAIN_MAX_MS = 40000;
 const CONTINUATION_MIN_SECONDS = 10;
 const CONTINUATION_MAX_SECONDS = 900;
 /** التأجيل الطويل (كنفاد حصة اليوم) يُترك لمهمة التصريف الدورية لا للطابور. */
@@ -767,10 +767,14 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     if (summary.pending === 0 && checked.pending === 0) break;
     const still = await slotsWithCapacity(env, "brief");
     if (still.length) continue;
-    if (summary.summarized === 0 && summary.failed === 0 && checked.verified === 0) break;
-    const { minIntervalMs } = budgetSettings(env);
-    if (minIntervalMs > 0) await sleep(minIntervalMs + 250);
-    else break;
+    const waitMs = Math.max(Number(budgetSettings(env).minIntervalMs) || 0, 1000);
+    if (Date.now() - startedAt + waitMs >= maxMs) {
+      if (summary.pending > 0) {
+        await enqueueBriefPump(env, { delaySeconds: Math.max(1, Math.ceil(waitMs / 1000)) });
+      }
+      break;
+    }
+    await sleep(waitMs + 250);
   }
   return totals;
 }
@@ -956,12 +960,18 @@ async function processBriefContinuation(env, message) {
     await assignPendingLanes(env);
     const summary = await summarizeBatch(env, null);
     await verifyPending(env, BRIEF_BATCH_SIZE);
-    if (shouldContinueBriefs(summary)) {
-      const delay =
-        summary.summarized > 0 || summary.failed > 0
-          ? 0
-          : continuationDelaySeconds(summary);
-      await enqueueBriefPump(env, { jobId, delaySeconds: delay });
+    await assignPendingLanes(env);
+    const leftover = await briefBacklog(env);
+    if (leftover.eligible > 0) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: summary.summarized > 0 || summary.failed > 0 ? 0 : 5,
+      });
+    } else if (shouldContinueBriefs({ ...summary, pending: leftover.pending, nextAt: leftover.nextAt })) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: continuationDelaySeconds({ ...summary, nextAt: leftover.nextAt }),
+      });
     }
     message.ack();
   } catch {
