@@ -143,6 +143,7 @@ const CLUSTER_SUPPORT_SCHEMA = {
 export const BRIEF_STATE = {
   PENDING: "brief-pending",
   DEFERRED: "brief-deferred",
+  WORKING: "brief-working",
   UNCONFIGURED: "brief-unconfigured",
   FAILED: "brief-ai-error",
 };
@@ -150,6 +151,7 @@ export const BRIEF_STATE = {
 const BRIEF_STATE_LABEL = {
   [BRIEF_STATE.PENDING]: "بانتظار قراءة الذكاء الاصطناعي",
   [BRIEF_STATE.DEFERRED]: "بانتظار حصة الذكاء الاصطناعي — يستأنف تلقائيًا",
+  [BRIEF_STATE.WORKING]: "يقرأ الذكاء الاصطناعي الصفحة الآن",
   [BRIEF_STATE.UNCONFIGURED]: "مفتاح الذكاء الاصطناعي غير مربوط بالعامل",
   [BRIEF_STATE.FAILED]: "تعذر تلخيص الصفحة بالذكاء الاصطناعي",
 };
@@ -255,9 +257,19 @@ function responseText(data) {
   return blocks.join("").trim();
 }
 
+/**
+ * حد طلبات العامل خطأ في التشغيل لا في الخبر. إن عومل كتعذر احترقَت
+ * المحاولة وأُغلق الخبر ربع ساعة بينما المشكلة في خلط الجلب مع القراءة.
+ */
+export function workerLimitError(error) {
+  const message = String(error?.message || error || "");
+  return /subrequest|too many subrequests|worker invocation/i.test(message);
+}
+
 export function transientAiError(error) {
   const message = String(error?.message || error || "");
   if (error?.name === "AbortError") return true;
+  if (workerLimitError(error)) return true;
   if (/^ai_http_(408|429|5\d\d)/.test(message)) return true;
   return /network|fetch failed|connection|socket|ECONNRESET|ETIMEDOUT/i.test(message);
 }

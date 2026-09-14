@@ -54,6 +54,7 @@ function briefBadge(item) {
     return "موجز مسند — بانتظار التدقيق الدلالي";
   }
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
+  if (engine === "brief-working") return "يُقرأ الآن";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
 }
@@ -68,6 +69,7 @@ function briefErrorReason(code) {
     [/ai_deferred|ai_http_429/i, "المزوّد رفض الطلب مؤقتًا لتجاوز الحد، والنظام في تهدئة ثم يعيد المحاولة."],
     [/ai_http_5\d\d|provider_error/i, "خطأ مؤقت في خدمة الذكاء الاصطناعي، وتُعاد المحاولة."],
     [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
+    [/subrequest|too many subrequests|worker invocation/i, "توقف النداء لأن جلب الصفحات والقراءة وقعا في نفس التشغيل وتجاوزا حد طلبات العامل. القراءة صارت في مسار مستقل وتُعاد تلقائيًا."],
     [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
     [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
     [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
@@ -310,7 +312,7 @@ function renderProviderLanes(providers) {
   return `
     <section class="board-section provider-board">
       <h4>٦ · نماذج القراءة — الربط من Cloudflare</h4>
-      <p class="diag-note">الطابور مشترك. الخبر يذهب للفتحة التي فيها سعة الآن. تغيير الطراز أو الإيقاف يتم من متغيرات Cloudflare دون تعديل الصفحة.</p>
+      <p class="diag-note">كل خبر يُسند لفتحة واحدة قبل القراءة. رقم الطابور خاص بهذه الفتحة، وجاري العمل يظهر طالما النداء لم يُغلق. إن رُفض المحتوى عند نموذج يُمرَّر تلقائيًا للنموذج التالي.</p>
       <div class="provider-grid">
         ${lanes.map((lane) => {
           const budget = lane.budget || {};
@@ -484,7 +486,7 @@ $("diagnostics").addEventListener("toggle", () => {
   loadDiagnostics();
   diagPoll = window.setInterval(() => {
     if ($("diagnostics").open) loadDiagnostics();
-  }, 8000);
+  }, 4000);
 });
 
 $("diag-body").addEventListener("click", (e) => {
@@ -677,6 +679,7 @@ const STAGE_LABELS = {
   verifying: "فتح الروابط والتحقق",
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
+  assigning: "توزيع الأخبار على نماذج القراءة",
   summarizing: "قراءة وتدقيق AI",
   ai_pending: "بانتظار إكمال قراءة AI",
   ai_waiting_quota: "بانتظار حصة AI — يستأنف تلقائيًا",

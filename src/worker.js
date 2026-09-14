@@ -2,12 +2,14 @@ import { MAYORS } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import {
   MAX_BRIEF_ATTEMPTS,
+  assignPendingLanes,
   briefBacklog,
   pendingBriefCount,
   slotsWithCapacity,
   translatePending,
   verifyPending,
 } from "./translate.js";
+import { providerLaneSnapshot } from "./aiDispatch.js";
 import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
 import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
@@ -21,7 +23,7 @@ import {
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
-import { AI_SLOTS, allSlotBindings, anyAiKey, aiBriefEnabled } from "./aiProviders.js";
+import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -91,6 +93,7 @@ const SCHEMA_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC)`,
   `CREATE TABLE IF NOT EXISTS search_jobs (
@@ -166,7 +169,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v14";
+const BOOTSTRAP_VERSION = "bootstrap-v15";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -456,6 +459,9 @@ async function migrateItems(env) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_provider TEXT`).run();
   }
   await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
+  ).run();
+  await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
        AND IFNULL(exclude_reason, '') NOT IN (?, ?, ?, ?, ?, ?)`,
@@ -539,6 +545,32 @@ async function migrateItems(env) {
       .bind(repairEpoch)
       .run();
   }
+  /**
+   * حد طلبات العامل وألقاب غير المسندة أُغلقت كتعذر نهائي بينما المشكلة في
+   * التشغيل أو في نموذج واحد. تُعاد للتوزيع على الفتحات الحية.
+   */
+  const dispatchEpoch = "lane-dispatch-v1";
+  const currentDispatch = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'dispatch_epoch'`).first();
+  if (currentDispatch?.v !== dispatchEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine IN ('brief-ai-error', 'brief-deferred', 'brief-working')
+          OR brief_error LIKE '%subrequest%'
+          OR brief_error LIKE '%Too many%'
+          OR brief_error LIKE '%Worker invocation%'
+          OR brief_error LIKE 'ai_ungrounded%'
+          OR brief_error LIKE 'ai_has_no_grounded%'`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('dispatch_epoch', ?)`)
+      .bind(dispatchEpoch)
+      .run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -560,14 +592,17 @@ const WEEKLY_CRON = "0 3 * * SUN";
 const ITEM_WINDOW_DAYS = 7;
 const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
-const DRAIN_MAX_BRIEFS = 12;
-const DRAIN_MAX_MS = 45000;
+const DRAIN_MAX_BRIEFS = 6;
+const DRAIN_MAX_MS = 25000;
 const CONTINUATION_MIN_SECONDS = 10;
 const CONTINUATION_MAX_SECONDS = 900;
 /** التأجيل الطويل (كنفاد حصة اليوم) يُترك لمهمة التصريف الدورية لا للطابور. */
 const CONTINUATION_DEFER_CEILING = 300;
 
-/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
+/**
+ * جمع الصفحات منفصل عن القراءة. خلطهما في نفس تشغيل العامل يستنفد حد
+ * الطلبات الخمسين فيتوقف النداء ويُسجَّل اعتذارًا على الخبر.
+ */
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await recordSourceHealth(env, result.sourceHealth);
@@ -575,17 +610,20 @@ async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const review = await reviewInbox(env, {
     mayorId: scanOpts.mayorId || null,
     limit: 500,
-    useAiMerge: result.found > 0 || result.updated > 0,
+    useAiMerge: false,
   });
-  const summary = await summarizeBatch(env, scanOpts.mayorId || null, onProgress);
+  await onProgress("assigning", "يوزّع الأخبار على نماذج القراءة");
+  const lanes = await assignPendingLanes(env, scanOpts.mayorId || null);
+  const backlog = await briefBacklog(env, scanOpts.mayorId || null);
   return {
     ...result,
     review,
-    summarized: summary.summarized,
-    aiFailed: summary.failed,
-    aiDeferred: summary.deferred,
-    aiPending: summary.pending,
-    aiRetryAfterSeconds: summary.retryAfterSeconds,
+    assigned: lanes.assigned,
+    summarized: 0,
+    aiFailed: 0,
+    aiDeferred: 0,
+    aiPending: backlog.pending,
+    aiRetryAfterSeconds: 0,
   };
 }
 
@@ -656,13 +694,20 @@ export function shouldContinueBriefs(summary) {
   return wait <= CONTINUATION_DEFER_CEILING;
 }
 
-async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+async function enqueueBriefPump(env, { jobId = null, delaySeconds = 0 } = {}) {
   if (!env.SCAN_QUEUE) return false;
   await env.SCAN_QUEUE.send(
-    { type: "brief", mayorId, jobId },
-    { contentType: "json", delaySeconds: continuationDelaySeconds({ retryAfterSeconds }) },
+    { type: "brief", mayorId: null, jobId },
+    { contentType: "json", delaySeconds: Math.max(0, Number(delaySeconds) || 0) },
   );
   return true;
+}
+
+async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+  return enqueueBriefPump(env, {
+    jobId,
+    delaySeconds: continuationDelaySeconds({ retryAfterSeconds }),
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -682,9 +727,10 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     pending: 0,
     rounds: 0,
   };
+  await assignPendingLanes(env);
   while (totals.summarized + totals.failed < maxBriefs && Date.now() - startedAt < maxMs) {
     const ready = await slotsWithCapacity(env, "brief");
-    const batch = Math.max(1, ready.length);
+    const batch = Math.max(1, Math.min(BRIEF_BATCH_SIZE, ready.length || 1));
     const summary = await translatePending(env, batch, null);
     const checked = await verifyPending(env, batch);
     totals.verified += checked.verified;
@@ -721,8 +767,11 @@ async function finishAllOffices(env, type = "weekly") {
       } else {
         errors.push(`${chunk[index].id}: ${String(result.reason?.message || result.reason)}`);
       }
-    });
+    }    );
   }
+  await assignPendingLanes(env);
+  if (env.SCAN_QUEUE) await enqueueBriefPump(env);
+  else await drainBriefs(env);
   return { offices: results.length, failed: errors.length, errors, results };
 }
 
@@ -878,22 +927,17 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
 
 async function processBriefContinuation(env, message) {
   const body = message.body || {};
-  const mayorId = body.mayorId || null;
   const jobId = body.jobId || null;
   try {
-    const summary = await summarizeBatch(env, mayorId);
+    await assignPendingLanes(env);
+    const summary = await summarizeBatch(env, null);
+    await verifyPending(env, BRIEF_BATCH_SIZE);
     if (shouldContinueBriefs(summary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, summary.retryAfterSeconds);
-    }
-    if (jobId) {
-      const { stage, detail } = briefStage(summary);
-      await env.DB.prepare(
-        `UPDATE search_job_tasks
-         SET stage = ?, detail = ?
-         WHERE job_id = ? AND mayor_id = ?`,
-      )
-        .bind(stage, detail, jobId, mayorId)
-        .run();
+      const delay =
+        summary.summarized > 0 || summary.failed > 0
+          ? 0
+          : continuationDelaySeconds(summary);
+      await enqueueBriefPump(env, { jobId, delaySeconds: delay });
     }
     message.ack();
   } catch {
@@ -954,26 +998,23 @@ async function processQueuedSearch(env, message) {
       query: body.query || "",
       mayorId,
     }, onProgress);
-    const briefSummary = {
-      summarized: result.summarized,
-      failed: result.aiFailed,
-      deferred: result.aiDeferred,
-      pending: result.aiPending,
-      retryAfterSeconds: result.aiRetryAfterSeconds,
-    };
-    if (shouldContinueBriefs(briefSummary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, result.aiRetryAfterSeconds);
+    if (result.aiPending > 0) {
+      await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
     }
     if (jobId) {
-      const { stage: finalStage, detail: finalDetail } = briefStage(briefSummary);
+      const finalDetail = result.assigned
+        ? `جُمعت الأخبار ووُزّع ${result.assigned} خبرًا على نماذج القراءة`
+        : result.aiPending
+          ? `جُمعت الأخبار وبقي ${result.aiPending} خبرًا في طابور القراءة`
+          : "اكتمل الجمع ولا أخبار معلّقة للقراءة";
       await env.DB.prepare(
         `UPDATE search_job_tasks
          SET status = 'completed', finished_at = datetime('now'),
-             stage = ?, detail = ?,
+             stage = 'completed', detail = ?,
              result_json = ?, error = NULL
          WHERE job_id = ? AND mayor_id = ?`,
       )
-        .bind(finalStage, finalDetail, JSON.stringify(result), jobId, mayorId)
+        .bind(finalDetail, JSON.stringify(result), jobId, mayorId)
         .run();
       await refreshSearchJobStatus(env, jobId);
     }
@@ -1152,35 +1193,7 @@ async function stats(env) {
 }
 
 async function providerLanes(env) {
-  const backlog = await briefBacklog(env);
-  const laneSql = AI_SLOTS.map(
-    (slot) =>
-      `SUM(CASE WHEN trans_engine LIKE 'brief-ai-${slot.id}-v2:%' THEN 1 ELSE 0 END) AS ${slot.id}_done,
-       SUM(CASE WHEN brief_provider = '${slot.id}' AND brief_claim_id IS NOT NULL
-                AND brief_claimed_at > datetime('now', '-10 minutes') THEN 1 ELSE 0 END) AS ${slot.id}_run,
-       SUM(CASE WHEN trans_engine = 'brief-ai-error' AND brief_provider = '${slot.id}' THEN 1 ELSE 0 END) AS ${slot.id}_fail`,
-  ).join(",\n       ");
-  const counts = await env.DB.prepare(`SELECT ${laneSql} FROM items`).first();
-  const bindings = allSlotBindings(env);
-  const lanes = [];
-  for (const binding of bindings) {
-    lanes.push({
-      ...binding,
-      queued: backlog.pending,
-      eligible: backlog.eligible,
-      inProgress: Number(counts?.[`${binding.id}_run`]) || 0,
-      completed: Number(counts?.[`${binding.id}_done`]) || 0,
-      failed: Number(counts?.[`${binding.id}_fail`]) || 0,
-      budget: await budgetState(env, binding.id),
-    });
-  }
-  return {
-    queued: backlog.pending,
-    eligible: backlog.eligible,
-    nextAt: backlog.nextAt,
-    bound: bindings.filter((row) => row.bound).length,
-    lanes,
-  };
+  return providerLaneSnapshot(env, await briefBacklog(env));
 }
 
 /** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
@@ -1498,10 +1511,11 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const mayorId = body.mayor_id || null;
-    const result = await reviewInbox(env, { mayorId, limit: 500 });
-    const summary = await summarizeBatch(env, mayorId);
-    if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, mayorId, null);
-    return json({ ok: true, ...result, ai: summary });
+    const result = await reviewInbox(env, { mayorId, limit: 500, useAiMerge: false });
+    await assignPendingLanes(env, mayorId);
+    const backlog = await briefBacklog(env, mayorId);
+    if (backlog.pending > 0) await enqueueBriefPump(env);
+    return json({ ok: true, ...result, ai: backlog });
   }
 
   if (path === "/api/admin/reset" && method === "POST") {
@@ -1588,6 +1602,8 @@ export default {
         await pruneAiBudget(env);
         await pruneOldItems(env);
         await drainBriefs(env);
+        const leftover = await briefBacklog(env);
+        if (leftover.pending > 0) await enqueueBriefPump(env);
       })(),
     );
   },

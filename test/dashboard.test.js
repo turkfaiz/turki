@@ -144,7 +144,7 @@ test("provider lanes are appended without replacing existing diagnostic sections
         bound: true,
         enabled: true,
         hasKey: true,
-        queued: 3,
+        queued: 2,
         inProgress: 1,
         completed: 4,
         failed: 0,
@@ -159,7 +159,7 @@ test("provider lanes are appended without replacing existing diagnostic sections
         bound: false,
         enabled: true,
         hasKey: false,
-        queued: 3,
+        queued: 0,
         inProgress: 0,
         completed: 0,
         failed: 0,
@@ -185,6 +185,8 @@ test("provider lanes are appended without replacing existing diagnostic sections
   assert.match(html, /ديبسيك/);
   assert.match(html, /جاري العمل/);
   assert.match(html, /DEEPSEEK_API_KEY/);
+  assert.doesNotMatch(html, /الطابور مشترك/);
+  assert.match(html, /يُسند لفتحة واحدة/);
 });
 
 test("a blocked AI budget is reported as a pause with a resume time", () => {
@@ -204,6 +206,7 @@ test("failure codes are explained in Arabic instead of shown raw", () => {
   assert.match(briefErrorReason("ai_deferred:daily_limit"), /نفدت حصة/);
   assert.match(briefErrorReason("article_text_too_short"), /أقصر/);
   assert.match(briefErrorReason("The operation was aborted"), /المهلة/);
+  assert.match(briefErrorReason("Too many subrequests by single Worker invocation"), /مسار مستقل/);
   assert.equal(briefErrorReason(""), "");
 });
 
