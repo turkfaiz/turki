@@ -896,7 +896,7 @@ function renderSettings(payload) {
     .map((office) => {
       const platforms = office.platforms || [];
       const custom = office.origin === "custom";
-      const badge = custom ? `<span class="settings-badge">مضاف</span>` : "";
+      const badge = custom ? ` <span class="settings-badge">مضاف</span>` : "";
       const host = office.official_host
         ? `<br>النطاق الرسمي: <span dir="ltr">${escapeHtml(office.official_host)}</span>`
         : "";
