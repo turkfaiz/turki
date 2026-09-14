@@ -254,10 +254,17 @@ function toolIcon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
 }
 
-/** رقاقة أداة: أيقونة، واسم، ونقطة حالة تفاعلية تكشف تفصيل عملها. */
+/** رقاقة أداة: أيقونة، واسم، ونقطة حالة. السجل المتعثر يعمل، فلا يُوسم متوقفًا. */
+function toolStateLabel(ok) {
+  if (ok === null) return "معطّلة بالحوكمة";
+  if (ok === true) return "تعمل";
+  if (ok === "warn") return "تعمل · بعضها متعثر";
+  return "متوقفة";
+}
+
 function toolChip(tool) {
-  const tone = tool.ok === null ? "off" : tool.ok ? "ok" : "bad";
-  const label = tool.ok === null ? "معطّلة بالحوكمة" : tool.ok ? "تعمل" : "متوقفة";
+  const tone = tool.ok === null ? "off" : tool.ok === true ? "ok" : tool.ok === "warn" ? "warn" : "bad";
+  const label = toolStateLabel(tool.ok);
   return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
       aria-expanded="false" title="${escapeHtml(label)}">
       <span class="tool-icon">${toolIcon(tool.icon)}</span>

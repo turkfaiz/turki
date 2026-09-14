@@ -737,6 +737,7 @@ h1 {
 
 .tool-icon svg { width: 15px; height: 15px; }
 .tool.ok .tool-icon { color: var(--teal); }
+.tool.warn .tool-icon { color: #b54708; }
 .tool.bad .tool-icon { color: var(--bad); }
 
 .tool-name { font-weight: 600; }
@@ -752,6 +753,11 @@ h1 {
 .tool.ok .tool-dot {
   background: var(--teal-bright);
   box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
+}
+
+.tool.warn .tool-dot {
+  background: #f79009;
+  box-shadow: 0 0 0 3px rgba(247, 144, 9, 0.22);
 }
 
 .tool.bad .tool-dot {

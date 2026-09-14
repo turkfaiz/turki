@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes };`,
+    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel };`,
   )();
   return { ...exported, element };
 }
@@ -228,4 +228,21 @@ test("source tooltips separate curation from this deployment's runtime", () => {
   assert.match(kept, /غرفة أخبار رسمية/);
   assert.match(kept, /لم يستجب من شبكة الفحص/);
   assert.doesNotMatch(kept, /لم يُفحص بعد/, "the misleading wording must not return");
+});
+
+test("a registry with failing hosts is not labeled as stopped", () => {
+  const { toolChip, toolStateLabel } = loadPageScript();
+  assert.equal(toolStateLabel("warn"), "تعمل · بعضها متعثر");
+  assert.equal(toolStateLabel(true), "تعمل");
+  assert.equal(toolStateLabel(false), "متوقفة");
+  const html = toolChip({
+    id: "registry",
+    name: "سجل المصادر",
+    icon: "list",
+    ok: "warn",
+    detail: "السجل يعمل ولم يُوقف.",
+  });
+  assert.match(html, /تعمل · بعضها متعثر/);
+  assert.doesNotMatch(html, />متوقفة</);
+  assert.match(html, /class="tool warn"/);
 });

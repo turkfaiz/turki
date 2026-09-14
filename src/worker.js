@@ -1278,8 +1278,7 @@ async function diagnostics(env) {
         id: "registry",
         name: "سجل المصادر",
         icon: "list",
-        ok: registry.failing === 0,
-        detail: `${registry.total} نطاقًا معتمدًا · ${registry.perOffice} لكل مكتب · مُتحقق منها بالفحص ${registry.verified}`,
+        ...registryChip(registry),
       },
       {
         id: "reader",
@@ -1373,6 +1372,28 @@ async function diagnostics(env) {
     lastScan: lastScan || null,
     queue: Boolean(env.SCAN_QUEUE),
     providers: await providerLanes(env),
+  };
+}
+
+export function registryChip(registry) {
+  const failing = Number(registry?.failing) || 0;
+  const total = Number(registry?.total) || 0;
+  const verified = Number(registry?.verified) || 0;
+  const perOffice = Number(registry?.perOffice) || 3;
+  if (!total) {
+    return { ok: false, detail: "السجل فارغ — لا نطاقات معتمدة." };
+  }
+  if (failing > 0) {
+    return {
+      ok: "warn",
+      detail:
+        `السجل يعمل ولم يُوقف. ${failing} مصدرًا من ${total} تعثر ثلاث مرات متتالية عند الجلب ` +
+        `(غالبًا رفض 403 أو مهلة من موقع البلدية). باقي المصادر تُقرأ كالمعتاد.`,
+    };
+  }
+  return {
+    ok: true,
+    detail: `${total} نطاقًا معتمدًا · ${perOffice} لكل مكتب · مُتحقق منها بالفحص ${verified}`,
   };
 }
 
