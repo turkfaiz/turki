@@ -2,19 +2,20 @@ import { arabicRatio, decodeEntities } from "./text.js";
 import { tokenOverlap } from "./dedup.js";
 import { identityTokens } from "./mayors.js";
 import { AiDeferredError, isDeferredAiError, noteAiFailure, reserveAiCall } from "./aiBudget.js";
+import {
+  aiBriefEnabled,
+  aiBriefEngine,
+  boundSlot,
+  chatCompletionsUrl,
+  engineForSlot,
+  firstBoundSlot,
+  providerIdFromEngine,
+  slotBaseUrl,
+  slotKey,
+  slotModel,
+} from "./aiProviders.js";
 
-export { isDeferredAiError };
-
-/** الطبقة المجانية من الطراز الكامل تمنح ~20 نداءً يوميًا فقط، وهذا الطراز يمنح مئات. */
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const BRIEF_VERSION = "v2";
-const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
-
-/** منفذ اختبار: يسمح بتوجيه النداءات إلى خادم بديل لإثبات المسار كاملًا محليًا. */
-function geminiUrl(env) {
-  const base = String(env?.GEMINI_BASE_URL || "").trim();
-  return base ? base.replace(/\/+$/, "") : GEMINI_URL;
-}
+export { isDeferredAiError, aiBriefEnabled, aiBriefEngine };
 
 const OUTPUT_SCHEMA = {
   type: "object",
@@ -138,14 +139,6 @@ const CLUSTER_SUPPORT_SCHEMA = {
   },
   required: ["groups"],
 };
-
-export function aiBriefEnabled(env) {
-  return Boolean(env?.GEMINI_API_KEY);
-}
-
-export function aiBriefEngine(env) {
-  return `brief-ai-gemini-${BRIEF_VERSION}:${env?.GEMINI_MODEL || DEFAULT_MODEL}`;
-}
 
 export const BRIEF_STATE = {
   PENDING: "brief-pending",
@@ -306,28 +299,29 @@ export function quotaScope(payload) {
   return "";
 }
 
-/**
- * نداء واحد فقط لكل استدعاء، والتراجع مفوَّض للطابور حتى لا ينام أي طلب.
- * الحجز يسبق الشبكة، فإن لم تسمح الميزانية لا يخرج النداء أصلًا.
- */
-async function callGemini(env, input, schema, fetcher, purpose = "brief") {
-  const reservation = await reserveAiCall(env, purpose);
-  if (!reservation.ok) {
-    throw new AiDeferredError(reservation.reason, reservation.retryAfterSeconds);
+function openaiResponseText(data) {
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part === "string" ? part : part?.text || ""))
+      .join("")
+      .trim();
   }
-  const model = env.GEMINI_MODEL || DEFAULT_MODEL;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 90000);
-  let response;
-  try {
-    response = await fetcher(geminiUrl(env), {
-      method: "POST",
+  return "";
+}
+
+function requestBodyFor(env, slot, input, schema) {
+  const model = slotModel(env, slot);
+  if (slot.protocol === "gemini") {
+    return {
+      url: slotBaseUrl(env, slot),
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": env.GEMINI_API_KEY,
+        "x-goog-api-key": slotKey(env, slot),
         "Api-Revision": "2026-05-20",
       },
-      body: JSON.stringify({
+      body: {
         model,
         store: false,
         input,
@@ -337,7 +331,69 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
           mime_type: "application/json",
           schema,
         },
-      }),
+      },
+    };
+  }
+  const body = {
+    model,
+    temperature: 0,
+    messages: [
+      {
+        role: "system",
+        content: `أعد JSON فقط يطابق هذا المخطط، بلا نص حوله:\n${JSON.stringify(schema)}`,
+      },
+      { role: "user", content: String(input) },
+    ],
+    response_format: { type: "json_object" },
+  };
+  if (slot.disableThinking) body.thinking = { type: "disabled" };
+  return {
+    url: chatCompletionsUrl(slotBaseUrl(env, slot)),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${slotKey(env, slot)}`,
+    },
+    body,
+  };
+}
+
+function parseModelJson(data, protocol) {
+  const raw = protocol === "gemini" ? responseText(data) : openaiResponseText(data);
+  if (!raw) throw new Error("ai_empty_response");
+  const trimmed = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error("ai_invalid_json");
+  }
+}
+
+function resolveCallSlot(env, slot) {
+  return slot || boundSlot(env, "gemini") || firstBoundSlot(env);
+}
+
+/**
+ * نداء واحد فقط لكل استدعاء، والتراجع مفوَّض للطابور حتى لا ينام أي طلب.
+ * الحجز يسبق الشبكة على ميزانية الفتحة نفسها، فإن لم تسمح لا يخرج النداء.
+ */
+async function callProvider(env, slot, input, schema, fetcher, purpose = "brief") {
+  const resolved = resolveCallSlot(env, slot);
+  if (!resolved) {
+    throw new Error("ai_not_configured");
+  }
+  const reservation = await reserveAiCall(env, purpose, resolved.id);
+  if (!reservation.ok) {
+    throw new AiDeferredError(reservation.reason, reservation.retryAfterSeconds, resolved.id);
+  }
+  const request = requestBodyFor(env, resolved, input, schema);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 90000);
+  let response;
+  try {
+    response = await fetcher(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: JSON.stringify(request.body),
       signal: ctrl.signal,
     });
   } finally {
@@ -356,19 +412,23 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
     error.status = status;
     error.retryAfterSeconds = parseRetryDelaySeconds(response, payload);
     error.quotaScope = quotaScope(payload);
-    const cooldown = await noteAiFailure(env, error);
-    if (cooldown) throw new AiDeferredError(error.message, cooldown);
+    const cooldown = await noteAiFailure(env, error, resolved.id);
+    if (cooldown) throw new AiDeferredError(error.message, cooldown, resolved.id);
     throw error;
   }
 
-  const data = await response.json();
-  const text = responseText(data);
-  if (!text) throw new Error("ai_empty_response");
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("ai_invalid_json");
-  }
+  return parseModelJson(await response.json(), resolved.protocol);
+}
+
+async function callGemini(env, input, schema, fetcher, purpose = "brief") {
+  return callProvider(
+    env,
+    boundSlot(env, "gemini") || firstBoundSlot(env),
+    input,
+    schema,
+    fetcher,
+    purpose,
+  );
 }
 
 export const MAX_PROMPT_CHARS = 60000;
@@ -522,7 +582,12 @@ export async function verifyBriefSemantics(env, brief, fetcher = fetch) {
       facts: checks,
     }),
   ].join("\n");
-  const verdict = await callGemini(env, prompt, SUPPORT_SCHEMA, fetcher, "brief");
+  const preferred = providerIdFromEngine(brief.engine);
+  const slot =
+    (preferred && boundSlot(env, preferred)) ||
+    boundSlot(env, "gemini") ||
+    firstBoundSlot(env);
+  const verdict = await callProvider(env, slot, prompt, SUPPORT_SCHEMA, fetcher, "brief");
   if (verdict?.headline_supported !== true) throw new Error("ai_headline_not_supported");
   const supported = new Set(
     (Array.isArray(verdict?.facts) ? verdict.facts : [])
@@ -547,14 +612,23 @@ export async function verifyBriefSemantics(env, brief, fetcher = fetch) {
  * النص العربي فسؤال دلالي يُحسم في مرحلة مستقلة محفوظة، لأن دمجه هنا يعني
  * فقدان الموجز كلما منعت الميزانية النداء الثاني.
  */
-export async function summarizeWithGemini(env, item, mayor, fetcher = fetch, documents = null) {
+export async function summarizeWithGemini(
+  env,
+  item,
+  mayor,
+  fetcher = fetch,
+  documents = null,
+  slot = null,
+) {
   if (!aiBriefEnabled(env)) throw new Error("ai_not_configured");
-  const engine = aiBriefEngine(env);
+  const resolved = slot || boundSlot(env, "gemini") || firstBoundSlot(env);
+  if (!resolved) throw new Error("ai_not_configured");
+  const engine = engineForSlot(env, resolved);
   const sourceText = [item.title, item.snippet, item.article_text].filter(Boolean).join("\n\n");
   if (compact(sourceText).length < 80) throw new Error("article_text_too_short");
 
   const request = buildBriefRequest(item, mayor, documents);
-  const payload = await callGemini(env, request.prompt, OUTPUT_SCHEMA, fetcher, "brief");
+  const payload = await callProvider(env, resolved, request.prompt, OUTPUT_SCHEMA, fetcher, "brief");
   const grounded = validateAiBrief(payload, sourceText, mayor, engine);
   return { ...grounded, sent: request.sent, sourceText };
 }

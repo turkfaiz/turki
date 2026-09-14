@@ -8,7 +8,16 @@ INOREADER_ACCESS_TOKEN=
 # يلزم لتفعيل قراءة الصفحة وتلخيصها بالذكاء الاصطناعي.
 # أنشئه من Google AI Studio، ثم ضعه في .dev.vars فقط.
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-3.8-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
+GEMINI_ENABLED=1
+
+# احتياطي اختياري. إن وُضع المفتاح تُربط الفتحة تلقائيًا.
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_ENABLED=1
+QWEN_API_KEY=
+QWEN_MODEL=qwen-flash
+QWEN_ENABLED=1
 
 # اختياري محليًا، وموصى به في الإنتاج لحماية الصفحة وكل العمليات.
 DASHBOARD_USER=mayorwatch

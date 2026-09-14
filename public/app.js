@@ -48,7 +48,7 @@ function displayTitle(it) {
 /** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
-  if (engine.startsWith("brief-ai-gemini-v2:")) {
+  if (/^brief-ai-[a-z0-9]+-v2:/i.test(engine)) {
     if (item.verify_state === "passed") return "موجز مدقَّق — مسند ومُتحقق دلاليًا";
     if (item.verify_state === "failed") return "موجز مرفوض في التدقيق";
     return "موجز مسند — بانتظار التدقيق الدلالي";
@@ -83,7 +83,7 @@ function briefErrorReason(code) {
 
 function briefErrorBox(item) {
   const engine = String(item.trans_engine || "");
-  if (!item.brief_error || engine.startsWith("brief-ai-gemini-v2:")) return "";
+  if (!item.brief_error || (/^brief-ai-[a-z0-9]+-v2:/i.test(engine))) return "";
   const attempts = Number(item.brief_attempts) || 0;
   const exhausted = attempts >= 5;
   const heading = exhausted
@@ -292,6 +292,53 @@ function sourceTitle(source) {
   return `${role}\n${curated}\n${runtime}`;
 }
 
+function providerFromItem(item) {
+  const names = { gemini: "جيميني", deepseek: "ديبسيك", qwen: "كوين" };
+  const engine = String(item.trans_engine || "");
+  const match = engine.match(/^brief-ai-([a-z0-9]+)-v2:(.+)$/i);
+  if (match) {
+    return { id: match[1].toLowerCase(), model: match[2], name: names[match[1].toLowerCase()] || match[1] };
+  }
+  const id = String(item.brief_provider || "");
+  if (id) return { id, model: "", name: names[id] || id };
+  return null;
+}
+
+function renderProviderLanes(providers) {
+  const lanes = providers?.lanes || [];
+  if (!lanes.length) return "";
+  return `
+    <section class="board-section provider-board">
+      <h4>٦ · نماذج القراءة — الربط من Cloudflare</h4>
+      <p class="diag-note">الطابور مشترك. الخبر يذهب للفتحة التي فيها سعة الآن. تغيير الطراز أو الإيقاف يتم من متغيرات Cloudflare دون تعديل الصفحة.</p>
+      <div class="provider-grid">
+        ${lanes.map((lane) => {
+          const budget = lane.budget || {};
+          const tone = !lane.hasKey ? "is-bad" : !lane.bound || budget.blocked ? "is-warn" : "is-good";
+          const state = !lane.hasKey
+            ? `ضع السر ${lane.vars.key} في Cloudflare`
+            : !lane.enabled
+              ? `موقوف من ${lane.vars.enabled}`
+              : budget.blocked
+                ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+                : `${lane.model} · يعمل`;
+          return `<article class="provider-card ${tone}">
+            <b>${escapeHtml(lane.nameAr)}</b>
+            <small>${escapeHtml(state)}</small>
+            <ul class="provider-counts">
+              <li><span>في الطابور</span><b class="num">${num(lane.queued)}</b></li>
+              <li><span>جاري العمل</span><b class="num">${num(lane.inProgress)}</b></li>
+              <li><span>مكتمل</span><b class="num">${num(lane.completed)}</b></li>
+              <li><span>تعذر</span><b class="num">${num(lane.failed)}</b></li>
+            </ul>
+            <div class="meter"><span style="width:${Math.round(pct(budget.remaining, budget.dailyLimit))}%"></span></div>
+            <small class="readout-note">الرصيد ${num(budget.remaining)} / ${num(budget.dailyLimit)} · تباعد ${num(Math.round((lane.minIntervalMs || 0) / 100) / 10)} ث</small>
+          </article>`;
+        }).join("")}
+      </div>
+    </section>`;
+}
+
 function renderDiagnostics(d) {
   const b = d.brief || {};
   const budget = d.ai?.budget || {};
@@ -417,7 +464,7 @@ function renderDiagnostics(d) {
           نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
         </p>
       </section>
-    </div>`;
+    </div>` + renderProviderLanes(d.providers);
 }
 
 async function loadDiagnostics() {
@@ -429,6 +476,16 @@ async function loadDiagnostics() {
     $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
   }
 }
+
+let diagPoll = 0;
+$("diagnostics").addEventListener("toggle", () => {
+  window.clearInterval(diagPoll);
+  if (!$("diagnostics").open) return;
+  loadDiagnostics();
+  diagPoll = window.setInterval(() => {
+    if ($("diagnostics").open) loadDiagnostics();
+  }, 8000);
+});
 
 $("diag-body").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tool]");
@@ -520,6 +577,12 @@ async function loadDetail(id) {
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
       ${briefErrorBox(item)}
+      ${(() => {
+        const reader = providerFromItem(item);
+        return reader
+          ? `<p class="source-line">المراجع: ${escapeHtml(reader.name)}${reader.model ? ` · ${escapeHtml(reader.model)}` : ""}</p>`
+          : "";
+      })()}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>

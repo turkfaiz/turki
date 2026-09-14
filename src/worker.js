@@ -4,6 +4,7 @@ import {
   MAX_BRIEF_ATTEMPTS,
   briefBacklog,
   pendingBriefCount,
+  slotsWithCapacity,
   translatePending,
   verifyPending,
 } from "./translate.js";
@@ -20,6 +21,7 @@ import {
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
+import { AI_SLOTS, allSlotBindings, anyAiKey, aiBriefEnabled } from "./aiProviders.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -84,6 +86,7 @@ const SCHEMA_STATEMENTS = [
     brief_claim_id TEXT,
     brief_claimed_at TEXT,
     brief_after TEXT,
+    brief_provider TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -147,6 +150,15 @@ const SCHEMA_STATEMENTS = [
     blocked_until TEXT,
     block_reason TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+    day TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    last_call_at TEXT,
+    blocked_until TEXT,
+    block_reason TEXT,
+    PRIMARY KEY (day, provider)
+  )`,
   `CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT
@@ -154,7 +166,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v13";
+const BOOTSTRAP_VERSION = "bootstrap-v14";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -179,6 +191,26 @@ async function migrateSearchJobs(env) {
   }
 }
 
+async function migrateAiProviderBudget(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+      day TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      calls INTEGER NOT NULL DEFAULT 0,
+      last_call_at TEXT,
+      blocked_until TEXT,
+      block_reason TEXT,
+      PRIMARY KEY (day, provider)
+    )`,
+  ).run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO ai_provider_budget
+       (day, provider, calls, last_call_at, blocked_until, block_reason)
+     SELECT day, 'gemini', calls, last_call_at, blocked_until, block_reason
+     FROM ai_budget`,
+  ).run();
+}
+
 const REQUIRED_TABLES = [
   "mayors",
   "items",
@@ -188,6 +220,7 @@ const REQUIRED_TABLES = [
   "publishers",
   "sources",
   "ai_budget",
+  "ai_provider_budget",
   "brief_versions",
   "approvals",
 ];
@@ -262,6 +295,7 @@ export async function ensureDb(env) {
   );
   await seedSources(env);
   await migrateItems(env);
+  await migrateAiProviderBudget(env);
   await migrateVersions(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
@@ -418,6 +452,9 @@ async function migrateItems(env) {
   if (!names.has("brief_claimed_at")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claimed_at TEXT`).run();
   }
+  if (!names.has("brief_provider")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_provider TEXT`).run();
+  }
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -510,7 +547,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
   items.brief_evidence, items.brief_error, items.brief_attempted_at, items.brief_attempts,
-  items.current_version_id, items.approved_version_id, items.needs_review,
+  items.brief_provider, items.current_version_id, items.approved_version_id, items.needs_review,
   (SELECT verify_state FROM brief_versions
     WHERE brief_versions.id = items.current_version_id) AS verify_state,
   (SELECT verify_detail FROM brief_versions
@@ -636,7 +673,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = DRAIN_MAX_MS } = {}) {
   const startedAt = Date.now();
-  const { minIntervalMs } = budgetSettings(env);
   const totals = {
     summarized: 0,
     failed: 0,
@@ -647,8 +683,10 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     rounds: 0,
   };
   while (totals.summarized + totals.failed < maxBriefs && Date.now() - startedAt < maxMs) {
-    const summary = await translatePending(env, 1, null);
-    const checked = await verifyPending(env, 1);
+    const ready = await slotsWithCapacity(env, "brief");
+    const batch = Math.max(1, ready.length);
+    const summary = await translatePending(env, batch, null);
+    const checked = await verifyPending(env, batch);
     totals.verified += checked.verified;
     totals.rejected += checked.rejected;
     totals.rounds += 1;
@@ -656,10 +694,13 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     totals.failed += summary.failed;
     totals.deferred += summary.deferred;
     totals.pending = summary.pending;
-    if (summary.deferred > 0) break;
     if (summary.pending === 0 && checked.pending === 0) break;
+    const still = await slotsWithCapacity(env, "brief");
+    if (still.length) continue;
     if (summary.summarized === 0 && summary.failed === 0 && checked.verified === 0) break;
+    const { minIntervalMs } = budgetSettings(env);
     if (minIntervalMs > 0) await sleep(minIntervalMs + 250);
+    else break;
   }
   return totals;
 }
@@ -984,7 +1025,7 @@ export function reviewerOf(request, env) {
 }
 
 export function authorized(request, env) {
-  if (!env.DASHBOARD_PASSWORD) return !env.GEMINI_API_KEY;
+  if (!env.DASHBOARD_PASSWORD) return !anyAiKey(env);
   const header = request.headers.get("Authorization") || "";
   if (!header.startsWith("Basic ")) return false;
   try {
@@ -1013,7 +1054,7 @@ async function publicHealth(env) {
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-unconfigured' THEN 1 ELSE 0 END) AS unconfigured,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed
      FROM items`,
   ).first();
   const { results } = await env.DB.prepare(
@@ -1030,7 +1071,7 @@ async function publicHealth(env) {
     briefDrainCron: "every 10 minutes",
     queue: Boolean(env.SCAN_QUEUE),
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       pending: Number(ai?.pending) || 0,
       waitingQuota: Number(ai?.waitingQuota) || 0,
@@ -1099,10 +1140,10 @@ async function stats(env) {
     week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
     sources: {
       ...sourceStatus(env),
-      ai_brief: env.GEMINI_API_KEY ? "ready" : "unconfigured",
+      ai_brief: aiBriefEnabled(env) ? "ready" : "unconfigured",
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       pending: await pendingBriefCount(env),
       budget: await budgetState(env),
     },
@@ -1110,11 +1151,43 @@ async function stats(env) {
   };
 }
 
+async function providerLanes(env) {
+  const backlog = await briefBacklog(env);
+  const laneSql = AI_SLOTS.map(
+    (slot) =>
+      `SUM(CASE WHEN trans_engine LIKE 'brief-ai-${slot.id}-v2:%' THEN 1 ELSE 0 END) AS ${slot.id}_done,
+       SUM(CASE WHEN brief_provider = '${slot.id}' AND brief_claim_id IS NOT NULL
+                AND brief_claimed_at > datetime('now', '-10 minutes') THEN 1 ELSE 0 END) AS ${slot.id}_run,
+       SUM(CASE WHEN trans_engine = 'brief-ai-error' AND brief_provider = '${slot.id}' THEN 1 ELSE 0 END) AS ${slot.id}_fail`,
+  ).join(",\n       ");
+  const counts = await env.DB.prepare(`SELECT ${laneSql} FROM items`).first();
+  const bindings = allSlotBindings(env);
+  const lanes = [];
+  for (const binding of bindings) {
+    lanes.push({
+      ...binding,
+      queued: backlog.pending,
+      eligible: backlog.eligible,
+      inProgress: Number(counts?.[`${binding.id}_run`]) || 0,
+      completed: Number(counts?.[`${binding.id}_done`]) || 0,
+      failed: Number(counts?.[`${binding.id}_fail`]) || 0,
+      budget: await budgetState(env, binding.id),
+    });
+  }
+  return {
+    queued: backlog.pending,
+    eligible: backlog.eligible,
+    nextAt: backlog.nextAt,
+    bound: bindings.filter((row) => row.bound).length,
+    lanes,
+  };
+}
+
 /** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
 async function diagnostics(env) {
   const brief = await env.DB.prepare(
     `SELECT
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed,
        SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
@@ -1232,7 +1305,7 @@ async function diagnostics(env) {
       errors: errors || [],
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       budget,
     },
@@ -1252,6 +1325,7 @@ async function diagnostics(env) {
     sources: sources || [],
     lastScan: lastScan || null,
     queue: Boolean(env.SCAN_QUEUE),
+    providers: await providerLanes(env),
   };
 }
 
@@ -1294,7 +1368,8 @@ async function handleApi(request, env) {
     await env.DB.prepare(
       `UPDATE items
        SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
-           brief_claim_id = NULL, brief_claimed_at = NULL, trans_engine = 'brief-pending'
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           trans_engine = 'brief-pending'
        WHERE id = ?`,
     )
       .bind(retryMatch[1])

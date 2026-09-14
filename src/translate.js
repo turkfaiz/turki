@@ -1,6 +1,7 @@
 import { arabicRatio, decodeEntities, splitHeadline } from "./text.js";
 import { availableAiCalls } from "./aiBudget.js";
 import { readSourceDocuments } from "./sourceDocuments.js";
+import { boundSlots, completedBriefSql } from "./aiProviders.js";
 import {
   claimVerifications,
   deferVerification,
@@ -13,7 +14,6 @@ import {
 import {
   BRIEF_STATE,
   aiBriefEnabled,
-  aiBriefEngine,
   isDeferredAiError,
   pendingAiBrief,
   summarizeWithGemini,
@@ -42,7 +42,8 @@ export function briefScopeSql(alias = "items") {
 
 export function pendingBriefFilter(alias = "items") {
   return `${briefScopeSql(alias)}
-    AND (${alias}.trans_engine IS NULL OR ${alias}.trans_engine <> ?)
+    AND NOT (${completedBriefSql(alias)})
+    AND IFNULL(${alias}.trans_engine, '') <> '${BRIEF_STATE.UNCONFIGURED}'
     AND IFNULL(${alias}.brief_attempts, 0) < ${MAX_BRIEF_ATTEMPTS}`;
 }
 
@@ -57,7 +58,7 @@ export function eligibleBriefFilter(alias = "items") {
  * لا عمل لها ولا يُقرأ الانتظار كأنه تعذر.
  */
 export async function briefBacklog(env, mayorId = null) {
-  const binds = [aiBriefEngine(env)];
+  const binds = [];
   let sql = `SELECT
        COUNT(*) AS pending,
        SUM(CASE WHEN items.brief_after IS NULL OR items.brief_after <= datetime('now')
@@ -69,7 +70,9 @@ export async function briefBacklog(env, mayorId = null) {
     sql += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
-  const row = await env.DB.prepare(sql).bind(...binds).first();
+  const row = binds.length
+    ? await env.DB.prepare(sql).bind(...binds).first()
+    : await env.DB.prepare(sql).first();
   return {
     pending: Number(row?.pending) || 0,
     eligible: Number(row?.eligible) || 0,
@@ -78,13 +81,15 @@ export async function briefBacklog(env, mayorId = null) {
 }
 
 export async function pendingBriefCount(env, mayorId = null) {
-  const binds = [aiBriefEngine(env)];
+  const binds = [];
   let sql = `SELECT COUNT(*) AS pending FROM items WHERE ${pendingBriefFilter()}`;
   if (mayorId) {
     sql += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
-  const row = await env.DB.prepare(sql).bind(...binds).first();
+  const row = binds.length
+    ? await env.DB.prepare(sql).bind(...binds).first()
+    : await env.DB.prepare(sql).first();
   return Number(row?.pending) || 0;
 }
 
@@ -93,9 +98,9 @@ export async function pendingBriefCount(env, mayorId = null) {
  * الخبر نفسه. الترتيب يوزّع الحصة على المكاتب بالتناوب: المكتب الأقل موجزات
  * مكتملة يأخذ الدور أولًا، فلا يبتلع مكتب واحد حصة اليوم كلها.
  */
-async function claimBriefRows(env, limit, mayorId, targetEngine) {
+async function claimBriefRows(env, limit, mayorId, slot) {
   const claimId = crypto.randomUUID();
-  const binds = [claimId, targetEngine];
+  const binds = [claimId, slot.id];
   let where = `${eligibleBriefFilter()}
     AND (items.brief_claimed_at IS NULL
       OR items.brief_claimed_at <= datetime('now', '-${CLAIM_TIMEOUT_MINUTES} minutes'))
@@ -113,13 +118,12 @@ async function claimBriefRows(env, limit, mayorId, targetEngine) {
   const fairness = mayorId
     ? ""
     : `(SELECT COUNT(*) FROM items done
-        WHERE done.mayor_id = items.mayor_id AND done.trans_engine = ?) ASC,`;
-  if (!mayorId) binds.push(targetEngine);
+        WHERE done.mayor_id = items.mayor_id AND ${completedBriefSql("done")}) ASC,`;
   binds.push(limit);
 
   await env.DB.prepare(
     `UPDATE items
-     SET brief_claim_id = ?, brief_claimed_at = datetime('now')
+     SET brief_claim_id = ?, brief_claimed_at = datetime('now'), brief_provider = ?
      WHERE id IN (
        SELECT items.id FROM items
        WHERE ${where}
@@ -205,17 +209,13 @@ export async function verifyPending(env, limit = 1, fetcher = undefined) {
   if (!aiBriefEnabled(env)) {
     return { verified: 0, rejected: 0, deferred: 0, ...(await verificationBacklog(env)) };
   }
-  const capacity = await availableAiCalls(env, "brief");
-  if (capacity <= 0) {
+  const ready = await slotsWithCapacity(env, "brief");
+  if (!ready.length) {
     const backlog = await verificationBacklog(env);
     return { verified: 0, rejected: 0, deferred: backlog.eligible > 0 ? 1 : 0, ...backlog };
   }
-  const rows = await claimVerifications(env, Math.min(limit, capacity));
-  let verified = 0;
-  let rejected = 0;
-  let deferred = 0;
-
-  for (const version of rows) {
+  const rows = await claimVerifications(env, Math.min(limit, ready.length));
+  const runOne = async (version) => {
     try {
       const checked = await verifyBriefSemantics(
         env,
@@ -234,7 +234,7 @@ export async function verifyPending(env, limit = 1, fetcher = undefined) {
       )
         .bind(checked.snippet_ar, checked.evidence, version.item_id, version.id)
         .run();
-      verified += 1;
+      return "verified";
     } catch (error) {
       if (isDeferredAiError(error) || transientAiError(error)) {
         await deferVerification(
@@ -243,14 +243,20 @@ export async function verifyPending(env, limit = 1, fetcher = undefined) {
           Number(error?.retryAfterSeconds) || 60,
           String(error?.message || error),
         );
-        deferred += 1;
-        break;
+        return "deferred";
       }
       await recordVerificationFailure(env, version.id, String(error?.message || error));
-      rejected += 1;
+      return "rejected";
     }
-  }
-  return { verified, rejected, deferred, ...(await verificationBacklog(env)) };
+  };
+
+  const outcomes = rows.length ? await Promise.all(rows.map((version) => runOne(version))) : [];
+  return {
+    verified: outcomes.filter((row) => row === "verified").length,
+    rejected: outcomes.filter((row) => row === "rejected").length,
+    deferred: outcomes.filter((row) => row === "deferred").length,
+    ...(await verificationBacklog(env)),
+  };
 }
 
 /**
@@ -302,19 +308,36 @@ async function storeBriefProblem(env, row, error) {
  * بينما يبلّغ النظام أن لا شيء معلّق.
  */
 async function markUnconfigured(env, mayorId) {
-  const binds = [aiBriefEngine(env)];
+  const binds = [];
   let sql = `UPDATE items
      SET trans_engine = '${BRIEF_STATE.UNCONFIGURED}', snippet_ar = '',
          title_ar = '${BRIEF_STATE_TITLES.unconfigured}' ||
            COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), items.mayor_id)
      WHERE ${briefScopeSql()}
-       AND (items.trans_engine IS NULL OR items.trans_engine <> ?)
+       AND NOT (${completedBriefSql()})
        AND IFNULL(items.trans_engine, '') <> '${BRIEF_STATE.UNCONFIGURED}'`;
   if (mayorId) {
     sql += " AND items.mayor_id = ?";
     binds.push(mayorId);
   }
-  await env.DB.prepare(sql).bind(...binds).run();
+  const stmt = env.DB.prepare(sql);
+  if (binds.length) await stmt.bind(...binds).run();
+  else await stmt.run();
+}
+
+export async function slotsWithCapacity(env, purpose = "brief") {
+  const ready = [];
+  for (const slot of boundSlots(env)) {
+    const n = await availableAiCalls(env, purpose, slot.id);
+    if (n > 0) ready.push({ slot, n });
+  }
+  ready.sort((a, b) => b.n - a.n);
+  return ready;
+}
+
+async function processClaimedRow(env, row, slot, fetcher) {
+  const documents = readSourceDocuments(row);
+  await storeBrief(env, row, await summarizeWithGemini(env, row, row, fetcher, documents, slot));
 }
 
 export async function translatePending(env, limit = 2, mayorId = null, fetcher = undefined) {
@@ -329,9 +352,8 @@ export async function translatePending(env, limit = 2, mayorId = null, fetcher =
       retryAfterSeconds: 0,
     };
   }
-  const targetEngine = aiBriefEngine(env);
-  const capacity = await availableAiCalls(env, "brief");
-  if (capacity <= 0) {
+  const ready = await slotsWithCapacity(env, "brief");
+  if (!ready.length) {
     const backlog = await briefBacklog(env, mayorId);
     return {
       summarized: 0,
@@ -343,29 +365,59 @@ export async function translatePending(env, limit = 2, mayorId = null, fetcher =
       retryAfterSeconds: 0,
     };
   }
-  const rows = await claimBriefRows(env, Math.min(limit, capacity), mayorId, targetEngine);
 
   let summarized = 0;
   let failed = 0;
   let deferred = 0;
   let retryAfterSeconds = 0;
 
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    try {
-      const documents = readSourceDocuments(row);
-      await storeBrief(env, row, await summarizeWithGemini(env, row, row, fetcher, documents));
-      summarized += 1;
-    } catch (error) {
-      const outcome = await storeBriefProblem(env, row, error);
-      retryAfterSeconds = Math.max(retryAfterSeconds, Number(error?.retryAfterSeconds) || 0);
-      if (outcome.deferred) {
-        deferred += 1;
-        // الميزانية مغلقة الآن؛ إبقاء بقية الصفوف حرة لتشغيل لاحق.
-        await releaseClaims(env, rows.slice(index + 1).map((rest) => rest.id));
-        break;
+  const noteOutcome = async (row, error, restIds) => {
+    const outcome = await storeBriefProblem(env, row, error);
+    retryAfterSeconds = Math.max(retryAfterSeconds, Number(error?.retryAfterSeconds) || 0);
+    if (outcome.deferred) {
+      deferred += 1;
+      if (restIds?.length) await releaseClaims(env, restIds);
+      return true;
+    }
+    failed += 1;
+    return false;
+  };
+
+  if (ready.length === 1) {
+    const { slot, n } = ready[0];
+    const rows = await claimBriefRows(env, Math.min(limit, n), mayorId, slot);
+    for (let index = 0; index < rows.length; index += 1) {
+      try {
+        await processClaimedRow(env, rows[index], slot, fetcher);
+        summarized += 1;
+      } catch (error) {
+        const stop = await noteOutcome(
+          rows[index],
+          error,
+          rows.slice(index + 1).map((rest) => rest.id),
+        );
+        if (stop) break;
       }
-      failed += 1;
+    }
+  } else {
+    const jobs = [];
+    for (const { slot } of ready.slice(0, limit)) {
+      const rows = await claimBriefRows(env, 1, mayorId, slot);
+      if (rows[0]) jobs.push({ row: rows[0], slot });
+    }
+    const outcomes = await Promise.all(
+      jobs.map(async (job) => {
+        try {
+          await processClaimedRow(env, job.row, job.slot, fetcher);
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, row: job.row, error };
+        }
+      }),
+    );
+    for (const outcome of outcomes) {
+      if (outcome.ok) summarized += 1;
+      else await noteOutcome(outcome.row, outcome.error);
     }
   }
 

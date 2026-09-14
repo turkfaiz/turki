@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle };`,
+    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes };`,
   )();
   return { ...exported, element };
 }
@@ -126,6 +126,65 @@ test("the dashboard renders every ordered section from real diagnostics", () => 
   assert.equal((html.match(/class="src /g) || []).length, data.sources.length);
   assert.ok(html.includes("meter"), "readouts must carry proportional meters");
   assert.match(page.element("diag-headline").textContent, /بانتظار التلخيص/);
+  assert.doesNotMatch(html, /٦ · نماذج القراءة/, "provider lanes stay off until diagnostics include them");
+});
+
+test("provider lanes are appended without replacing existing diagnostic sections", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.providers = {
+    queued: 3,
+    eligible: 2,
+    bound: 1,
+    lanes: [
+      {
+        id: "gemini",
+        nameAr: "جيميني",
+        model: "gemini-test",
+        bound: true,
+        enabled: true,
+        hasKey: true,
+        queued: 3,
+        inProgress: 1,
+        completed: 4,
+        failed: 0,
+        minIntervalMs: 4500,
+        vars: { key: "GEMINI_API_KEY", enabled: "GEMINI_ENABLED" },
+        budget: { remaining: 380, dailyLimit: 400, blocked: false, resumesInSeconds: 0 },
+      },
+      {
+        id: "deepseek",
+        nameAr: "ديبسيك",
+        model: "deepseek-flash",
+        bound: false,
+        enabled: true,
+        hasKey: false,
+        queued: 3,
+        inProgress: 0,
+        completed: 0,
+        failed: 0,
+        minIntervalMs: 800,
+        vars: { key: "DEEPSEEK_API_KEY", enabled: "DEEPSEEK_ENABLED" },
+        budget: { remaining: 2000, dailyLimit: 2000, blocked: false, resumesInSeconds: 0 },
+      },
+    ],
+  };
+  page.renderDiagnostics(data);
+  const html = page.element("diag-body").innerHTML;
+  for (const heading of [
+    "١ · القراءات الرئيسية",
+    "٢ · الأدوات",
+    "٣ · مسار التلخيص",
+    "٤ · آخر رصد",
+    "٥ · المصادر المعتمدة",
+    "٦ · نماذج القراءة",
+  ]) {
+    assert.ok(html.includes(heading), `missing section: ${heading}`);
+  }
+  assert.match(html, /جيميني/);
+  assert.match(html, /ديبسيك/);
+  assert.match(html, /جاري العمل/);
+  assert.match(html, /DEEPSEEK_API_KEY/);
 });
 
 test("a blocked AI budget is reported as a pause with a resume time", () => {
