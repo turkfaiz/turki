@@ -926,8 +926,13 @@ h1 {
   cursor: pointer;
 }
 .settings-body {
-  overflow: auto;
+  overflow: visible;
   padding: 16px 22px 28px;
+}
+.settings-scroll {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 .settings-office {
   border: 1px solid var(--rule);
@@ -968,9 +973,86 @@ h1 {
 }
 .settings-empty, .settings-error { padding: 24px 8px; color: var(--muted); }
 .settings-error { color: var(--bad); }
+.settings-add {
+  margin: 16px 22px 0;
+  padding: 0 0 18px;
+  border-bottom: 1px solid var(--rule);
+}
+.settings-add h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+.settings-add-note {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.settings-field input {
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  padding: 9px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+}
+.settings-field input:focus-visible {
+  outline: 2px solid rgba(138, 31, 52, 0.35);
+  outline-offset: 1px;
+}
+.settings-add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 14px;
+}
+.btn-add-mayor {
+  font: inherit;
+  font-weight: 700;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--navy);
+  color: #ffffff;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.btn-add-mayor:hover:not(:disabled) { background: #1d2939; }
+.btn-add-mayor:disabled { opacity: 0.45; cursor: not-allowed; }
+.settings-add-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.settings-add-status.is-error { color: var(--bad); }
+.settings-badge {
+  display: inline-block;
+  margin-inline-start: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(13, 148, 136, 0.12);
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
 
 @media (max-width: 900px) {
   .board-panels { grid-template-columns: 1fr; }
   .settings-platform { grid-template-columns: 1fr; }
+  .settings-fields { grid-template-columns: 1fr; }
   .mast { grid-template-columns: 1fr; }
 }

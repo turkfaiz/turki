@@ -1,4 +1,4 @@
-import { MAYORS, mayorById, matchesTopic } from "./mayors.js";
+import { MAYORS, listMayors, matchesTopic, resolveMayor } from "./mayors.js";
 import {
   APPROVED_SOURCES,
   ARTICLE_FETCH_BATCH,
@@ -212,7 +212,7 @@ async function ingestRow(env, mayor, scanId, row, seen) {
 }
 
 export async function fetchCandidate(env, candidate, extra = {}) {
-  const mayor = mayorById(candidate.mayor_id);
+  const mayor = await resolveMayor(env, candidate.mayor_id);
   if (!mayor) {
     await markCandidate(env, candidate.id, {
       fetch_status: "failed",
@@ -405,7 +405,7 @@ export async function pendingCandidateCount(env, mayorId = null, scanId = null) 
 }
 
 export async function pollOneSource(env, { sourceId, mayorId, scanId = null, query = "", fetch } = {}) {
-  const mayor = mayorById(mayorId);
+  const mayor = await resolveMayor(env, mayorId);
   const source = sourceById(sourceId);
   if (!mayor || !source) {
     return {
@@ -483,7 +483,8 @@ export async function runScan(env, { type, query = "", mayorId = null }, onProgr
   const scanId = await createScan(env, type, query, mayorId);
   await progress(STAGES.SOURCE_POLL, "يفحص كل مصدر معتمد على حدة");
 
-  const targets = mayorId ? [mayorById(mayorId)].filter(Boolean) : MAYORS;
+  const catalog = await listMayors(env);
+  const targets = mayorId ? catalog.filter((row) => row.id === mayorId) : catalog;
   if (!targets.length) {
     await env.DB.prepare(`UPDATE scans SET finished_at = ?, error_count = 1, notes = ? WHERE id = ?`)
       .bind(new Date().toISOString(), "mayor_not_found", scanId)

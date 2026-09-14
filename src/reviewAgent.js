@@ -1,6 +1,6 @@
 import { canonicalOriginal, detectTopic, eventMarkers } from "./brief.js";
 import { tokenOverlap } from "./dedup.js";
-import { isAboutMayor, mayorById } from "./mayors.js";
+import { isAboutMayor, listMayors, mayorById } from "./mayors.js";
 import { classifyItem } from "./publishers.js";
 import { REASON } from "./reasons.js";
 import { aiBriefEnabled, clusterWithGemini } from "./aiBrief.js";
@@ -89,8 +89,8 @@ export function clusterInboxItems(items) {
   return groups;
 }
 
-function trustItem(item) {
-  const mayor = mayorById(item.mayor_id);
+function trustItem(item, lookup = mayorById) {
+  const mayor = lookup(item.mayor_id);
   if (!mayor) {
     return { item, status: "excluded", reason: REASON.UNTRUSTED, stamp: null };
   }
@@ -132,7 +132,7 @@ function trustItem(item) {
  * 2) not about the selected mayor → غير متعلق بالعمدة المختار
  * 3) same event cluster → keep best publisher, rest تكرار لنفس الحدث
  */
-export function planInboxReview(items, groupsOverride = null) {
+export function planInboxReview(items, groupsOverride = null, lookup = mayorById) {
   const exclude = [];
   const trusted = [];
   const stamps = [];
@@ -142,13 +142,13 @@ export function planInboxReview(items, groupsOverride = null) {
       exclude.push({ id: raw.id, reason: REASON.UNRELATED });
       continue;
     }
-    const judged = trustItem(raw);
+    const judged = trustItem(raw, lookup);
     if (judged.stamp) stamps.push(judged.stamp);
     if (judged.status === "excluded" || judged.item.publisher_tier == null || Number(judged.item.publisher_tier) > 1) {
       exclude.push({ id: raw.id, reason: judged.reason || REASON.UNTRUSTED });
       continue;
     }
-    const mayor = mayorById(raw.mayor_id);
+    const mayor = lookup(raw.mayor_id);
     if (mayor && !isAboutMayor(`${raw.title} ${raw.snippet || ""} ${raw.article_text || ""}`, mayor)) {
       exclude.push({ id: raw.id, reason: REASON.UNRELATED });
       continue;
@@ -274,7 +274,9 @@ export async function reviewInbox(
     .bind(...binds)
     .all();
 
-  let plan = planInboxReview(results || []);
+  const catalog = await listMayors(env);
+  const lookup = (id) => catalog.find((row) => row.id === id) || mayorById(id);
+  let plan = planInboxReview(results || [], null, lookup);
   if (useAiMerge && aiBriefEnabled(env) && plan.trusted.length > 1) {
     const byMayor = new Map();
     for (const item of plan.trusted) {
@@ -288,12 +290,12 @@ export async function reviewInbox(
         continue;
       }
       try {
-        groups.push(...((await clusterWithGemini(env, items, mayorById(id))) || clusterInboxItems(items)));
+        groups.push(...((await clusterWithGemini(env, items, lookup(id))) || clusterInboxItems(items)));
       } catch {
         groups.push(...clusterInboxItems(items));
       }
     }
-    plan = planInboxReview(results || [], groups);
+    plan = planInboxReview(results || [], groups, lookup);
   }
   await applyStamps(env, plan.stamps);
   await applyMerges(env, plan.merges);
