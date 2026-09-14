@@ -313,4 +313,5 @@ test("the settings overlay stays closed until the user opens it", () => {
   const css = fs.readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
   assert.match(css, /\.settings-layer:not\(\[hidden\]\)\s*\{\s*display:\s*flex;/);
   assert.match(css, /\.settings-layer\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(css, /\.settings-office\.is-new/);
 });

@@ -995,7 +995,7 @@ $("add-mayor-form").addEventListener("submit", async (e) => {
   status.textContent = "جاري الحفظ…";
   status.classList.remove("is-error");
   try {
-    await api("/api/settings/mayors", {
+    const created = await api("/api/settings/mayors", {
       method: "POST",
       body: JSON.stringify(payload),
     });
@@ -1003,6 +1003,13 @@ $("add-mayor-form").addEventListener("submit", async (e) => {
     status.textContent = "أُضيف المكتب. يمكنك إضافة عمدة آخر من النموذج نفسه.";
     await loadSettings();
     await loadMayors();
+    const card = document.querySelector(
+      `.settings-office[data-mayor="${CSS.escape(created.mayor.id)}"]`,
+    );
+    if (card) {
+      card.classList.add("is-new");
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
   } catch (error) {
     status.textContent = error.message;
     status.classList.add("is-error");

@@ -941,7 +941,9 @@ h1 {
   padding: 16px;
   margin-bottom: 12px;
 }
-.settings-office h3 {
+.settings-office.is-new {
+  outline: 2px solid var(--teal);
+}
   margin: 0 0 4px;
   font-size: 18px;
 }
