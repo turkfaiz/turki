@@ -101,7 +101,7 @@ const REGISTRY = {
       name: "Europa Press Madrid",
       tier: 1,
       platform: "agency",
-      discovery: [step("rss", { url: "https://www.europapress.es/rss/rss.aspx?ch=283" })],
+      discovery: [step("rss", { url: "https://www.europapress.es/rss/rss.aspx?ch=289" })],
     },
     {
       domain: "elmundo.es",
@@ -198,7 +198,7 @@ const REGISTRY = {
       name: "المملكة",
       tier: 1,
       platform: "newspaper",
-      discovery: [step("rss", { url: "https://www.almamlakatv.com/rss.xml" })],
+      discovery: [step("rss", { url: "https://almamlakatv.com/rss.xml" })],
     },
   ],
   baghdad: [
@@ -224,7 +224,10 @@ const REGISTRY = {
       name: "الوكالة العراقية للأنباء",
       tier: 1,
       platform: "agency",
-      discovery: [step("rss", { url: "https://www.ina.iq/rss.xml" })],
+      discovery: [
+        step("rss", { url: "https://www.ina.iq/rss.xml" }),
+        step("newsroom", { url: "https://ina.iq/ar/local", adapter: "ina-local" }),
+      ],
     },
   ],
   muscat: [
@@ -254,7 +257,7 @@ const REGISTRY = {
       tier: 1,
       platform: "newspaper",
       discovery: [
-        step("newsroom", { url: "https://www.omanobserver.om/oman", adapter: "generic" }),
+        step("newsroom", { url: "https://www.omanobserver.om/oman", adapter: "oman-observer" }),
       ],
     },
   ],
@@ -278,7 +281,7 @@ const REGISTRY = {
       name: "NHK",
       tier: 1,
       platform: "agency",
-      discovery: [step("rss", { url: "https://www.nhk.or.jp/rss/news/cat0.xml" })],
+      discovery: [step("rss", { url: "https://www3.nhk.or.jp/rss/news/cat0.xml" })],
     },
     {
       domain: "asahi.com",

@@ -59,6 +59,26 @@ test("osaka newsroom snapshot yields municipal page urls", () => {
   assert.ok(!links.some((link) => /site_policy/.test(link.url)));
 });
 
+test("oman observer keeps numbered articles and drops section indexes", () => {
+  const html = fixture("oman-observer.html");
+  const links = extractArticleLinks(html, "https://www.omanobserver.om/oman", "oman-observer");
+  assert.equal(links.length, 2);
+  assert.ok(links.every((link) => /\/article\/\d+\//.test(link.url)));
+  assert.ok(!links.some((link) => /morearticles|terms-and-conditions/.test(link.url)));
+});
+
+test("a site adapter does not treat service indexes as articles", () => {
+  const html = `
+    <a href="/ar/Page.aspx?PAID=1">عن البلدية</a>
+    <a href="/ar/Page.aspx?PAID=2#NewsDetails&NID=2704">خبر بلدية مسقط</a>
+    <a href="/ar/SiteMap.aspx">الخريطة</a>`;
+  const links = extractArticleLinks(html, "https://www.mm.gov.om/ar/Page.aspx?PAID=2", "muscat-mm");
+  assert.deepEqual(
+    links.map((link) => link.url),
+    ["https://www.mm.gov.om/ar/Page.aspx?PAID=2&NID=2704"],
+  );
+});
+
 test("service and contact links are not treated as articles", () => {
   const html = fixture("service-links.html");
   const links = extractArticleLinks(
@@ -168,6 +188,30 @@ test("corrupt rss falls back to the newsroom strategy", async () => {
   assert.equal(result.used, "newsroom");
   assert.equal(result.health.ok, true);
   assert.ok(result.rows.some((row) => /NID=2704/.test(row.url)));
+});
+
+test("stalled rss keeps its article urls if the newsroom is empty", async () => {
+  const source = {
+    ...sourcesFor("muscat")[0],
+    discovery: [
+      { type: "rss", url: "https://www.mm.gov.om/ar/rss.aspx", enabled: true },
+      { type: "newsroom", url: "https://www.mm.gov.om/ar/Page.aspx?PAID=2", adapter: "muscat-mm", enabled: true },
+    ],
+  };
+  const mayor = MAYORS.find((row) => row.id === "muscat");
+  const xml = `<?xml version="1.0"?><rss><channel>
+    <item><title>بلدية مسقط</title>
+    <link>https://www.mm.gov.om/ar/Page.aspx?PAID=2#NewsDetails&amp;NID=1</link>
+    <pubDate>Mon, 01 Jan 2024 10:00:00 GMT</pubDate></item>
+  </channel></rss>`;
+  const fetchImpl = async (url) => {
+    if (String(url).includes("rss.aspx")) return response(200, xml);
+    return response(200, "<html><head><title>News</title></head><body><a href='/ar/Page.aspx?PAID=1'>عن البلدية</a></body></html>");
+  };
+  const result = await discoverSource(source, mayor, { fetch: fetchImpl });
+  assert.equal(result.health.ok, false);
+  assert.equal(result.health.status, "feed_stalled");
+  assert.ok(result.rows.some((row) => /NID=1/.test(row.url)));
 });
 
 test("one source failure does not prevent discovering another office source", async () => {

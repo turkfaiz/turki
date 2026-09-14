@@ -78,8 +78,8 @@ function defaultLooksLikeArticle(url, adapter) {
   const search = url.search;
   if (path === "/" || !path) return false;
   if (NON_ARTICLE_PATH.test(path)) return false;
-  if (adapter.articlePath && adapter.articlePath.test(path + search)) return true;
   if (adapter.requireQuery && !adapter.requireQuery.test(search)) return false;
+  if (adapter.articlePath) return adapter.articlePath.test(path + search);
   const segments = path.split("/").filter(Boolean);
   return (
     segments.length >= 2 ||
@@ -257,6 +257,17 @@ export const ADAPTERS = {
     anchors: true,
     articlePath: /\/[a-z0-9-]+\/?$/i,
     excludePath: /\/(category|tag|about|contact|privacy)\//i,
+  },
+  "oman-observer": {
+    jsonLd: false,
+    anchors: true,
+    articlePath: /\/article\/\d+\//i,
+    excludePath: /morearticles|terms-and-conditions|classifieds|epaper/i,
+  },
+  "ina-local": {
+    jsonLd: false,
+    anchors: true,
+    articlePath: /\/ar\/(?:local|political|economy)\/\d+/i,
   },
 };
 

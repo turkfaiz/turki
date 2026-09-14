@@ -116,6 +116,18 @@ async function runRss(strategy, source, mayor, state, extra) {
       fallback: false,
     };
   }
+  if (fetched.status === 202 || fetched.status === 403 || fetched.status === 401) {
+    return {
+      ok: false,
+      status: "worker_rejected",
+      connect_status: "worker_rejected",
+      parse_status: "failed",
+      rows: [],
+      http_status: fetched.status,
+      fallback: true,
+      fail_reason: `http_${fetched.status}`,
+    };
+  }
   const pageError = looksLikeErrorPage(fetched.body, fetched.status, fetched.url);
   if (!fetched.ok || pageError.error) {
     return {
@@ -415,6 +427,8 @@ export async function discoverSource(source, mayor, extra = {}) {
   }
 
   let last = null;
+  let retained = [];
+  let retainedStatus = "";
   for (const strategy of steps) {
     const runner = RUNNERS[strategy.type];
     if (!runner) continue;
@@ -439,6 +453,10 @@ export async function discoverSource(source, mayor, extra = {}) {
     health.parse_status = last.parse_status || health.parse_status;
     health.etag = last.etag || health.etag;
     health.last_modified = last.last_modified || health.last_modified;
+    if (last.rows?.length) {
+      retained = last.rows;
+      retainedStatus = last.status;
+    }
     if (last.ok) {
       const rows = filterApproved(last.rows || [], mayor.id);
       health.ok = true;
@@ -456,12 +474,15 @@ export async function discoverSource(source, mayor, extra = {}) {
     if (!last.fallback) break;
   }
 
+  const leftover = filterApproved(retained, mayor.id);
   health.ok = false;
-  health.items = 0;
-  health.discovered = 0;
+  health.items = leftover.length;
+  health.discovered = leftover.length;
+  health.last_discovered_url = leftover[0]?.url || "";
+  if (leftover.length && retainedStatus) health.status = retainedStatus;
   health.ms = Date.now() - started;
   health.requests = state.requests;
-  return { source, rows: last?.rows ? filterApproved(last.rows, mayor.id) : [], health };
+  return { source, rows: leftover, health };
 }
 
 export async function discoverById(sourceId, mayor, extra = {}) {
