@@ -867,6 +867,107 @@ h1 {
 }
 .provider-counts b { color: var(--navy); font-size: 13px; }
 
+.btn-settings {
+  align-self: start;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+}
+.btn-settings[aria-expanded="true"],
+.btn-settings:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+.settings-layer {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.45);
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  padding: 16px;
+}
+.settings-panel {
+  width: min(980px, 100%);
+  margin: 0 auto;
+  background: var(--paper);
+  border-radius: calc(var(--radius) + 4px);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
+}
+.settings-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+  padding: 20px 22px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.settings-close {
+  border: 1px solid var(--rule);
+  background: var(--card);
+  font: inherit;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.settings-body {
+  overflow: auto;
+  padding: 16px 22px 28px;
+}
+.settings-office {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--card);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.settings-office h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+.settings-meta {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+.settings-platforms {
+  display: grid;
+  gap: 10px;
+}
+.settings-platform {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 16px;
+  align-items: center;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.settings-platform small { color: var(--muted); display: block; }
+.settings-platform.is-off { opacity: 0.65; }
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.settings-empty, .settings-error { padding: 24px 8px; color: var(--muted); }
+.settings-error { color: var(--bad); }
+
 @media (max-width: 900px) {
   .board-panels { grid-template-columns: 1fr; }
+  .settings-platform { grid-template-columns: 1fr; }
+  .mast { grid-template-columns: 1fr; }
 }

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui12" />
+    <link rel="stylesheet" href="/styles.css?v=ui14" />
   </head>
   <body>
     <div class="sheet">
@@ -23,6 +23,7 @@
           <b class="num">Sunday 06:00</b>
           <span>Asia/Riyadh</span>
         </div>
+        <button type="button" class="btn-settings" id="settings-btn" aria-expanded="false">الإعدادات</button>
       </header>
 
       <form id="search-form" class="command">
@@ -76,6 +77,20 @@
         </aside>
       </section>
     </div>
-    <script src="/app.js?v=ui12"></script>
+
+    <div class="settings-layer" id="settings-layer" hidden>
+      <div class="settings-panel" role="dialog" aria-labelledby="settings-title">
+        <div class="settings-head">
+          <div>
+            <p class="gazette">الإعدادات</p>
+            <h2 id="settings-title">العمداء ومنصات الرصد</h2>
+            <p class="sub">المصادر من السجل المعتمد فقط. لا تُضاف نطاقات من هنا.</p>
+          </div>
+          <button type="button" class="settings-close" id="settings-close">إغلاق</button>
+        </div>
+        <div id="settings-body" class="settings-body">جاري التحميل…</div>
+      </div>
+    </div>
+    <script src="/app.js?v=ui14"></script>
   </body>
 </html>

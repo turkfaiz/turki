@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings };`,
   )();
   return { ...exported, element };
 }
@@ -245,4 +245,38 @@ test("a registry with failing hosts is not labeled as stopped", () => {
   assert.match(html, /تعمل · بعضها متعثر/);
   assert.doesNotMatch(html, />متوقفة</);
   assert.match(html, /class="tool warn"/);
+});
+
+test("settings render every mayor office and its platforms", () => {
+  const page = loadPageScript();
+  const html = page.renderSettings({
+    offices: [
+      {
+        id: "turin",
+        name_ar: "ستيفانو لو روسو",
+        name_en: "Stefano Lo Russo",
+        name_native: "Stefano Lo Russo",
+        city_ar: "تورينو",
+        city_en: "Turin",
+        country_ar: "إيطاليا",
+        title_ar: "عمدة تورينو",
+        title_en: "Mayor of Turin",
+        platforms: [
+          {
+            id: "turin:comune.torino.it",
+            name: "Comune di Torino",
+            kind: "feed",
+            enabled: true,
+            platform_ar: "موقع رسمي",
+            strategies: [{ type: "rss", type_ar: "RSS" }],
+            last_checked_at: null,
+            last_discovery_at: null,
+            operational: { label: "لم تُفحص بعد في هذه البيئة" },
+          },
+        ],
+      },
+    ],
+  });
+  assert.match(html, /العمداء|ستيفانو لو روسو|عمدة تورينو|Mayor of Turin|موقع رسمي|RSS/);
+  assert.match(html, /data-source-toggle="turin:comune.torino.it"/);
 });

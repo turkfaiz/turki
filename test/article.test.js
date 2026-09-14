@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   articleIsAboutMayor,
   extractArticle,
-  extractJinaMarkdown,
   isListingPageUrl,
   usableArticle,
 } from "../src/article.js";
@@ -78,14 +77,6 @@ test("an updated timestamp is not treated as the original publication date", () 
     "https://example.com/old-page",
   );
   assert.equal(article.published_at, null);
-});
-
-test("jina markdown extractor keeps the source url", () => {
-  const md = `Title: Lo Russo on the grid\nURL Source: https://www.lastampa.it/a\nPublished Time: 2026-09-08T10:00:00Z\n\nMarkdown Content:\nThe mayor spoke about rete vecchia.`;
-  const art = extractJinaMarkdown(md, "https://example.com");
-  assert.equal(art.title, "Lo Russo on the grid");
-  assert.equal(art.url, "https://www.lastampa.it/a");
-  assert.ok(parseDate(art.published_at));
 });
 
 test("a redirected home page is not accepted from the RSS headline alone", () => {

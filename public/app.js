@@ -290,16 +290,27 @@ function sourceTone(source) {
  * هذا التشغيل لم يفتحه بعد. النص هنا يفصل بين الأمرين بصراحة.
  */
 function sourceTitle(source) {
-  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${source.kind === "feed" ? "تغذية RSS" : "صفحة أخبار الموقع"}`;
+  const kindLabel =
+    {
+      feed: "تغذية RSS",
+      page: "غرفة أخبار",
+      sitemap: "Sitemap",
+      api: "واجهة الموقع",
+      search: "بحث داخلي",
+      browser: "Browser",
+    }[source.kind] || source.kind;
+  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${kindLabel}`;
   const curated = source.verified
     ? `مُتحقق منه بالفحص عند الإعداد (${source.curated_at || "—"})`
     : `فُحص عند الإعداد ولم يستجب من شبكة الفحص، وبقي لأنه المصدر الأصلي للمدينة`;
-  const runtime = source.last_ok_at
-    ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
-    : source.last_status
-      ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
-      : "لم يُشغّل بعد في هذه البيئة";
-  return `${role}\n${curated}\n${runtime}`;
+  const operational = source.operational?.label
+    ? `الحالة: ${source.operational.label}`
+    : source.last_ok_at
+      ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
+      : source.last_status
+        ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
+        : "لم يُشغّل بعد في هذه البيئة";
+  return `${role}\n${curated}\n${operational}`;
 }
 
 function providerFromItem(item) {
@@ -683,7 +694,9 @@ function delay(ms) {
 
 const STAGE_LABELS = {
   queued: "بانتظار البدء",
-  discovering: "بحث مباشر بالاسم والمنصب",
+  discovering: "فحص المصادر المعتمدة",
+  source_poll: "فحص مصدر واحد",
+  article_fetch: "فتح المقالات المكتشفة",
   verifying: "فتح الروابط والتحقق",
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
@@ -866,6 +879,103 @@ async function resumeActiveSearch() {
     syncSearchEnabled();
   }
 }
+
+function renderSettings(payload) {
+  const box = $("settings-body");
+  if (!box) return "";
+  if (payload?.error) {
+    box.innerHTML = `<p class="settings-error">${escapeHtml(payload.error)}</p>`;
+    return box.innerHTML;
+  }
+  const offices = payload?.offices || [];
+  if (!offices.length) {
+    box.innerHTML = `<p class="settings-empty">لا عمداء في السجل.</p>`;
+    return box.innerHTML;
+  }
+  box.innerHTML = offices
+    .map((office) => {
+      const platforms = office.platforms || [];
+      return `<article class="settings-office" data-mayor="${escapeHtml(office.id)}">
+        <h3>${escapeHtml(office.name_ar)}</h3>
+        <p class="settings-meta">
+          ${escapeHtml(office.name_en)} · ${escapeHtml(office.name_native)}<br>
+          ${escapeHtml(office.city_ar)}${office.city_en ? ` / ${escapeHtml(office.city_en)}` : ""} — ${escapeHtml(office.country_ar)}<br>
+          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}
+        </p>
+        <div class="settings-platforms">
+          ${
+            platforms.length
+              ? platforms
+                  .map((platform) => {
+                    const types = (platform.strategies || [])
+                      .map((step) => step.type_ar || step.type)
+                      .join(" ← ");
+                    const checked = platform.enabled ? "checked" : "";
+                    const off = platform.enabled ? "" : " is-off";
+                    return `<div class="settings-platform${off}">
+                      <div>
+                        <b>${escapeHtml(platform.name)}</b>
+                        <small>${escapeHtml(platform.platform_ar || "")} · ${escapeHtml(types || platform.kind)}</small>
+                        <small>آخر فحص: ${escapeHtml(fmtDate(platform.last_checked_at))} · آخر اكتشاف: ${escapeHtml(fmtDate(platform.last_discovery_at))}</small>
+                        <small>${escapeHtml(platform.operational?.label || "—")}</small>
+                      </div>
+                      <label class="settings-toggle">
+                        <input type="checkbox" data-source-toggle="${escapeHtml(platform.id)}" ${checked}>
+                        ${platform.enabled ? "مفعّلة" : "متوقفة"}
+                      </label>
+                    </div>`;
+                  })
+                  .join("")
+              : `<p class="settings-empty">لا منصات مسجّلة لهذا المكتب.</p>`
+          }
+        </div>
+      </article>`;
+    })
+    .join("");
+  return box.innerHTML;
+}
+
+async function loadSettings() {
+  const box = $("settings-body");
+  box.innerHTML = `<p class="settings-empty">جاري التحميل…</p>`;
+  try {
+    const data = await api("/api/settings/offices");
+    renderSettings(data);
+  } catch (error) {
+    renderSettings({ error: `تعذر تحميل الإعدادات: ${error.message}` });
+  }
+}
+
+function openSettings(open) {
+  const layer = $("settings-layer");
+  const btn = $("settings-btn");
+  layer.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) loadSettings();
+}
+
+$("settings-btn").addEventListener("click", () => {
+  openSettings($("settings-layer").hidden);
+});
+$("settings-close").addEventListener("click", () => openSettings(false));
+$("settings-layer").addEventListener("click", (e) => {
+  if (e.target === $("settings-layer")) openSettings(false);
+});
+$("settings-body").addEventListener("change", async (e) => {
+  const input = e.target.closest("input[data-source-toggle]");
+  if (!input) return;
+  input.disabled = true;
+  try {
+    await api(`/api/settings/sources/${encodeURIComponent(input.dataset.sourceToggle)}`, {
+      method: "POST",
+      body: JSON.stringify({ enabled: input.checked }),
+    });
+    await loadSettings();
+  } catch (error) {
+    input.checked = !input.checked;
+    renderSettings({ error: `تعذر حفظ الحالة: ${error.message}` });
+  }
+});
 
 loadMayors().then(async () => {
   await refreshAll();
