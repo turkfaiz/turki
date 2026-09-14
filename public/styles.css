@@ -890,10 +890,13 @@ h1 {
   inset: 0;
   background: rgba(16, 24, 40, 0.45);
   z-index: 40;
-  display: flex;
+  display: none;
   justify-content: center;
   align-items: stretch;
   padding: 16px;
+}
+.settings-layer:not([hidden]) {
+  display: flex;
 }
 .settings-panel {
   width: min(980px, 100%);
