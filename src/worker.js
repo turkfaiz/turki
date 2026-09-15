@@ -30,8 +30,13 @@ import {
   translatePending,
   verifyPending,
 } from "./translate.js";
-import { providerLaneSnapshot } from "./aiDispatch.js";
-import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
+import {
+  aggregateSlotBudget,
+  boundSlotWaitMs,
+  providerLaneSnapshot,
+  slotRuntimeStatuses,
+} from "./aiDispatch.js";
+import { pruneAiBudget } from "./aiBudget.js";
 import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
   currentVersion,
@@ -892,7 +897,7 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     if (summary.pending === 0 && checked.pending === 0) break;
     const still = await slotsWithCapacity(env, "brief");
     if (still.length) continue;
-    const waitMs = Math.max(Number(budgetSettings(env).minIntervalMs) || 0, 1000);
+    const waitMs = boundSlotWaitMs(env);
     if (Date.now() - startedAt + waitMs >= maxMs) {
       if (summary.pending > 0) {
         await enqueueBriefPump(env, { delaySeconds: Math.max(1, Math.ceil(waitMs / 1000)) });
@@ -1483,6 +1488,71 @@ function authRequired() {
   });
 }
 
+function publicSlotStatus(slot, { includeHasKey = false } = {}) {
+  const budget = slot.budget || {};
+  const row = {
+    id: slot.id,
+    nameAr: slot.nameAr,
+    model: slot.model,
+    bound: Boolean(slot.bound),
+    enabled: Boolean(slot.enabled),
+    blocked: Boolean(slot.blocked),
+    budget: {
+      remaining: Number(budget.remaining) || 0,
+      dailyLimit: Number(budget.dailyLimit) || 0,
+      used: Number(budget.used) || 0,
+      minIntervalMs: Number(budget.minIntervalMs) || 0,
+      resumesInSeconds: Number(budget.resumesInSeconds) || 0,
+      blockReason: budget.blockReason || null,
+    },
+    lastError: slot.lastError
+      ? { code: String(slot.lastError.code), at: slot.lastError.at || null }
+      : null,
+  };
+  if (includeHasKey) row.hasKey = Boolean(slot.hasKey);
+  return row;
+}
+
+function aiToolChips(slots) {
+  return slots.map((slot) => {
+    const budget = slot.budget || {};
+    let ok = true;
+    let detail = `يقرأ الصفحة ويكتب الموجز بنداء واحد · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`;
+    if (!slot.enabled) {
+      ok = false;
+      detail = "موقوف من إعداد التفعيل";
+    } else if (!slot.bound) {
+      ok = false;
+      detail = "المفتاح غير مربوط";
+    } else if (budget.blocked || Number(budget.remaining) <= 0) {
+      ok = "warn";
+      detail = budget.blocked
+        ? `متوقف مؤقتًا · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
+        : `نفدت الحصة اليومية · بقي 0 من ${budget.dailyLimit} نداءً`;
+    }
+    if (slot.lastError?.code) {
+      detail += ` · آخر خطأ: ${slot.lastError.code}`;
+    }
+    return {
+      id: `ai-${slot.id}`,
+      name: `الذكاء الاصطناعي — ${slot.nameAr} — ${slot.model}`,
+      icon: "spark",
+      ok,
+      detail,
+    };
+  });
+}
+
+async function slotOverview(env) {
+  const slots = await slotRuntimeStatuses(env);
+  return {
+    slots,
+    budget: aggregateSlotBudget(slots),
+    configured: aiBriefEnabled(env),
+    model: slots.find((slot) => slot.bound)?.model || null,
+  };
+}
+
 async function publicHealth(env) {
   const ai = await env.DB.prepare(
     `SELECT
@@ -1501,14 +1571,15 @@ async function publicHealth(env) {
      ORDER BY count DESC
      LIMIT 5`,
   ).all();
+  const overview = await slotOverview(env);
   return {
     ok: true,
     cron: "Sunday 06:00 Asia/Riyadh",
     briefDrainCron: "every 10 minutes",
     queue: Boolean(env.SCAN_QUEUE),
     ai: {
-      configured: aiBriefEnabled(env),
-      model: env.GEMINI_MODEL || null,
+      configured: overview.configured,
+      model: overview.model,
       pending: Number(ai?.pending) || 0,
       waitingQuota: Number(ai?.waitingQuota) || 0,
       unconfigured: Number(ai?.unconfigured) || 0,
@@ -1517,7 +1588,8 @@ async function publicHealth(env) {
       retryable: await pendingBriefCount(env),
       maxAttempts: MAX_BRIEF_ATTEMPTS,
       errors: results || [],
-      budget: await budgetState(env),
+      budget: overview.budget,
+      slots: overview.slots.map((slot) => publicSlotStatus(slot)),
     },
   };
 }
@@ -1565,6 +1637,7 @@ async function stats(env) {
      FROM items
      WHERE COALESCE(published_at, created_at) >= datetime('now', '-7 days')`,
   ).first();
+  const overview = await slotOverview(env);
   return {
     inbox: row?.inbox || 0,
     approved: row?.approved || 0,
@@ -1579,9 +1652,11 @@ async function stats(env) {
       ai_brief: aiBriefEnabled(env) ? "ready" : "unconfigured",
     },
     ai: {
-      configured: aiBriefEnabled(env),
+      configured: overview.configured,
+      model: overview.model,
       pending: await pendingBriefCount(env),
-      budget: await budgetState(env),
+      budget: overview.budget,
+      slots: overview.slots.map((slot) => publicSlotStatus(slot)),
     },
     registry: await registrySummary(env),
   };
@@ -1631,7 +1706,11 @@ async function diagnostics(env) {
      FROM scans ORDER BY started_at DESC LIMIT 1`,
   ).first();
   const registry = await registrySummary(env);
-  const budget = await budgetState(env);
+  const overview = await slotOverview(env);
+  const budget = overview.budget;
+  const mergeSlot =
+    overview.slots.find((slot) => slot.id === "gemini" && slot.bound) ||
+    overview.slots.find((slot) => slot.bound);
   const pageSources = APPROVED_SOURCES.filter((source) =>
     (source.discovery || []).some((step) => step.type === "newsroom"),
   ).length;
@@ -1653,23 +1732,13 @@ async function diagnostics(env) {
         ok: readerOk,
         detail: `يفتح كل رابط ويستخرج نص الخبر · ${pageSources} مصدرًا يُقرأ من صفحته لعدم نشره تغذية`,
       },
-      {
-        id: "ai",
-        name: `الذكاء الاصطناعي — ${env.GEMINI_MODEL || "غير محدد"}`,
-        icon: "spark",
-        ok: Boolean(env.GEMINI_API_KEY) && !budget.blocked,
-        detail: Boolean(env.GEMINI_API_KEY)
-          ? budget.blocked
-            ? `متوقف مؤقتًا · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
-            : `يقرأ الصفحة ويكتب الموجز بنداء واحد · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
-          : "المفتاح غير مربوط",
-      },
+      ...aiToolChips(overview.slots),
       {
         id: "merge",
         name: "دمج الأحداث",
         icon: "merge",
-        ok: Boolean(env.GEMINI_API_KEY),
-        detail: `يوحّد تغطية الحدث نفسه عبر اللغات والمنصات · حصته ${budget.mergeLimit} نداءً يوميًا`,
+        ok: overview.configured,
+        detail: `يوحّد تغطية الحدث نفسه عبر اللغات والمنصات · حصته ${Number(mergeSlot?.budget?.mergeLimit) || 0} نداءً يوميًا`,
       },
       {
         id: "queue",
@@ -1717,9 +1786,10 @@ async function diagnostics(env) {
       errors: errors || [],
     },
     ai: {
-      configured: aiBriefEnabled(env),
-      model: env.GEMINI_MODEL || null,
+      configured: overview.configured,
+      model: overview.model,
       budget,
+      slots: overview.slots.map((slot) => publicSlotStatus(slot, { includeHasKey: true })),
     },
     verification: await env.DB.prepare(
       `SELECT
@@ -2153,7 +2223,13 @@ async function handleApi(request, env) {
 
   if (path === "/api/briefs/drain" && method === "POST") {
     const drained = await drainBriefs(env);
-    return json({ ok: true, ...drained, budget: await budgetState(env) });
+    const overview = await slotOverview(env);
+    return json({
+      ok: true,
+      ...drained,
+      budget: overview.budget,
+      slots: overview.slots.map((slot) => publicSlotStatus(slot)),
+    });
   }
 
   if (path === "/api/search" && method === "POST") {

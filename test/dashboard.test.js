@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget };`,
   )();
   return { ...exported, element };
 }
@@ -187,6 +187,94 @@ test("provider lanes are appended without replacing existing diagnostic sections
   assert.match(html, /DEEPSEEK_API_KEY/);
   assert.doesNotMatch(html, /الطابور مشترك/);
   assert.match(html, /يُسند لفتحة واحدة/);
+});
+
+test("status cards sum remaining quota across every bound slot", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.ai.slots = [
+    {
+      id: "gemini",
+      nameAr: "جيميني",
+      model: "gemini-test",
+      bound: true,
+      enabled: true,
+      blocked: false,
+      budget: { remaining: 10, dailyLimit: 400, blocked: false, minIntervalMs: 4500, mergeLimit: 120 },
+    },
+    {
+      id: "deepseek",
+      nameAr: "ديبسيك",
+      model: "deepseek-flash",
+      bound: true,
+      enabled: true,
+      blocked: false,
+      budget: { remaining: 20, dailyLimit: 2000, blocked: false, minIntervalMs: 800, mergeLimit: 600 },
+    },
+    {
+      id: "qwen",
+      nameAr: "كوين",
+      model: "qwen-flash",
+      bound: true,
+      enabled: true,
+      blocked: false,
+      budget: { remaining: 30, dailyLimit: 2000, blocked: false, minIntervalMs: 800, mergeLimit: 600 },
+    },
+  ];
+  const budget = page.displayBudget(data);
+  assert.equal(budget.remaining, 60);
+  assert.equal(budget.dailyLimit, 4400);
+  assert.equal(budget.blocked, false);
+  page.renderDiagnostics(data);
+  const html = page.element("diag-body").innerHTML;
+  assert.match(html, /60 \/ 4,400/);
+  assert.match(html, /جيميني، ديبسيك، كوين/);
+});
+
+test("a terminal slot error is shown on that provider card only", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.providers = {
+    queued: 1,
+    bound: 2,
+    lanes: [
+      {
+        id: "gemini",
+        nameAr: "جيميني",
+        model: "gemini-test",
+        bound: true,
+        enabled: true,
+        hasKey: true,
+        queued: 1,
+        inProgress: 0,
+        completed: 0,
+        failed: 1,
+        minIntervalMs: 4500,
+        vars: { key: "GEMINI_API_KEY", enabled: "GEMINI_ENABLED" },
+        budget: { remaining: 380, dailyLimit: 400, blocked: false, resumesInSeconds: 0 },
+        lastError: { code: "ai_http_402:invalid_request_error", at: "2026-09-15 08:00:00" },
+      },
+      {
+        id: "deepseek",
+        nameAr: "ديبسيك",
+        model: "deepseek-flash",
+        bound: true,
+        enabled: true,
+        hasKey: true,
+        queued: 0,
+        inProgress: 0,
+        completed: 0,
+        failed: 0,
+        minIntervalMs: 800,
+        vars: { key: "DEEPSEEK_API_KEY", enabled: "DEEPSEEK_ENABLED" },
+        budget: { remaining: 2000, dailyLimit: 2000, blocked: false, resumesInSeconds: 0 },
+      },
+    ],
+  };
+  page.renderDiagnostics(data);
+  const html = page.element("diag-body").innerHTML;
+  assert.match(html, /غير مدفوع/);
+  assert.match(html, /ديبسيك/);
 });
 
 test("a blocked AI budget is reported as a pause with a resume time", () => {

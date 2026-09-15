@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureDb } from "../src/worker.js";
-import { assignPendingLanes, providerLaneSnapshot } from "../src/aiDispatch.js";
+import { assignPendingLanes, boundSlotWaitMs, providerLaneSnapshot, slotRuntimeStatuses } from "../src/aiDispatch.js";
 import { briefBacklog, translatePending } from "../src/translate.js";
 import { noteAiFailure } from "../src/aiBudget.js";
 import { createTestD1 } from "./helpers/d1.js";
@@ -232,4 +232,55 @@ test("a 402 from DeepSeek defers the page so Gemini can still read it", async ()
   const second = await translatePending(env, 3, null, fetcher);
   assert.equal(second.summarized, 1);
   assert.match(db.one(`SELECT trans_engine FROM items WHERE id = 'a'`).trans_engine, /gemini|qwen/);
+});
+
+test("drain wait follows the fastest bound slot, not Gemini alone", () => {
+  assert.equal(
+    boundSlotWaitMs({
+      GEMINI_API_KEY: "g",
+      DEEPSEEK_API_KEY: "d",
+      QWEN_API_KEY: "q",
+      AI_MIN_INTERVAL_MS: "4500",
+      DEEPSEEK_MIN_INTERVAL_MS: "800",
+      QWEN_MIN_INTERVAL_MS: "800",
+    }),
+    1000,
+  );
+  assert.equal(
+    boundSlotWaitMs({
+      GEMINI_API_KEY: "g",
+      AI_MIN_INTERVAL_MS: "4500",
+    }),
+    4500,
+  );
+});
+
+test("terminal slot errors stay on the failed provider, not the rotated pending one", async () => {
+  const { db, env } = await desk();
+  insertPending(db, "dead");
+  insertPending(db, "rotated");
+  db.exec(`
+    UPDATE items
+       SET trans_engine = 'brief-ai-error',
+           brief_provider = 'gemini',
+           brief_error = 'ai_http_402:invalid_request_error',
+           brief_attempted_at = datetime('now')
+     WHERE id = 'dead';
+    UPDATE items
+       SET trans_engine = 'brief-pending',
+           brief_provider = 'deepseek',
+           brief_error = 'ai_ungrounded_headline',
+           brief_attempted_at = datetime('now')
+     WHERE id = 'rotated';
+  `);
+
+  const slots = await slotRuntimeStatuses(env);
+  const byId = Object.fromEntries(slots.map((slot) => [slot.id, slot]));
+  assert.equal(byId.gemini.lastError?.code, "ai_http_402:invalid_request_error");
+  assert.equal(byId.deepseek.lastError, null);
+  assert.equal(byId.qwen.lastError, null);
+
+  const snap = await providerLaneSnapshot(env, await briefBacklog(env));
+  assert.equal(snap.lanes.find((lane) => lane.id === "gemini")?.lastError?.code, "ai_http_402:invalid_request_error");
+  assert.equal(snap.lanes.find((lane) => lane.id === "deepseek")?.lastError, null);
 });

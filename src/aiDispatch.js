@@ -6,13 +6,15 @@
  * تمنع ركن العمل عند نموذج متوقف بينما الآخرون فارغون.
  */
 
-import { budgetState } from "./aiBudget.js";
+import { budgetSettings, budgetState } from "./aiBudget.js";
 import { BRIEF_STATE } from "./aiBrief.js";
 import {
   AI_SLOTS,
   allSlotBindings,
   boundSlots,
   completedBriefSql,
+  slotBinding,
+  slotIntervalMs,
 } from "./aiProviders.js";
 
 export const MAX_BRIEF_ATTEMPTS = 5;
@@ -163,10 +165,104 @@ export function failoverAttemptLimit(env) {
 }
 
 /**
+ * آخر خطأ نهائي لكل فتحة. أخطاء التدوير تُكتب على الفتحة التالية وهي ما زالت
+ * معلّقة، فلا تُحسب هنا حتى لا يُتهم ديبسيك برفض جيميني.
+ */
+export async function lastErrorsByProvider(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT brief_provider AS id, brief_error AS code, brief_attempted_at AS at
+     FROM items
+     WHERE trans_engine = '${BRIEF_STATE.FAILED}'
+       AND IFNULL(brief_provider, '') <> ''
+       AND IFNULL(brief_error, '') <> ''
+     ORDER BY brief_attempted_at DESC, rowid DESC`,
+  ).all();
+  const out = {};
+  for (const row of results || []) {
+    const id = String(row.id || "").toLowerCase();
+    if (!id || out[id]) continue;
+    out[id] = { code: String(row.code), at: row.at || null };
+  }
+  return out;
+}
+
+export function aggregateSlotBudget(slots) {
+  const bound = (slots || []).filter((row) => row.bound);
+  if (!bound.length) {
+    return {
+      remaining: 0,
+      dailyLimit: 0,
+      used: 0,
+      mergeLimit: 0,
+      minIntervalMs: 0,
+      blocked: false,
+      blockReason: null,
+      resumesInSeconds: 0,
+    };
+  }
+  const remaining = bound.reduce((sum, row) => sum + Number(row.budget?.remaining || 0), 0);
+  const dailyLimit = bound.reduce((sum, row) => sum + Number(row.budget?.dailyLimit || 0), 0);
+  const used = bound.reduce((sum, row) => sum + Number(row.budget?.used || 0), 0);
+  const mergeLimit = bound.reduce((sum, row) => sum + Number(row.budget?.mergeLimit || 0), 0);
+  const minIntervalMs = Math.min(
+    ...bound.map((row) => Number(row.budget?.minIntervalMs ?? row.minIntervalMs ?? 0)),
+  );
+  const allBlocked = bound.every((row) => row.blocked || row.budget?.blocked);
+  const resumesInSeconds = allBlocked
+    ? Math.min(...bound.map((row) => Number(row.budget?.resumesInSeconds || 0)))
+    : 0;
+  const blockReason = allBlocked
+    ? bound.find((row) => row.budget?.blockReason)?.budget.blockReason || "provider_cooldown"
+    : null;
+  return {
+    remaining,
+    dailyLimit,
+    used,
+    mergeLimit,
+    minIntervalMs,
+    blocked: allBlocked,
+    blockReason,
+    resumesInSeconds,
+  };
+}
+
+/** انتظار التصريف يتبع أسرع فتحة مربوطة، لا تباعد جيميني وحده. */
+export function boundSlotWaitMs(env) {
+  const bound = boundSlots(env);
+  const intervals = bound.length
+    ? bound.map((slot) => slotIntervalMs(env, slot))
+    : [budgetSettings(env).minIntervalMs];
+  const fastest = Math.min(...intervals.map((value) => Number(value) || 0));
+  return Math.max(fastest, 1000);
+}
+
+export async function slotRuntimeStatuses(env) {
+  const errors = await lastErrorsByProvider(env);
+  const statuses = [];
+  for (const slot of AI_SLOTS) {
+    const binding = slotBinding(env, slot);
+    const budget = await budgetState(env, slot.id);
+    statuses.push({
+      id: binding.id,
+      nameAr: binding.nameAr,
+      model: binding.model,
+      bound: binding.bound,
+      enabled: binding.enabled,
+      hasKey: binding.hasKey,
+      blocked: Boolean(budget.blocked),
+      budget,
+      lastError: errors[slot.id] || null,
+    });
+  }
+  return statuses;
+}
+
+/**
  * لقطة صادقة لكل فتحة. queued هنا أخبار هذه الفتحة فقط.
  */
 export async function providerLaneSnapshot(env, backlog) {
   const bindings = allSlotBindings(env);
+  const errors = await lastErrorsByProvider(env);
   const laneSql = AI_SLOTS.map(
     (slot) =>
       `SUM(CASE WHEN trans_engine LIKE 'brief-ai-${slot.id}-v2:%' THEN 1 ELSE 0 END) AS ${slot.id}_done,
@@ -184,6 +280,7 @@ export async function providerLaneSnapshot(env, backlog) {
       completed: Number(counts?.[`${binding.id}_done`]) || 0,
       failed: Number(counts?.[`${binding.id}_fail`]) || 0,
       budget: await budgetState(env, binding.id),
+      lastError: errors[binding.id] || null,
     });
   }
   const unassigned = Number(

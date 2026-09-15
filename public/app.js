@@ -325,6 +325,45 @@ function providerFromItem(item) {
   return null;
 }
 
+function budgetFromSlots(slots) {
+  const bound = (slots || []).filter((row) => row.bound);
+  if (!bound.length) return null;
+  const remaining = bound.reduce((sum, row) => sum + Number(row.budget?.remaining || 0), 0);
+  const dailyLimit = bound.reduce((sum, row) => sum + Number(row.budget?.dailyLimit || 0), 0);
+  const mergeLimit = bound.reduce((sum, row) => sum + Number(row.budget?.mergeLimit || 0), 0);
+  const minIntervalMs = Math.min(
+    ...bound.map((row) => Number(row.budget?.minIntervalMs ?? row.minIntervalMs ?? 0)),
+  );
+  const allBlocked = bound.every((row) => row.blocked || row.budget?.blocked);
+  return {
+    remaining,
+    dailyLimit,
+    mergeLimit,
+    minIntervalMs,
+    blocked: allBlocked,
+    blockReason: allBlocked
+      ? bound.find((row) => row.budget?.blockReason)?.budget.blockReason || null
+      : null,
+    resumesInSeconds: allBlocked
+      ? Math.min(...bound.map((row) => Number(row.budget?.resumesInSeconds || 0)))
+      : 0,
+  };
+}
+
+function displayBudget(d) {
+  return budgetFromSlots(d.ai?.slots) || budgetFromSlots(d.providers?.lanes) || d.ai?.budget || {};
+}
+
+function boundSlotNote(d, budget) {
+  const slots = (d.ai?.slots || d.providers?.lanes || []).filter((row) => row.bound);
+  if (!d.ai?.configured && !slots.length) return "المفتاح غير مربوط";
+  if (budget.blocked) return `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
+  if (slots.length > 1) {
+    return `${slots.map((row) => row.nameAr || row.id).join("، ")} · نداء واحد لكل موجز`;
+  }
+  return `${slots[0]?.model || d.ai?.model || "—"} · نداء واحد لكل موجز`;
+}
+
 function renderProviderLanes(providers) {
   const lanes = providers?.lanes || [];
   if (!lanes.length) return "";
@@ -343,6 +382,9 @@ function renderProviderLanes(providers) {
               : budget.blocked
                 ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
                 : `${lane.model} · يعمل`;
+          const lastError = lane.lastError?.code
+            ? `<small class="readout-note">آخر خطأ: ${escapeHtml(briefErrorReason(lane.lastError.code))}</small>`
+            : "";
           return `<article class="provider-card ${tone}">
             <b>${escapeHtml(lane.nameAr)}</b>
             <small>${escapeHtml(state)}</small>
@@ -354,6 +396,7 @@ function renderProviderLanes(providers) {
             </ul>
             <div class="meter"><span style="width:${Math.round(pct(budget.remaining, budget.dailyLimit))}%"></span></div>
             <small class="readout-note">الرصيد ${num(budget.remaining)} / ${num(budget.dailyLimit)} · تباعد ${num(Math.round((lane.minIntervalMs || 0) / 100) / 10)} ث</small>
+            ${lastError}
           </article>`;
         }).join("")}
       </div>
@@ -362,10 +405,11 @@ function renderProviderLanes(providers) {
 
 function renderDiagnostics(d) {
   const b = d.brief || {};
-  const budget = d.ai?.budget || {};
+  const budget = displayBudget(d);
   const reg = d.registry || {};
   const waiting = (b.pending || 0) + (b.waitingQuota || 0);
   const briefTotal = (b.completed || 0) + waiting + (b.failed || 0);
+  const aiNote = boundSlotNote(d, budget);
 
   $("diag-headline").textContent = budget.blocked
     ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
@@ -380,11 +424,6 @@ function renderDiagnostics(d) {
   }
 
   const aiTone = !d.ai?.configured ? "is-bad" : budget.blocked ? "is-warn" : "is-good";
-  const aiNote = !d.ai?.configured
-    ? "المفتاح غير مربوط"
-    : budget.blocked
-      ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
-      : `${d.ai.model || "—"} · نداء واحد لكل موجز`;
 
   $("diag-body").innerHTML = `
     <section class="board-section">
