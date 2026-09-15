@@ -57,6 +57,7 @@ const ATTENTION_REASON_AR = {
   brief_error: "تعذر التلخيص بعد خطأ تشغيلي ويحتاج تدخلاً.",
   brief_without_version: "يوجد موجز مكتمل بلا نسخة محفوظة، فلا يُعتمد.",
   verify_exhausted: "استُنفدت محاولات التدقيق دون اجتياز.",
+  missing_version: "current_version_id يشير إلى نسخة غير موجودة، فلا يُعتمد الخبر.",
 };
 
 function deskHeading(item) {
@@ -72,18 +73,18 @@ function displayTitle(it) {
   return it.news_title_ar || it.title || "—";
 }
 
-/** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
+/** شارة قصيرة للحالة. الشرح الكامل يبقى في لوحة التفاصيل لا بجانب الشارة. */
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
   if (/^brief-ai-[a-z0-9]+-v2:/i.test(engine)) {
-    if (item.verify_state === "passed") return "موجز مدقَّق — مسند ومُتحقق دلاليًا";
-    if (item.verify_state === "failed") return "موجز مرفوض في التدقيق";
-    return "موجز مسند — بانتظار التدقيق الدلالي";
+    if (item.verify_state === "passed") return "مدقَّق";
+    if (item.verify_state === "failed") return "مرفوض";
+    return "بانتظار التدقيق";
   }
-  if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
+  if (engine === "brief-deferred") return "بانتظار الحصة";
   if (engine === "brief-working") return "يُقرأ الآن";
-  if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
-  return "بانتظار AI";
+  if (engine === "brief-ai-error") return "تعذر";
+  return "بانتظار القراءة";
 }
 
 /** يترجم رمز الخطأ إلى سبب مفهوم، فلا يرى المستخدم «تعذر» بلا تفسير. */
@@ -283,7 +284,7 @@ function toolIcon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
 }
 
-/** رقاقة أداة: أيقونة، واسم، ونقطة حالة. السجل المتعثر يعمل، فلا يُوسم متوقفًا. */
+/** رقاقة أداة: أيقونة الهوية، ثم الاسم، والحالة سطرًا تحته. لا نقطة خضراء بجانب الشرح. */
 function toolStateLabel(ok) {
   if (ok === null) return "معطّلة بالحوكمة";
   if (ok === true) return "تعمل";
@@ -297,15 +298,16 @@ function toolChip(tool) {
   return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
       aria-expanded="false" title="${escapeHtml(label)}">
       <span class="tool-icon">${toolIcon(tool.icon)}</span>
-      <span class="tool-name">${escapeHtml(tool.name)}</span>
-      <span class="tool-dot" aria-hidden="true"></span>
-      <span class="tool-state">${escapeHtml(label)}</span>
+      <span class="tool-copy">
+        <span class="tool-name">${escapeHtml(tool.name)}</span>
+        <span class="tool-state">${escapeHtml(label)}</span>
+      </span>
     </button>`;
 }
 
 function statusRow(tone, title, note) {
-  return `<li><span class="diag-dot ${tone}"></span>
-      <span>${title}<small>${note}</small></span></li>`;
+  return `<li><span class="diag-dot ${tone}" aria-hidden="true"></span>
+      <span class="diag-copy"><b>${title}</b>${note ? `<small>${note}</small>` : ""}</span></li>`;
 }
 
 function sourceTone(source) {
@@ -414,7 +416,7 @@ function renderProviderLanes(providers) {
               ? `موقوف من ${lane.vars.enabled}`
               : budget.blocked
                 ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
-                : `${lane.model} · يعمل`;
+                : lane.model;
           const lastError = lane.lastError?.code
             ? `<small class="readout-note">آخر خطأ: ${escapeHtml(briefErrorReason(lane.lastError.code))}</small>`
             : "";
@@ -543,7 +545,13 @@ function renderDiagnostics(d) {
               )}
             </ul>`
           : `<p class="diag-note">لم يُشغّل رصد بعد.</p>`}
-        <h4 class="panel-sub">٥ · المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب</h4>
+        <h4 class="panel-sub">٥ · المصادر المعتمدة — ${num(reg.perOffice)} لكل مكتب
+          <span class="src-key">
+            <i class="src ok">استجاب</i>
+            <i class="src warn">لم يُشغّل</i>
+            <i class="src bad">متعثر</i>
+          </span>
+        </h4>
         <div class="office-grid">
           ${[...grouped.values()].map((sources) => `
             <article class="office-card">
@@ -553,9 +561,6 @@ function renderDiagnostics(d) {
               </span>
             </article>`).join("")}
         </div>
-        <p class="diag-note">
-          نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
-        </p>
       </section>
     </div>` + renderProviderLanes(d.providers);
 }
@@ -845,11 +850,14 @@ function renderSearchProgress(job) {
             : task.status === "queued"
               ? "queued"
               : "running";
+      const stage = STAGE_LABELS[task.stage] || task.stage;
+      const detail = String(task.detail || "").trim();
+      const line = detail && detail !== stage ? detail : stage;
       return `<div class="progress-task ${className}">
         <span class="dot"></span>
         <span>
           <b>${escapeHtml(task.mayor_name)}</b>
-          <small>${escapeHtml(STAGE_LABELS[task.stage] || task.stage)}${task.detail ? ` — ${escapeHtml(task.detail)}` : ""}</small>
+          <small>${escapeHtml(line)}</small>
         </span>
       </div>`;
     })

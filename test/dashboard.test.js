@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, deskHeading };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, deskHeading, briefBadge };`,
   )();
   return { ...exported, element };
 }
@@ -123,7 +123,8 @@ test("the dashboard renders every ordered section from real diagnostics", () => 
   }
   assert.equal((html.match(/data-tool=/g) || []).length, data.tools.length);
   assert.equal((html.match(/class="office-card"/g) || []).length, 3);
-  assert.equal((html.match(/class="src /g) || []).length, data.sources.length);
+  assert.equal((html.match(/class="src /g) || []).length, data.sources.length + 3);
+  assert.match(html, /src-key/, "color meaning sits in a compact key, not a second caption");
   assert.ok(html.includes("meter"), "readouts must carry proportional meters");
   assert.match(page.element("diag-headline").textContent, /بانتظار التلخيص/);
   assert.doesNotMatch(html, /٦ · نماذج القراءة/, "provider lanes stay off until diagnostics include them");
@@ -365,6 +366,23 @@ test("a registry with failing hosts is not labeled as stopped", () => {
   assert.match(html, /تعمل · بعضها متعثر/);
   assert.doesNotMatch(html, />متوقفة</);
   assert.match(html, /class="tool warn"/);
+  assert.match(html, /tool-copy/);
+  assert.doesNotMatch(html, /tool-dot/, "status lives under the name, not as a second green mark");
+});
+
+test("a healthy tool chip stacks the state under the name instead of a green icon plus caption", () => {
+  const { toolChip } = loadPageScript();
+  const html = toolChip({
+    id: "reader",
+    name: "قارئ الصفحات",
+    icon: "page",
+    ok: true,
+    detail: "يفتح كل رابط",
+  });
+  assert.match(html, /class="tool ok"/);
+  assert.match(html, /<span class="tool-name">قارئ الصفحات<\/span>/);
+  assert.match(html, /<span class="tool-state">تعمل<\/span>/);
+  assert.doesNotMatch(html, /tool-dot/);
 });
 
 test("settings render every mayor office and its platforms", () => {
@@ -456,4 +474,20 @@ test("the desk splits reading, verifying, decision, and attention into separate 
     "خبر قيد القراءة",
   );
   assert.equal(deskHeading({ status: "inbox", desk_lane: "attention_required" }), "يحتاج تدخلاً");
+});
+
+test("brief badges stay short so the green mark is not followed by a sentence", () => {
+  const { briefBadge } = loadPageScript();
+  assert.equal(
+    briefBadge({ trans_engine: "brief-ai-gemini-v2:x", verify_state: "passed" }),
+    "مدقَّق",
+  );
+  assert.equal(
+    briefBadge({ trans_engine: "brief-ai-gemini-v2:x", verify_state: "pending" }),
+    "بانتظار التدقيق",
+  );
+  assert.doesNotMatch(
+    briefBadge({ trans_engine: "brief-ai-gemini-v2:x", verify_state: "passed" }),
+    /مسند|متحقق/,
+  );
 });

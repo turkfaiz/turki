@@ -1652,10 +1652,10 @@ function aiToolChips(slots) {
     }
     return {
       id: `ai-${slot.id}`,
-      name: `الذكاء الاصطناعي — ${slot.nameAr} — ${slot.model}`,
+      name: slot.nameAr,
       icon: "spark",
       ok,
-      detail,
+      detail: `${slot.model} · ${detail}`,
     };
   });
 }

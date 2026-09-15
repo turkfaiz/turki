@@ -97,4 +97,8 @@ test("diagnostics exposes one tool chip per AI slot and requires auth when keys 
   assert.equal(byId.qwen.hasKey, true);
   assert.equal(byId.qwen.bound, false);
   assert.equal(byId.qwen.enabled, false);
+  const geminiChip = payload.tools.find((tool) => tool.id === "ai-gemini");
+  assert.equal(geminiChip.name, "جيميني");
+  assert.match(geminiChip.detail, /gemini-test/);
+  assert.doesNotMatch(geminiChip.name, /الذكاء الاصطناعي —/);
 });
