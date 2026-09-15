@@ -122,7 +122,8 @@ test("every office is governed by at most three approved sources, ranked", () =>
     assert.equal(sources[0].tier, 0, `${mayor.id} must lead with its official newsroom`);
     for (const source of sources) {
       assert.match(source.url, /^https:\/\//);
-      assert.ok(["feed", "page"].includes(source.kind));
+      assert.ok(["feed", "page", "sitemap", "api", "search", "browser"].includes(source.kind));
+      assert.ok(Array.isArray(source.discovery) && source.discovery.length >= 1);
     }
   }
   assert.equal(APPROVED_SOURCES.length, MAYORS.length * MAX_SOURCES_PER_OFFICE);

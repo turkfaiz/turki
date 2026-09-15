@@ -32,14 +32,24 @@ GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3.5-flash-lite
 AI_DAILY_LIMIT=400
 AI_MIN_INTERVAL_MS=4500
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-flash
+QWEN_API_KEY=
+QWEN_MODEL=qwen-flash
 ```
 
-محليًا يوضع مفتاح Gemini في `.dev.vars`. في Cloudflare يوضع كمتغير سرّي:
+محليًا توضع المفاتيح في `.dev.vars`. في Cloudflare المفتاح سر، والطراز متغير:
 
 ```bash
 npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler secret put QWEN_API_KEY
 npx wrangler secret put DASHBOARD_PASSWORD
 ```
+
+الفتحات الثلاث مغلقة في الشيفرة (جيميني، ديبسيك، كوين). ربط الفتحة = سر موجود + `*_ENABLED` ليس `0`. تغيير الطراز لاحقًا من لوحة Cloudflare: `Workers` → `mayor-watch` → Settings → Variables، عدّل `DEEPSEEK_MODEL` أو `QWEN_MODEL` أو `GEMINI_MODEL` دون نشر شيفرة جديدة (`keep_vars = true`). لإيقاف فتحة مؤقتًا ضع `DEEPSEEK_ENABLED=0`.
+
+الخبر يذهب للفتحة التي فيها سعة الآن، والطابور مشترك. قسم التفاصيل يعرض لكل نموذج: في الطابور، جاري العمل، مكتمل، تعذر.
 
 محركات البحث معطّلة بالحوكمة. الرصد يقرأ من سجل مصادر مغلق في `src/sources.js`:
 ثلاثة نطاقات معتمدة لكل مكتب على الأكثر، يتقدّمها المصدر الرسمي للمدينة، ولا يُفتح
@@ -79,7 +89,7 @@ npx wrangler queues create mayor-watch-scans
 الأساسية. اسم المستخدم الافتراضي `mayorwatch` ويمكن تغييره عبر `DASHBOARD_USER`.
 يمكن وضع Cloudflare Access أمامها كطبقة إضافية في النشر المؤسسي.
 
-حماية الصفحة إلزامية عند وجود `GEMINI_API_KEY`: إذا ضُبط مفتاح Gemini دون
+حماية الصفحة إلزامية عند وجود أي مفتاح ذكاء اصطناعي: إذا ضُبط المفتاح دون
 `DASHBOARD_PASSWORD` يرفض Worker طلبات الويب حتى لا تصبح التكلفة وقرارات الاعتماد عامة.
 
 ## الجدول

@@ -48,12 +48,13 @@ function displayTitle(it) {
 /** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
 function briefBadge(item) {
   const engine = String(item.trans_engine || "");
-  if (engine.startsWith("brief-ai-gemini-v2:")) {
+  if (/^brief-ai-[a-z0-9]+-v2:/i.test(engine)) {
     if (item.verify_state === "passed") return "موجز مدقَّق — مسند ومُتحقق دلاليًا";
     if (item.verify_state === "failed") return "موجز مرفوض في التدقيق";
     return "موجز مسند — بانتظار التدقيق الدلالي";
   }
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
+  if (engine === "brief-working") return "يُقرأ الآن";
   if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
   return "بانتظار AI";
 }
@@ -65,9 +66,11 @@ function briefErrorReason(code) {
   const rules = [
     [/ai_deferred:daily_limit|ai_http_429.*day|daily/i, "نفدت حصة نداءات الذكاء الاصطناعي لليوم، ويستأنف تلقائيًا بعد تصفير الحصة."],
     [/ai_deferred:rate_pacing/i, "تباعد مقصود بين النداءات لحماية حد الدقيقة، ويكمل تلقائيًا."],
-    [/ai_deferred|ai_http_429/i, "المزوّد رفض الطلب مؤقتًا لتجاوز الحد، والنظام في تهدئة ثم يعيد المحاولة."],
+    [/ai_deferred:provider_unpaid|ai_http_402/i, "هذا النموذج رفض الطلب لأن الحساب غير مدفوع أو غير مقبول. المسار وُقف وأُعيدت الأخبار للنماذج التي ما زالت تعمل."],
+    [/ai_deferred:provider_rejected|ai_http_40[013]/i, "هذا النموذج رفض شكل الطلب. المسار وُقف مؤقتًا وأُعيدت الأخبار لفتحة أخرى."],
     [/ai_http_5\d\d|provider_error/i, "خطأ مؤقت في خدمة الذكاء الاصطناعي، وتُعاد المحاولة."],
     [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
+    [/subrequest|too many subrequests|worker invocation/i, "توقف النداء لأن جلب الصفحات والقراءة وقعا في نفس التشغيل وتجاوزا حد طلبات العامل. القراءة صارت في مسار مستقل وتُعاد تلقائيًا."],
     [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
     [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
     [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
@@ -83,7 +86,7 @@ function briefErrorReason(code) {
 
 function briefErrorBox(item) {
   const engine = String(item.trans_engine || "");
-  if (!item.brief_error || engine.startsWith("brief-ai-gemini-v2:")) return "";
+  if (!item.brief_error || (/^brief-ai-[a-z0-9]+-v2:/i.test(engine))) return "";
   const attempts = Number(item.brief_attempts) || 0;
   const exhausted = attempts >= 5;
   const heading = exhausted
@@ -251,10 +254,17 @@ function toolIcon(name) {
     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TOOL_ICONS[name] || TOOL_ICONS.list}</svg>`;
 }
 
-/** رقاقة أداة: أيقونة، واسم، ونقطة حالة تفاعلية تكشف تفصيل عملها. */
+/** رقاقة أداة: أيقونة، واسم، ونقطة حالة. السجل المتعثر يعمل، فلا يُوسم متوقفًا. */
+function toolStateLabel(ok) {
+  if (ok === null) return "معطّلة بالحوكمة";
+  if (ok === true) return "تعمل";
+  if (ok === "warn") return "تعمل · بعضها متعثر";
+  return "متوقفة";
+}
+
 function toolChip(tool) {
-  const tone = tool.ok === null ? "off" : tool.ok ? "ok" : "bad";
-  const label = tool.ok === null ? "معطّلة بالحوكمة" : tool.ok ? "تعمل" : "متوقفة";
+  const tone = tool.ok === null ? "off" : tool.ok === true ? "ok" : tool.ok === "warn" ? "warn" : "bad";
+  const label = toolStateLabel(tool.ok);
   return `<button type="button" class="tool ${tone}" data-tool="${escapeHtml(tool.id)}"
       aria-expanded="false" title="${escapeHtml(label)}">
       <span class="tool-icon">${toolIcon(tool.icon)}</span>
@@ -280,24 +290,130 @@ function sourceTone(source) {
  * هذا التشغيل لم يفتحه بعد. النص هنا يفصل بين الأمرين بصراحة.
  */
 function sourceTitle(source) {
-  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${source.kind === "feed" ? "تغذية RSS" : "صفحة أخبار الموقع"}`;
+  const kindLabel =
+    {
+      feed: "تغذية RSS",
+      page: "غرفة أخبار",
+      sitemap: "Sitemap",
+      api: "واجهة الموقع",
+      search: "بحث داخلي",
+      browser: "Browser",
+    }[source.kind] || source.kind;
+  const role = `${source.tier === 0 ? "غرفة أخبار رسمية" : "تغطية محلية"} · ${kindLabel}`;
   const curated = source.verified
     ? `مُتحقق منه بالفحص عند الإعداد (${source.curated_at || "—"})`
     : `فُحص عند الإعداد ولم يستجب من شبكة الفحص، وبقي لأنه المصدر الأصلي للمدينة`;
-  const runtime = source.last_ok_at
-    ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
-    : source.last_status
-      ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
-      : "لم يُشغّل بعد في هذه البيئة";
-  return `${role}\n${curated}\n${runtime}`;
+  const operational = source.operational?.label
+    ? `الحالة: ${source.operational.label}`
+    : source.last_ok_at
+      ? `آخر تشغيل: ${num(source.last_items)} عنصرًا`
+      : source.last_status
+        ? `آخر تشغيل: ${String(source.last_status).slice(0, 60)}`
+        : "لم يُشغّل بعد في هذه البيئة";
+  return `${role}\n${curated}\n${operational}`;
+}
+
+function providerFromItem(item) {
+  const names = { gemini: "جيميني", deepseek: "ديبسيك", qwen: "كوين" };
+  const engine = String(item.trans_engine || "");
+  const match = engine.match(/^brief-ai-([a-z0-9]+)-v2:(.+)$/i);
+  if (match) {
+    return { id: match[1].toLowerCase(), model: match[2], name: names[match[1].toLowerCase()] || match[1] };
+  }
+  const id = String(item.brief_provider || "");
+  if (id) return { id, model: "", name: names[id] || id };
+  return null;
+}
+
+function budgetFromSlots(slots) {
+  const bound = (slots || []).filter((row) => row.bound);
+  if (!bound.length) return null;
+  const active = bound.filter((row) => !(row.blocked || row.budget?.blocked));
+  const pool = active.length ? active : bound;
+  const remaining = active.length
+    ? active.reduce((sum, row) => sum + Number(row.budget?.remaining || 0), 0)
+    : 0;
+  const dailyLimit = pool.reduce((sum, row) => sum + Number(row.budget?.dailyLimit || 0), 0);
+  const mergeLimit = pool.reduce((sum, row) => sum + Number(row.budget?.mergeLimit || 0), 0);
+  const minIntervalMs = Math.min(
+    ...pool.map((row) => Number(row.budget?.minIntervalMs ?? row.minIntervalMs ?? 0)),
+  );
+  const allBlocked = active.length === 0;
+  return {
+    remaining,
+    dailyLimit,
+    mergeLimit,
+    minIntervalMs,
+    blocked: allBlocked,
+    blockReason: allBlocked
+      ? bound.find((row) => row.budget?.blockReason)?.budget.blockReason || null
+      : null,
+    resumesInSeconds: allBlocked
+      ? Math.min(...bound.map((row) => Number(row.budget?.resumesInSeconds || 0)))
+      : 0,
+  };
+}
+
+function displayBudget(d) {
+  return budgetFromSlots(d.ai?.slots) || budgetFromSlots(d.providers?.lanes) || d.ai?.budget || {};
+}
+
+function boundSlotNote(d, budget) {
+  const slots = (d.ai?.slots || d.providers?.lanes || []).filter((row) => row.bound);
+  if (!d.ai?.configured && !slots.length) return "المفتاح غير مربوط";
+  if (budget.blocked) return `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
+  if (slots.length > 1) {
+    return `${slots.map((row) => row.nameAr || row.id).join("، ")} · نداء واحد لكل موجز`;
+  }
+  return `${slots[0]?.model || d.ai?.model || "—"} · نداء واحد لكل موجز`;
+}
+
+function renderProviderLanes(providers) {
+  const lanes = providers?.lanes || [];
+  if (!lanes.length) return "";
+  return `
+    <section class="board-section provider-board">
+      <h4>٦ · نماذج القراءة — الربط من Cloudflare</h4>
+      <p class="diag-note">كل خبر يُسند لفتحة واحدة قبل القراءة. رقم الطابور خاص بهذه الفتحة، وجاري العمل يظهر طالما النداء لم يُغلق. إن رُفض المحتوى عند نموذج يُمرَّر تلقائيًا للنموذج التالي.</p>
+      <div class="provider-grid">
+        ${lanes.map((lane) => {
+          const budget = lane.budget || {};
+          const tone = !lane.hasKey ? "is-bad" : !lane.bound || budget.blocked ? "is-warn" : "is-good";
+          const state = !lane.hasKey
+            ? `ضع السر ${lane.vars.key} في Cloudflare`
+            : !lane.enabled
+              ? `موقوف من ${lane.vars.enabled}`
+              : budget.blocked
+                ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+                : `${lane.model} · يعمل`;
+          const lastError = lane.lastError?.code
+            ? `<small class="readout-note">آخر خطأ: ${escapeHtml(briefErrorReason(lane.lastError.code))}</small>`
+            : "";
+          return `<article class="provider-card ${tone}">
+            <b>${escapeHtml(lane.nameAr)}</b>
+            <small>${escapeHtml(state)}</small>
+            <ul class="provider-counts">
+              <li><span>في الطابور</span><b class="num">${num(lane.queued)}</b></li>
+              <li><span>جاري العمل</span><b class="num">${num(lane.inProgress)}</b></li>
+              <li><span>مكتمل</span><b class="num">${num(lane.completed)}</b></li>
+              <li><span>تعذر</span><b class="num">${num(lane.failed)}</b></li>
+            </ul>
+            <div class="meter"><span style="width:${Math.round(pct(budget.remaining, budget.dailyLimit))}%"></span></div>
+            <small class="readout-note">الرصيد ${num(budget.remaining)} / ${num(budget.dailyLimit)} · تباعد ${num(Math.round((lane.minIntervalMs || 0) / 100) / 10)} ث</small>
+            ${lastError}
+          </article>`;
+        }).join("")}
+      </div>
+    </section>`;
 }
 
 function renderDiagnostics(d) {
   const b = d.brief || {};
-  const budget = d.ai?.budget || {};
+  const budget = displayBudget(d);
   const reg = d.registry || {};
   const waiting = (b.pending || 0) + (b.waitingQuota || 0);
   const briefTotal = (b.completed || 0) + waiting + (b.failed || 0);
+  const aiNote = boundSlotNote(d, budget);
 
   $("diag-headline").textContent = budget.blocked
     ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
@@ -312,11 +428,6 @@ function renderDiagnostics(d) {
   }
 
   const aiTone = !d.ai?.configured ? "is-bad" : budget.blocked ? "is-warn" : "is-good";
-  const aiNote = !d.ai?.configured
-    ? "المفتاح غير مربوط"
-    : budget.blocked
-      ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
-      : `${d.ai.model || "—"} · نداء واحد لكل موجز`;
 
   $("diag-body").innerHTML = `
     <section class="board-section">
@@ -417,7 +528,7 @@ function renderDiagnostics(d) {
           نقطة خضراء: استجاب في آخر تشغيل · برتقالية: مُعتمد بعد فحص عند الإعداد ولم يُشغّل بعد · حمراء: متعثر ويُراجَع.
         </p>
       </section>
-    </div>`;
+    </div>` + renderProviderLanes(d.providers);
 }
 
 async function loadDiagnostics() {
@@ -429,6 +540,16 @@ async function loadDiagnostics() {
     $("diag-body").innerHTML = `<p class="diag-note">تعذر تحميل التفاصيل: ${escapeHtml(error.message)}</p>`;
   }
 }
+
+let diagPoll = 0;
+$("diagnostics").addEventListener("toggle", () => {
+  window.clearInterval(diagPoll);
+  if (!$("diagnostics").open) return;
+  loadDiagnostics();
+  diagPoll = window.setInterval(() => {
+    if ($("diagnostics").open) loadDiagnostics();
+  }, 4000);
+});
 
 $("diag-body").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tool]");
@@ -520,6 +641,12 @@ async function loadDetail(id) {
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
       ${briefErrorBox(item)}
+      ${(() => {
+        const reader = providerFromItem(item);
+        return reader
+          ? `<p class="source-line">المراجع: ${escapeHtml(reader.name)}${reader.model ? ` · ${escapeHtml(reader.model)}` : ""}</p>`
+          : "";
+      })()}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || sourceLabel(source.source))).join(" · ")}</p>
       <div class="origin-block">
         <div class="label">الأصل</div>
@@ -610,10 +737,13 @@ function delay(ms) {
 
 const STAGE_LABELS = {
   queued: "بانتظار البدء",
-  discovering: "بحث مباشر بالاسم والمنصب",
+  discovering: "فحص المصادر المعتمدة",
+  source_poll: "فحص مصدر واحد",
+  article_fetch: "فتح المقالات المكتشفة",
   verifying: "فتح الروابط والتحقق",
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
+  assigning: "توزيع الأخبار على نماذج القراءة",
   summarizing: "قراءة وتدقيق AI",
   ai_pending: "بانتظار إكمال قراءة AI",
   ai_waiting_quota: "بانتظار حصة AI — يستأنف تلقائيًا",
@@ -792,6 +922,144 @@ async function resumeActiveSearch() {
     syncSearchEnabled();
   }
 }
+
+function renderSettings(payload) {
+  const box = $("settings-body");
+  if (!box) return "";
+  if (payload?.error) {
+    box.innerHTML = `<p class="settings-error">${escapeHtml(payload.error)}</p>`;
+    return box.innerHTML;
+  }
+  const offices = payload?.offices || [];
+  if (!offices.length) {
+    box.innerHTML = `<p class="settings-empty">لا عمداء في السجل.</p>`;
+    return box.innerHTML;
+  }
+  box.innerHTML = offices
+    .map((office) => {
+      const platforms = office.platforms || [];
+      const custom = office.origin === "custom";
+      const badge = custom ? ` <span class="settings-badge">مضاف</span>` : "";
+      const host = office.official_host
+        ? `<br>النطاق الرسمي: <span dir="ltr">${escapeHtml(office.official_host)}</span>`
+        : "";
+      return `<article class="settings-office" data-mayor="${escapeHtml(office.id)}" data-origin="${escapeHtml(office.origin || "seed")}">
+        <h3>${escapeHtml(office.name_ar)}${badge}</h3>
+        <p class="settings-meta">
+          ${escapeHtml(office.name_en)} · ${escapeHtml(office.name_native)}<br>
+          ${escapeHtml(office.city_ar)}${office.city_en ? ` / ${escapeHtml(office.city_en)}` : ""} — ${escapeHtml(office.country_ar)}<br>
+          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}${host}
+        </p>
+        <div class="settings-platforms">
+          ${
+            platforms.length
+              ? platforms
+                  .map((platform) => {
+                    const types = (platform.strategies || [])
+                      .map((step) => step.type_ar || step.type)
+                      .join(" ← ");
+                    const checked = platform.enabled ? "checked" : "";
+                    const off = platform.enabled ? "" : " is-off";
+                    return `<div class="settings-platform${off}">
+                      <div>
+                        <b>${escapeHtml(platform.name)}</b>
+                        <small>${escapeHtml(platform.platform_ar || "")} · ${escapeHtml(types || platform.kind)}</small>
+                        <small>آخر فحص: ${escapeHtml(fmtDate(platform.last_checked_at))} · آخر اكتشاف: ${escapeHtml(fmtDate(platform.last_discovery_at))}</small>
+                        <small>${escapeHtml(platform.operational?.label || "—")}</small>
+                      </div>
+                      <label class="settings-toggle">
+                        <input type="checkbox" data-source-toggle="${escapeHtml(platform.id)}" ${checked}>
+                        ${platform.enabled ? "مفعّلة" : "متوقفة"}
+                      </label>
+                    </div>`;
+                  })
+                  .join("")
+              : `<p class="settings-empty">لا منصات مسجّلة لهذا المكتب.</p>`
+          }
+        </div>
+      </article>`;
+    })
+    .join("");
+  return box.innerHTML;
+}
+
+async function loadSettings() {
+  const box = $("settings-body");
+  box.innerHTML = `<p class="settings-empty">جاري التحميل…</p>`;
+  try {
+    const data = await api("/api/settings/offices");
+    renderSettings(data);
+  } catch (error) {
+    renderSettings({ error: `تعذر تحميل الإعدادات: ${error.message}` });
+  }
+}
+
+function openSettings(open) {
+  const layer = $("settings-layer");
+  const btn = $("settings-btn");
+  layer.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) loadSettings();
+}
+
+$("settings-btn").addEventListener("click", () => {
+  openSettings($("settings-layer").hidden);
+});
+$("settings-close").addEventListener("click", () => openSettings(false));
+$("settings-layer").addEventListener("click", (e) => {
+  if (e.target === $("settings-layer")) openSettings(false);
+});
+$("settings-body").addEventListener("change", async (e) => {
+  const input = e.target.closest("input[data-source-toggle]");
+  if (!input) return;
+  input.disabled = true;
+  try {
+    await api(`/api/settings/sources/${encodeURIComponent(input.dataset.sourceToggle)}`, {
+      method: "POST",
+      body: JSON.stringify({ enabled: input.checked }),
+    });
+    await loadSettings();
+  } catch (error) {
+    input.checked = !input.checked;
+    renderSettings({ error: `تعذر حفظ الحالة: ${error.message}` });
+  }
+});
+
+$("add-mayor-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const submit = form.querySelector("[type=submit]");
+  const status = $("add-mayor-status");
+  const payload = Object.fromEntries(new FormData(form).entries());
+  for (const key of Object.keys(payload)) {
+    if (!String(payload[key] || "").trim()) delete payload[key];
+  }
+  submit.disabled = true;
+  status.textContent = "جاري الحفظ…";
+  status.classList.remove("is-error");
+  try {
+    const created = await api("/api/settings/mayors", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    form.reset();
+    status.textContent = "أُضيف المكتب. يمكنك إضافة عمدة آخر من النموذج نفسه.";
+    await loadSettings();
+    await loadMayors();
+    const card = document.querySelector(
+      `.settings-office[data-mayor="${CSS.escape(created.mayor.id)}"]`,
+    );
+    if (card) {
+      card.classList.add("is-new");
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  } catch (error) {
+    status.textContent = error.message;
+    status.classList.add("is-error");
+  } finally {
+    submit.disabled = false;
+  }
+});
 
 loadMayors().then(async () => {
   await refreshAll();

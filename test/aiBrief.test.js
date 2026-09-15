@@ -8,7 +8,9 @@ import {
   clusterWithGemini,
   pendingAiBrief,
   summarizeWithGemini,
+  transientAiError,
   validateAiBrief,
+  workerLimitError,
 } from "../src/aiBrief.js";
 import { MAYORS } from "../src/mayors.js";
 import { aiEnv } from "./helpers/aiEnv.js";
@@ -42,6 +44,13 @@ test("pending and failed AI states never invent a news claim", () => {
   assert.equal(failed.engine, "brief-ai-error");
   assert.match(failed.title_ar, /تعذر/);
   assert.equal(failed.snippet_ar, "");
+});
+
+test("a Worker subrequest cap is a scheduling fault, not a bad article", () => {
+  const error = new Error("Too many subrequests by single Worker invocation");
+  assert.equal(workerLimitError(error), true);
+  assert.equal(transientAiError(error), true);
+  assert.equal(transientAiError(new Error("ai_ungrounded_headline")), false);
 });
 
 test("AI prompt contains the fetched page body, not only its headline", () => {

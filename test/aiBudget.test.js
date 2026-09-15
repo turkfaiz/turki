@@ -80,6 +80,22 @@ test("a per-minute rejection pauses only briefly", async () => {
   assert.ok(state.resumesInSeconds <= 30);
 });
 
+test("a 402 from one provider pauses that slot only", async () => {
+  const env = aiEnv({
+    DEEPSEEK_API_KEY: "deep",
+    DEEPSEEK_MIN_INTERVAL_MS: "0",
+    AI_MIN_INTERVAL_MS: "0",
+  });
+  await noteAiFailure(env, { status: 402 }, "deepseek");
+  const deepseek = await budgetState(env, "deepseek");
+  const gemini = await budgetState(env, "gemini");
+  assert.equal(deepseek.blocked, true);
+  assert.equal(deepseek.blockReason, "provider_unpaid");
+  assert.equal(gemini.blocked, false);
+  assert.equal((await reserveAiCall(env, "brief", "deepseek")).ok, false);
+  assert.equal((await reserveAiCall(env, "brief", "gemini")).ok, true);
+});
+
 test("an exhausted budget defers the brief without ever calling the provider", async () => {
   const env = aiEnv({ AI_DAILY_LIMIT: "1" });
   await reserveAiCall(env, "brief");
