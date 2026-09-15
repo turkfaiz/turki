@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, slotPauseLabel };`,
   )();
   return { ...exported, element };
 }
@@ -307,6 +307,16 @@ test("a terminal slot error is shown on that provider card only", () => {
   const html = page.element("diag-body").innerHTML;
   assert.match(html, /غير مدفوع/);
   assert.match(html, /ديبسيك/);
+});
+
+test("an unpaid slot is not labeled as a 30-minute pause that will start it", () => {
+  const { slotPauseLabel } = loadPageScript();
+  assert.match(slotPauseLabel({ blocked: true, blockReason: "provider_unpaid", resumesInSeconds: 1800 }), /غير مدفوع/);
+  assert.doesNotMatch(
+    slotPauseLabel({ blocked: true, blockReason: "provider_unpaid", resumesInSeconds: 1800 }),
+    /يستأنف بعد/,
+  );
+  assert.match(slotPauseLabel({ blocked: true, blockReason: "provider_rejected", resumesInSeconds: 1800 }), /رفض الطلب/);
 });
 
 test("a blocked AI budget is reported as a pause with a resume time", () => {

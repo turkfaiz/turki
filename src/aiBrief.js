@@ -357,8 +357,10 @@ function requestBodyFor(env, slot, input, schema) {
       { role: "user", content: String(input) },
     ],
     response_format: { type: "json_object" },
+    stream: false,
   };
   if (slot.disableThinking) body.thinking = { type: "disabled" };
+  if (slot.enableThinking === false) body.enable_thinking = false;
   return {
     url: chatCompletionsUrl(slotBaseUrl(env, slot)),
     headers: {
