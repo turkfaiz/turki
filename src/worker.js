@@ -253,7 +253,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v18";
+const BOOTSTRAP_VERSION = "bootstrap-v17";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -723,36 +723,6 @@ async function migrateItems(env) {
     ).run();
     await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('slot_fault_epoch', ?)`)
       .bind(slotFaultEpoch)
-      .run();
-  }
-  /**
-   * كوين رُفض من أول نداء لأن التفكير لم يُغلق، فوُقف نصف ساعة والأخبار أُغلقت
-   * على تعذر جيميني. بعد تصحيح النداء تُفرَّغ الوقفة وتُعاد الصفوف للقراءة.
-   */
-  const qwenThinkEpoch = "qwen-enable-thinking-v1";
-  const currentQwenThink = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'qwen_think_epoch'`).first();
-  if (currentQwenThink?.v !== qwenThinkEpoch) {
-    await env.DB.prepare(
-      `UPDATE ai_provider_budget
-       SET blocked_until = NULL, block_reason = NULL
-       WHERE provider IN ('qwen', 'deepseek')
-         AND block_reason IN ('provider_rejected', 'provider_unpaid')`,
-    ).run();
-    await env.DB.prepare(
-      `UPDATE items
-       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
-           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
-           brief_after = NULL, trans_engine = 'brief-pending',
-           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
-             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
-           snippet_ar = ''
-       WHERE trans_engine IN ('brief-ai-error', 'brief-deferred', 'brief-working')
-          OR brief_error LIKE 'ai_ungrounded%'
-          OR brief_error LIKE 'ai_has_no_grounded%'
-          OR brief_error LIKE 'ai_http_40%'`,
-    ).run();
-    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('qwen_think_epoch', ?)`)
-      .bind(qwenThinkEpoch)
       .run();
   }
 }
@@ -1556,15 +1526,9 @@ function aiToolChips(slots) {
       detail = "المفتاح غير مربوط";
     } else if (budget.blocked || Number(budget.remaining) <= 0) {
       ok = "warn";
-      if (budget.blockReason === "provider_unpaid") {
-        detail = "الحساب غير مدفوع أو الرصيد نافد. انتظار ثلاثين دقيقة لن يشغّله.";
-      } else if (budget.blockReason === "provider_rejected") {
-        detail = "المزود رفض شكل الطلب من أول نداء، وليس نفاد حصة.";
-      } else {
-        detail = budget.blocked
-          ? `متوقف مؤقتًا · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
-          : `نفدت الحصة اليومية · بقي 0 من ${budget.dailyLimit} نداءً`;
-      }
+      detail = budget.blocked
+        ? `متوقف مؤقتًا · بقي ${budget.remaining} من ${budget.dailyLimit} نداءً`
+        : `نفدت الحصة اليومية · بقي 0 من ${budget.dailyLimit} نداءً`;
     }
     if (slot.lastError?.code) {
       detail += ` · آخر خطأ: ${slot.lastError.code}`;

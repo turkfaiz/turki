@@ -78,8 +78,6 @@ export const AI_SLOTS = [
     defaultBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     defaultDailyLimit: 2000,
     defaultIntervalMs: 800,
-    // كوين للتفكير يرفض النداء غير المتدفق بلا هذا الحقل، فيبدو متوقفًا 30 دقيقة دون أن يبدأ.
-    enableThinking: false,
   },
 ];
 
