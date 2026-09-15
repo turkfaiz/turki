@@ -963,8 +963,31 @@ h1 {
 .settings-office.is-new {
   outline: 2px solid var(--teal);
 }
-  margin: 0 0 4px;
+.settings-office h3 {
+  margin: 0 0 8px;
   font-size: 18px;
+}
+.settings-names {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.settings-names div {
+  display: grid;
+  grid-template-columns: minmax(7.5rem, 28%) 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.settings-names dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings-names dd {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 600;
 }
 .settings-meta {
   color: var(--muted);
@@ -1013,6 +1036,30 @@ h1 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 14px;
+}
+.settings-group {
+  margin: 0 0 16px;
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px dashed var(--rule);
+}
+.settings-group legend {
+  padding: 0 8px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--navy);
+}
+.settings-field-wide {
+  grid-column: 1 / -1;
+}
+.settings-field select {
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  padding: 9px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--card);
 }
 .settings-field {
   display: flex;

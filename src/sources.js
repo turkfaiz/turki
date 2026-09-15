@@ -482,12 +482,194 @@ export const APPROVED_SOURCES = Object.entries(REGISTRY).flatMap(([mayorId, entr
   withIds(mayorId, entries),
 );
 
+/** الثلاثة المقترحة لكل مكتب: رسمي، محلي، وطني — نفس ترتيب السجل. */
+export const PLATFORM_SLOTS = [
+  { key: "official", platform: "official", tier: 0, label_ar: "غرفة الأخبار الرسمية" },
+  { key: "local", platform: "newspaper", tier: 0, label_ar: "أقوى تغطية محلية" },
+  { key: "national", platform: "agency", tier: 1, label_ar: "وكالة أو صحيفة وطنية" },
+];
+
+const BLOCKED_DISCOVERY = new Set([
+  "google.com",
+  "news.google.com",
+  "bing.com",
+  "twitter.com",
+  "x.com",
+  "facebook.com",
+  "instagram.com",
+  "youtube.com",
+]);
+
+const customById = new Map();
+
+export function hydrateCustomSources(sources) {
+  customById.clear();
+  for (const source of sources || []) {
+    if (source?.id) customById.set(source.id, source);
+  }
+}
+
+export function rememberCustomSource(source) {
+  if (source?.id) customById.set(source.id, source);
+}
+
 export function sourcesFor(mayorId) {
-  return APPROVED_SOURCES.filter((source) => source.mayor_id === mayorId);
+  const coded = APPROVED_SOURCES.filter((source) => source.mayor_id === mayorId);
+  if (coded.length) return coded;
+  return [...customById.values()]
+    .filter((source) => source.mayor_id === mayorId)
+    .sort((a, b) => (a.rank || 0) - (b.rank || 0));
 }
 
 export function sourceById(id) {
-  return APPROVED_SOURCES.find((source) => source.id === id) || null;
+  return APPROVED_SOURCES.find((source) => source.id === id) || customById.get(id) || null;
+}
+
+export function parsePublicSourceUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { error: "missing_url" };
+  let href = raw;
+  if (!/^https?:\/\//i.test(href)) href = `https://${href}`;
+  let parsed;
+  try {
+    parsed = new URL(href);
+  } catch {
+    return { error: "bad_url" };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: "bad_url" };
+  }
+  const domain = parsed.hostname.replace(/^www\./i, "").replace(/\.$/, "").toLowerCase();
+  if (
+    !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
+      domain,
+    )
+  ) {
+    return { error: "bad_host" };
+  }
+  if (
+    domain === "localhost" ||
+    domain.endsWith(".localhost") ||
+    domain.endsWith(".local") ||
+    /^(127\.|10\.|192\.168\.|169\.254\.)/.test(domain)
+  ) {
+    return { error: "bad_host" };
+  }
+  const root = domain.split(".").slice(-2).join(".");
+  if (BLOCKED_DISCOVERY.has(domain) || BLOCKED_DISCOVERY.has(root)) {
+    return { error: "blocked_host" };
+  }
+  parsed.hash = "";
+  return { url: parsed.toString(), domain };
+}
+
+function discoveryFromUrl(url) {
+  if (/\b(rss|atom|feed|\.xml)\b/i.test(url)) {
+    let home = url;
+    try {
+      home = `${new URL(url).origin}/`;
+    } catch {
+      /* keep the feed url */
+    }
+    return [
+      step("rss", { url }),
+      step("newsroom", { url: home, adapter: "generic" }),
+    ];
+  }
+  return [step("newsroom", { url, adapter: "generic" })];
+}
+
+export function parseOfficePlatforms(body, mayorId) {
+  const seen = new Set();
+  const sources = [];
+  for (let index = 0; index < PLATFORM_SLOTS.length; index += 1) {
+    const slot = PLATFORM_SLOTS[index];
+    const fromList = Array.isArray(body?.platforms) ? body.platforms[index] : null;
+    const parsed = parsePublicSourceUrl(
+      body?.[`${slot.key}_url`] || fromList?.url || fromList?.href,
+    );
+    if (parsed.error) {
+      return {
+        error: parsed.error === "missing_url" ? "missing_platforms" : parsed.error,
+        detail: slot.key,
+        message:
+          parsed.error === "blocked_host"
+            ? "المنصات الثلاثة مواقع المكتب نفسه، لا محركات بحث ولا شبكات تواصل."
+            : `رابط ${slot.label_ar} غير صالح.`,
+      };
+    }
+    if (seen.has(parsed.domain)) {
+      return {
+        error: "duplicate_platform",
+        detail: parsed.domain,
+        message: "كل موقع من الثلاثة يجب أن يكون نطاقًا مختلفًا.",
+      };
+    }
+    seen.add(parsed.domain);
+    const name = String(fromList?.name || body?.[`${slot.key}_name`] || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120) || parsed.domain;
+    const discovery = discoveryFromUrl(parsed.url).map((row, rank) => ({
+      ...row,
+      enabled: row.enabled !== false,
+      rank: rank + 1,
+    }));
+    const primary = discovery.find((row) => row.enabled && row.url) || discovery[0] || {};
+    sources.push({
+      id: `${mayorId}:${parsed.domain}`,
+      mayor_id: mayorId,
+      domain: parsed.domain,
+      name,
+      tier: slot.tier,
+      platform: slot.platform,
+      rank: index + 1,
+      discovery,
+      kind: strategyKind(primary.type),
+      url: primary.url || parsed.url,
+      adapter: "generic",
+      verified: 0,
+      curated_at: new Date().toISOString().slice(0, 10),
+      custom: true,
+    });
+  }
+  return { sources };
+}
+
+export function sourceFromStored(row) {
+  if (!row) return null;
+  let discovery = [];
+  try {
+    discovery = JSON.parse(row.discovery_json || "[]");
+  } catch {
+    discovery = [];
+  }
+  if (!Array.isArray(discovery) || !discovery.length) {
+    discovery = discoveryFromUrl(row.url).map((entry, rank) => ({
+      ...entry,
+      enabled: entry.enabled !== false,
+      rank: rank + 1,
+    }));
+  }
+  const primary = discovery.find((entry) => entry.enabled !== false && entry.url) || discovery[0] || {};
+  const platform =
+    row.platform || (Number(row.rank) === 1 ? "official" : Number(row.rank) === 3 ? "agency" : "newspaper");
+  return {
+    id: row.id,
+    mayor_id: row.mayor_id,
+    domain: row.domain,
+    name: row.name,
+    tier: Number(row.tier) || 0,
+    platform,
+    rank: Number(row.rank) || 0,
+    discovery,
+    kind: row.kind || strategyKind(primary.type),
+    url: row.url || primary.url || "",
+    adapter: discovery.find((entry) => entry.type === "newsroom")?.adapter || "generic",
+    verified: Number(row.verified) || 0,
+    curated_at: row.curated_at || "",
+    custom: true,
+  };
 }
 
 function hostOf(value) {

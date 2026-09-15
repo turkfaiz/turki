@@ -392,6 +392,8 @@ test("settings render every mayor office and its platforms", () => {
         city_ar: "تورينو",
         city_en: "Turin",
         country_ar: "إيطاليا",
+        native_lang: "it",
+        native_lang_ar: "الإيطالية",
         title_ar: "عمدة تورينو",
         title_en: "Mayor of Turin",
         platforms: [
@@ -400,6 +402,7 @@ test("settings render every mayor office and its platforms", () => {
             name: "Comune di Torino",
             kind: "feed",
             enabled: true,
+            rank: 1,
             platform_ar: "موقع رسمي",
             strategies: [{ type: "rss", type_ar: "RSS" }],
             last_checked_at: null,
@@ -417,10 +420,24 @@ test("settings render every mayor office and its platforms", () => {
         city_ar: "الرياض",
         city_en: "Riyadh",
         country_ar: "السعودية",
+        native_lang: "ar",
+        native_lang_ar: "العربية",
         title_ar: "عمدة الرياض",
         title_en: "Mayor of Riyadh",
-        official_host: "alriyadh.gov.sa",
-        platforms: [],
+        platforms: [
+          {
+            id: "riyadh-noura:alriyadh.gov.sa",
+            name: "أمانة الرياض",
+            kind: "page",
+            enabled: true,
+            rank: 1,
+            platform_ar: "موقع رسمي",
+            strategies: [{ type: "newsroom", type_ar: "غرفة أخبار" }],
+            last_checked_at: null,
+            last_discovery_at: null,
+            operational: { label: "لم تُفحص بعد في هذه البيئة" },
+          },
+        ],
       },
     ],
   });
@@ -428,17 +445,38 @@ test("settings render every mayor office and its platforms", () => {
   assert.match(html, /data-source-toggle="turin:comune.torino.it"/);
   assert.match(html, /data-origin="custom"/);
   assert.match(html, /مضاف/);
-  assert.match(html, /لا منصات مسجّلة لهذا المكتب/);
-  assert.match(html, /alriyadh\.gov\.sa/);
+  assert.match(html, /لغة الأم/);
+  assert.match(html, /إنجليزي للرصد/);
+  assert.match(html, /عربي للعرض/);
+  assert.match(html, /غرفة الأخبار الرسمية/);
+  assert.match(html, /أمانة الرياض/);
 });
 
 test("the settings panel includes a form for the required mayor identity fields", () => {
   const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(html, /id="add-mayor-form"/);
-  for (const field of ["name_ar", "name_en", "city_ar", "city_en", "country_ar", "country_code", "native_lang"]) {
+  for (const field of [
+    "name_ar",
+    "name_en",
+    "name_native",
+    "city_ar",
+    "city_en",
+    "country_ar",
+    "country_code",
+    "native_lang",
+    "title_ar",
+    "title_en",
+    "official_url",
+    "local_url",
+    "national_url",
+  ]) {
     assert.match(html, new RegExp(`name="${field}"`));
   }
-  assert.match(html, /حفظ العمدة/);
+  assert.match(html, /حفظ المكتب/);
+  assert.match(html, /غرفة الأخبار الرسمية/);
+  assert.match(html, /أقوى تغطية محلية/);
+  assert.match(html, /وكالة أو صحيفة وطنية/);
+  assert.doesNotMatch(html, /إن تُرك يُنسخ من الإنجليزية/);
 });
 
 test("the waiting lane stays collapsed until the user opens it", () => {

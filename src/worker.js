@@ -1,5 +1,6 @@
 import {
   MAYORS,
+  SEED_MAYOR_IDS,
   insertCustomMayor,
   listMayors,
   mayorInputMessage,
@@ -17,8 +18,14 @@ import {
 import {
   ARTICLE_FETCH_BATCH,
   INLINE_ARTICLE_FETCH_LIMIT,
+  APPROVED_SOURCES,
+  MAX_SOURCES_PER_OFFICE,
+  hydrateCustomSources,
+  parseOfficePlatforms,
   platformLabelAr,
+  rememberCustomSource,
   sourceById,
+  sourceFromStored,
   strategyLabelAr,
 } from "./sources.js";
 import {
@@ -37,7 +44,6 @@ import {
   slotRuntimeStatuses,
 } from "./aiDispatch.js";
 import { pruneAiBudget } from "./aiBudget.js";
-import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
   currentVersion,
   decisionsFor,
@@ -336,6 +342,8 @@ export async function ensureDb(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
   const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
   if (stamp?.v === BOOTSTRAP_VERSION && (await schemaComplete(env))) {
+    await migrateSources(env);
+    await loadCustomSourceRegistry(env);
     bootstrapped.add(env.DB);
     return;
   }
@@ -384,6 +392,7 @@ export async function ensureDb(env) {
     15,
   );
   await seedSources(env);
+  await loadCustomSourceRegistry(env);
   await migrateItems(env);
   await migrateAiProviderBudget(env);
   await migrateVersions(env);
@@ -432,6 +441,8 @@ async function migrateSources(env) {
   await add("last_discovered_url", `ALTER TABLE sources ADD COLUMN last_discovered_url TEXT`);
   await add("etag", `ALTER TABLE sources ADD COLUMN etag TEXT`);
   await add("last_modified", `ALTER TABLE sources ADD COLUMN last_modified TEXT`);
+  await add("discovery_json", `ALTER TABLE sources ADD COLUMN discovery_json TEXT`);
+  await add("platform", `ALTER TABLE sources ADD COLUMN platform TEXT`);
 }
 
 async function seedSources(env) {
@@ -459,11 +470,57 @@ async function seedSources(env) {
        verified = excluded.verified, curated_at = excluded.curated_at`,
   );
   const keep = APPROVED_SOURCES.map((source) => source.id);
+  const seedIds = [...SEED_MAYOR_IDS];
   await env.DB.prepare(
-    `DELETE FROM sources WHERE id NOT IN (${keep.map(() => "?").join(", ")})`,
+    `DELETE FROM sources
+     WHERE mayor_id IN (${seedIds.map(() => "?").join(", ")})
+       AND id NOT IN (${keep.map(() => "?").join(", ")})`,
   )
-    .bind(...keep)
+    .bind(...seedIds, ...keep)
     .run();
+}
+
+async function loadCustomSourceRegistry(env) {
+  const seedIds = [...SEED_MAYOR_IDS];
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM sources WHERE mayor_id NOT IN (${seedIds.map(() => "?").join(", ")})`,
+  )
+    .bind(...seedIds)
+    .all();
+  hydrateCustomSources((results || []).map(sourceFromStored).filter(Boolean));
+}
+
+async function insertCustomOfficeSources(env, sources) {
+  if (!sources?.length) return;
+  try {
+    for (const source of sources) {
+      await env.DB.prepare(
+        `INSERT INTO sources (
+           id, mayor_id, domain, name, tier, kind, url, rank, verified, curated_at,
+           enabled, discovery_json, platform
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      )
+        .bind(
+          source.id,
+          source.mayor_id,
+          source.domain,
+          source.name,
+          source.tier,
+          source.kind,
+          source.url,
+          source.rank,
+          source.verified,
+          source.curated_at,
+          JSON.stringify(source.discovery || []),
+          source.platform,
+        )
+        .run();
+    }
+  } catch (error) {
+    await env.DB.prepare(`DELETE FROM sources WHERE mayor_id = ?`).bind(sources[0].mayor_id).run();
+    throw error;
+  }
+  for (const source of sources) rememberCustomSource(source);
 }
 
 /** يسجّل ما حدث فعلًا لكل مصدر حتى تكون الحوكمة مبنية على واقع الإنتاج. */
@@ -1969,7 +2026,7 @@ async function settingsOffices(env) {
   const byMayor = new Map();
   for (const row of results || []) {
     if (!byMayor.has(row.mayor_id)) byMayor.set(row.mayor_id, []);
-    const registered = sourceById(row.id);
+    const registered = sourceById(row.id) || sourceFromStored(row);
     byMayor.get(row.mayor_id).push({
       id: row.id,
       domain: row.domain,
@@ -2006,6 +2063,8 @@ async function settingsOffices(env) {
     city_en: mayor.city_en,
     country_ar: mayor.country_ar,
     country_code: mayor.country_code,
+    native_lang: mayor.native_lang,
+    native_lang_ar: mayor.native_lang_ar,
     title_ar: mayor.title_ar,
     title_en: mayor.title_en,
     official_host: mayor.official_host || "",
@@ -2103,11 +2162,11 @@ async function handleApi(request, env) {
 
   if (path === "/api/settings/mayors" && method === "POST") {
     const body = await readBody(request);
-    if (body.domain || body.url || body.discovery || body.sources) {
+    if (body.domain || body.discovery || Array.isArray(body.sources)) {
       return json(
         {
           error: "registry_closed",
-          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
+          message: "لا يُضاف نطاق حر. المكتب الجديد يأخذ المواقع الثلاثة المقترحة فقط.",
         },
         403,
       );
@@ -2119,24 +2178,51 @@ async function handleApi(request, env) {
         400,
       );
     }
+    const platforms = parseOfficePlatforms(body, parsed.mayor.id);
+    if (platforms.error) {
+      return json(
+        {
+          error: platforms.error,
+          detail: platforms.detail || null,
+          message: platforms.message || "يلزم ثلاثة مواقع: رسمي، محلي، وطني.",
+        },
+        400,
+      );
+    }
     const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
       .bind(parsed.mayor.id)
       .first();
     if (existing) {
       return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
     }
-    const mayor = await insertCustomMayor(env, parsed.mayor);
-    await env.DB.prepare(
-      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
-       VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
-    )
-      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
-      .run();
+    const mayor = {
+      ...parsed.mayor,
+      official_host: platforms.sources[0]?.domain || parsed.mayor.official_host,
+    };
+    try {
+      await insertCustomMayor(env, mayor);
+      await insertCustomOfficeSources(env, platforms.sources);
+      await env.DB.prepare(
+        `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
+         VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
+      )
+        .bind(
+          crypto.randomUUID(),
+          reviewerOf(request, env),
+          mayor.id,
+          JSON.stringify({ mayor, platforms: platforms.sources.map((row) => row.domain) }),
+        )
+        .run();
+    } catch (error) {
+      await env.DB.prepare(`DELETE FROM sources WHERE mayor_id = ?`).bind(mayor.id).run();
+      await env.DB.prepare(`DELETE FROM mayors WHERE id = ?`).bind(mayor.id).run();
+      throw error;
+    }
     return json(
       {
         ok: true,
-        mayor,
-        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
+        mayor: { ...mayor, origin: "custom" },
+        platforms: platforms.sources,
         offices: await settingsOffices(env),
       },
       201,

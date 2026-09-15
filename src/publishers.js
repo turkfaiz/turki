@@ -1,5 +1,5 @@
 import { MAYORS, isAboutMayor } from "./mayors.js";
-import { APPROVED_SOURCES } from "./sources.js";
+import { APPROVED_SOURCES, sourcesFor } from "./sources.js";
 import { isAggregatorHost, publisherDomain, resolvePublisherDomain } from "./domain.js";
 import { pickConfidence } from "./dedup.js";
 import { REASON } from "./reasons.js";
@@ -173,6 +173,21 @@ export function matchPublisher(domain, mayor) {
       country_code: mayor.country_code || null,
       mayor_id: mayor.id,
     };
+  }
+  const officeSource = sourcesFor(mayor.id).find((source) => {
+    const approved = String(source.domain || "")
+      .replace(/^www\./i, "")
+      .toLowerCase();
+    return domain === approved || domain.endsWith(`.${approved}`);
+  });
+  if (officeSource) {
+    return row(
+      officeSource.domain,
+      officeSource.name,
+      officeSource.tier,
+      mayor.country_code || null,
+      mayor.id,
+    );
   }
   const hits = PUBLISHERS.filter((p) => {
     const same =
