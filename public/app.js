@@ -998,6 +998,16 @@ async function resumeActiveSearch() {
   }
 }
 
+function platformSlotLabel(platform) {
+  return (
+    {
+      1: "١ · غرفة الأخبار الرسمية",
+      2: "٢ · أقوى تغطية محلية",
+      3: "٣ · وكالة أو صحيفة وطنية",
+    }[Number(platform.rank)] || platform.platform_ar || ""
+  );
+}
+
 function renderSettings(payload) {
   const box = $("settings-body");
   if (!box) return "";
@@ -1015,15 +1025,20 @@ function renderSettings(payload) {
       const platforms = office.platforms || [];
       const custom = office.origin === "custom";
       const badge = custom ? ` <span class="settings-badge">مضاف</span>` : "";
-      const host = office.official_host
-        ? `<br>النطاق الرسمي: <span dir="ltr">${escapeHtml(office.official_host)}</span>`
-        : "";
+      const lang = office.native_lang_ar
+        ? `${escapeHtml(office.native_lang_ar)}${office.native_lang ? ` (${escapeHtml(office.native_lang)})` : ""}`
+        : escapeHtml(office.native_lang || "");
+      const nativeDir = office.native_lang === "ar" ? "rtl" : "ltr";
       return `<article class="settings-office" data-mayor="${escapeHtml(office.id)}" data-origin="${escapeHtml(office.origin || "seed")}">
         <h3>${escapeHtml(office.name_ar)}${badge}</h3>
+        <dl class="settings-names">
+          <div><dt>عربي للعرض</dt><dd>${escapeHtml(office.name_ar)}</dd></div>
+          <div><dt>إنجليزي للرصد</dt><dd dir="ltr">${escapeHtml(office.name_en)}</dd></div>
+          <div><dt>لغة الأم${lang ? ` — ${lang}` : ""}</dt><dd dir="${nativeDir}">${escapeHtml(office.name_native)}</dd></div>
+        </dl>
         <p class="settings-meta">
-          ${escapeHtml(office.name_en)} · ${escapeHtml(office.name_native)}<br>
           ${escapeHtml(office.city_ar)}${office.city_en ? ` / ${escapeHtml(office.city_en)}` : ""} — ${escapeHtml(office.country_ar)}<br>
-          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}${host}
+          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}
         </p>
         <div class="settings-platforms">
           ${
@@ -1035,10 +1050,11 @@ function renderSettings(payload) {
                       .join(" ← ");
                     const checked = platform.enabled ? "checked" : "";
                     const off = platform.enabled ? "" : " is-off";
+                    const slot = platformSlotLabel(platform);
                     return `<div class="settings-platform${off}">
                       <div>
                         <b>${escapeHtml(platform.name)}</b>
-                        <small>${escapeHtml(platform.platform_ar || "")} · ${escapeHtml(types || platform.kind)}</small>
+                        <small>${escapeHtml(slot)}${platform.platform_ar ? ` · ${escapeHtml(platform.platform_ar)}` : ""} · ${escapeHtml(types || platform.kind)}</small>
                         <small>آخر فحص: ${escapeHtml(fmtDate(platform.last_checked_at))} · آخر اكتشاف: ${escapeHtml(fmtDate(platform.last_discovery_at))}</small>
                         <small>${escapeHtml(platform.operational?.label || "—")}</small>
                       </div>
@@ -1100,6 +1116,17 @@ $("settings-body").addEventListener("change", async (e) => {
   }
 });
 
+$("add-mayor-form").addEventListener("change", (e) => {
+  const form = e.currentTarget;
+  if (e.target.name !== "native_lang" && e.target.name !== "name_en") return;
+  const native = form.elements.name_native;
+  const lang = form.elements.native_lang.value;
+  native.required = lang !== "en";
+  if (lang === "en" && !String(native.value || "").trim()) {
+    native.value = form.elements.name_en.value;
+  }
+});
+
 $("add-mayor-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
@@ -1118,7 +1145,7 @@ $("add-mayor-form").addEventListener("submit", async (e) => {
       body: JSON.stringify(payload),
     });
     form.reset();
-    status.textContent = "أُضيف المكتب. يمكنك إضافة عمدة آخر من النموذج نفسه.";
+    status.textContent = "أُضيف المكتب بنفس قاعدة السجل، مع المواقع الثلاثة.";
     await loadSettings();
     await loadMayors();
     const card = document.querySelector(

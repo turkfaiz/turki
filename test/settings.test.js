@@ -4,7 +4,6 @@ import worker, { authorized, ensureDb } from "../src/worker.js";
 import { createTestD1 } from "./helpers/d1.js";
 import { MAYORS, parseMayorInput, slugifyMayorId } from "../src/mayors.js";
 import { APPROVED_SOURCES } from "../src/sources.js";
-import { runScan } from "../src/collect.js";
 
 function envWith(overrides = {}) {
   return {
@@ -28,11 +27,20 @@ function sampleMayor(overrides = {}) {
   return {
     name_ar: "نورة العبدالله",
     name_en: "Noura Alabdullah",
+    name_native: "نورة العبدالله",
     city_ar: "الرياض",
     city_en: "Riyadh",
     country_ar: "السعودية",
     country_code: "SA",
     native_lang: "ar",
+    title_ar: "عمدة الرياض",
+    title_en: "Mayor of Riyadh",
+    official_url: "https://www.alriyadh.gov.sa/news",
+    official_name: "أمانة الرياض",
+    local_url: "https://www.alriyadh.com",
+    local_name: "جريدة الرياض",
+    national_url: "https://www.spa.gov.sa",
+    national_name: "واس",
     ...overrides,
   };
 }
@@ -64,6 +72,7 @@ test("settings list every mayor with office titles and platforms from the regist
     assert.equal(office.name_ar, mayor.name_ar);
     assert.equal(office.name_en, mayor.name_en);
     assert.equal(office.name_native, mayor.name_native);
+    assert.equal(office.native_lang_ar, mayor.native_lang_ar);
     assert.equal(office.title_en, mayor.title_en);
     assert.equal(office.city_en, mayor.city_en);
     assert.ok(office.platforms.length >= 1);
@@ -132,11 +141,56 @@ test("parseMayorInput fills titles and language labels from the required basics"
   assert.equal(parsed.mayor.id, slugifyMayorId("Riyadh", "Noura Alabdullah"));
   assert.equal(parsed.mayor.title_ar, "عمدة الرياض");
   assert.equal(parsed.mayor.title_en, "Mayor of Riyadh");
-  assert.equal(parsed.mayor.name_native, "Noura Alabdullah");
+  assert.equal(parsed.mayor.name_native, "نورة العبدالله");
   assert.equal(parsed.mayor.native_lang_ar, "العربية");
   assert.equal(parsed.mayor.gn_hl, "ar");
   assert.equal(parsed.mayor.gn_gl, "SA");
   assert.equal(parsed.mayor.origin, "custom");
+});
+
+test("native-language names stay distinct from English monitoring names", () => {
+  const parsed = parseMayorInput({
+    name_ar: "أوه سيه هون",
+    name_en: "Oh Se-hoon",
+    name_native: "오세훈",
+    city_ar: "سيئول",
+    city_en: "Seoul",
+    country_ar: "كوريا الجنوبية",
+    country_code: "KR",
+    native_lang: "ko",
+    title_ar: "عمدة سيئول",
+    title_en: "Mayor of Seoul",
+  });
+  assert.equal(parsed.mayor.name_en, "Oh Se-hoon");
+  assert.equal(parsed.mayor.name_native, "오세훈");
+  assert.equal(parsed.mayor.name_ar, "أوه سيه هون");
+  const missingNative = parseMayorInput({
+    name_ar: "أوه سيه هون",
+    name_en: "Oh Se-hoon",
+    city_ar: "سيئول",
+    city_en: "Seoul",
+    country_ar: "كوريا الجنوبية",
+    country_code: "KR",
+    native_lang: "ko",
+  });
+  assert.equal(missingNative.error, "missing_fields");
+  assert.ok(missingNative.detail.includes("name_native"));
+});
+
+test("english offices may reuse the English name as the native monitoring name", () => {
+  const parsed = parseMayorInput({
+    name_ar: "كيم ماكغينيس",
+    name_en: "Kim McGuinness",
+    city_ar: "نيوكاسل",
+    city_en: "Newcastle",
+    country_ar: "المملكة المتحدة",
+    country_code: "GB",
+    native_lang: "en",
+    title_ar: "عمدة نيوكاسل",
+    title_en: "Mayor of Newcastle",
+  });
+  assert.equal(parsed.mayor.name_native, "Kim McGuinness");
+  assert.equal(parsed.mayor.native_lang_ar, "الإنجليزية");
 });
 
 test("parseMayorInput rejects a seed office and a private host", () => {
@@ -148,6 +202,7 @@ test("parseMayorInput rejects a seed office and a private host", () => {
   const missing = parseMayorInput({ city_en: "Riyadh" });
   assert.equal(missing.error, "missing_fields");
   assert.ok(missing.detail.includes("name_ar"));
+  assert.equal(parseMayorInput(sampleMayor({ native_lang: "xx" })).error, "bad_native_lang");
 });
 
 test("an authorized user can add a custom mayor from settings", async () => {
@@ -169,14 +224,23 @@ test("an authorized user can add a custom mayor from settings", async () => {
   assert.equal(payload.offices.length, MAYORS.length + 1);
   const office = payload.offices.find((row) => row.id === payload.mayor.id);
   assert.equal(office.origin, "custom");
-  assert.equal(office.platforms.length, 0);
+  assert.equal(office.platforms.length, 3);
+  assert.deepEqual(
+    office.platforms.map((row) => row.platform),
+    ["official", "newspaper", "agency"],
+  );
+  assert.equal(office.name_native, "نورة العبدالله");
+  assert.equal(office.native_lang_ar, "العربية");
 
   const listed = await worker.fetch(request("/api/settings/offices", auth), env).then((r) => r.json());
   assert.ok(listed.offices.some((row) => row.id === payload.mayor.id && row.origin === "custom"));
   const mayors = await worker.fetch(request("/api/mayors", auth), env).then((r) => r.json());
   assert.ok(mayors.mayors.some((row) => row.id === payload.mayor.id && row.name_ar === "نورة العبدالله"));
-  const sources = env.DB.one(`SELECT COUNT(*) AS n FROM sources WHERE mayor_id = ?`, payload.mayor.id);
-  assert.equal(Number(sources.n), 0);
+  const sources = env.DB.query(`SELECT domain, rank, platform FROM sources WHERE mayor_id = ? ORDER BY rank`, payload.mayor.id);
+  assert.deepEqual(
+    sources.map((row) => row.domain),
+    ["alriyadh.gov.sa", "alriyadh.com", "spa.gov.sa"],
+  );
   const audit = env.DB.one(`SELECT actor, action, mayor_id FROM settings_audit WHERE action = 'mayor_created'`);
   assert.equal(audit.actor, "mayorwatch");
   assert.equal(audit.mayor_id, payload.mayor.id);
@@ -235,7 +299,7 @@ test("an unauthenticated caller cannot add a mayor", async () => {
   assert.equal(res.status, 401);
 });
 
-test("a custom mayor without platforms completes a scan and a queued job", async () => {
+test("a custom mayor with three platforms is queued for those sources", async () => {
   const queue = fakeQueue();
   const env = envWith({ SCAN_QUEUE: queue });
   await ensureDb(env);
@@ -248,10 +312,7 @@ test("a custom mayor without platforms completes a scan and a queued job", async
       env,
     )
     .then((res) => res.json());
-  const scan = await runScan(env, { type: "manual", mayorId: created.mayor.id });
-  assert.equal(scan.found, 0);
-  assert.equal(scan.errors.length, 0);
-  assert.ok(scan.finished_at || scan.scanId);
+  assert.equal(created.platforms.length, 3);
 
   const queued = await worker.fetch(
     request("/api/search", {
@@ -262,12 +323,104 @@ test("a custom mayor without platforms completes a scan and a queued job", async
   );
   assert.equal(queued.status, 202);
   const job = await queued.json();
-  const task = env.DB.one(
-    `SELECT status, detail FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
-    job.jobId,
-    created.mayor.id,
+  assert.equal(job.queued, 3);
+  assert.equal(queue.messages.length, 3);
+  assert.ok(queue.messages.every((message) => message.body.type === "source_poll"));
+  assert.ok(queue.messages.every((message) => message.body.mayorId === created.mayor.id));
+});
+
+test("custom platforms stay in the live registry after a worker restart", async () => {
+  const db = createTestD1();
+  const env = envWith({ DB: db });
+  await ensureDb(env);
+  const created = await worker
+    .fetch(
+      request("/api/settings/mayors", {
+        method: "POST",
+        body: sampleMayor({ id: "riyadh-noura" }),
+      }),
+      env,
+    )
+    .then((res) => res.json());
+  const queue = fakeQueue();
+  const restarted = envWith({ DB: db.reopen(), SCAN_QUEUE: queue });
+  await ensureDb(restarted);
+  const queued = await worker.fetch(
+    request("/api/search", {
+      method: "POST",
+      body: { mayor_id: created.mayor.id },
+    }),
+    restarted,
   );
-  assert.equal(task.status, "completed");
-  assert.match(task.detail, /لا منصات/);
-  assert.equal(queue.messages.length, 0);
+  assert.equal(queued.status, 202);
+  assert.equal((await queued.json()).queued, 3);
+  assert.equal(queue.messages.length, 3);
+});
+
+test("the three platforms reject search engines and require three distinct hosts", async () => {
+  const env = envWith();
+  await ensureDb(env);
+  const google = await worker.fetch(
+    request("/api/settings/mayors", {
+      method: "POST",
+      body: sampleMayor({ official_url: "https://news.google.com" }),
+    }),
+    env,
+  );
+  assert.equal(google.status, 400);
+  assert.equal((await google.json()).error, "blocked_host");
+
+  const missing = await worker.fetch(
+    request("/api/settings/mayors", {
+      method: "POST",
+      body: {
+        name_ar: "نورة العبدالله",
+        name_en: "Noura Alabdullah",
+        name_native: "نورة العبدالله",
+        city_ar: "الرياض",
+        city_en: "Riyadh",
+        country_ar: "السعودية",
+        country_code: "SA",
+        native_lang: "ar",
+      },
+    }),
+    env,
+  );
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).error, "missing_platforms");
+
+  const duplicate = await worker.fetch(
+    request("/api/settings/mayors", {
+      method: "POST",
+      body: sampleMayor({
+        local_url: "https://www.alriyadh.gov.sa/media",
+      }),
+    }),
+    env,
+  );
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json()).error, "duplicate_platform");
+});
+
+test("a bootstrap replay does not delete custom office platforms", async () => {
+  const db = createTestD1();
+  const env = envWith({ DB: db });
+  await ensureDb(env);
+  const created = await worker
+    .fetch(
+      request("/api/settings/mayors", {
+        method: "POST",
+        body: sampleMayor({ id: "riyadh-noura" }),
+      }),
+      env,
+    )
+    .then((res) => res.json());
+  db.exec(`UPDATE meta SET v = 'bootstrap-v1' WHERE k = 'bootstrap_version'`);
+  await ensureDb(envWith({ DB: db.reopen() }));
+  assert.equal(
+    db.query(`SELECT domain FROM sources WHERE mayor_id = ? ORDER BY rank`, created.mayor.id).length,
+    3,
+  );
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM sources`).n, APPROVED_SOURCES.length + 3);
+  assert.ok(db.one(`SELECT id FROM mayors WHERE id = ?`, created.mayor.id));
 });

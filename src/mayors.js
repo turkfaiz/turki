@@ -327,21 +327,27 @@ const LANG_AR = {
   he: "العبرية",
 };
 
+export const MONITOR_LANGUAGES = { ...LANG_AR };
+
 export function parseMayorInput(body = {}) {
   const name_ar = clip(body.name_ar, 120);
   const name_en = clip(body.name_en, 120);
-  const name_native = clip(body.name_native, 120) || name_en;
   const city_ar = clip(body.city_ar, 80);
   const city_en = clip(body.city_en, 80);
   const country_ar = clip(body.country_ar, 80);
   const country_code = clip(body.country_code, 8).toUpperCase();
+  const native_lang = clip(body.native_lang, 12).toLowerCase();
+  const lang = native_lang.split("-")[0];
+  if (native_lang && (!/^[a-z]{2,3}(?:-[a-z]{2})?$/i.test(native_lang) || !LANG_AR[lang])) {
+    return { error: "bad_native_lang", detail: "اختر لغة الأم من قائمة لغات الرصد." };
+  }
+  const name_native = clip(body.name_native, 120) || (lang === "en" ? name_en : "");
   const title_ar = clip(body.title_ar, 120) || (city_ar ? `عمدة ${city_ar}` : "");
   const title_en = clip(body.title_en, 120) || (city_en ? `Mayor of ${city_en}` : "");
-  const native_lang = clip(body.native_lang, 12).toLowerCase();
-  const native_lang_ar =
-    clip(body.native_lang_ar, 40) || LANG_AR[native_lang.split("-")[0]] || "";
-  const official_host = body.official_host ? normalizeOfficialHost(body.official_host) : "";
-  if (body.official_host && !official_host) {
+  const native_lang_ar = LANG_AR[lang] || clip(body.native_lang_ar, 40);
+  const officialFromUrl = body.official_host || body.official_url || "";
+  const official_host = officialFromUrl ? normalizeOfficialHost(officialFromUrl) : "";
+  if (officialFromUrl && !official_host) {
     return { error: "bad_official_host", detail: "النطاق الرسمي يجب أن يكون اسم مضيف عامًا، بلا مسار." };
   }
   const required = {
@@ -365,9 +371,6 @@ export function parseMayorInput(body = {}) {
   }
   if (!/^[A-Z]{2}$/.test(country_code)) {
     return { error: "bad_country_code", detail: "رمز الدولة حرفان لاتينيان، مثل SA." };
-  }
-  if (!/^[a-z]{2,3}(?:-[a-z]{2})?$/i.test(native_lang)) {
-    return { error: "bad_native_lang", detail: "رمز لغة الرصد مثل ar أو ja أو zh." };
   }
   const requestedId = clip(body.id, 40).toLowerCase();
   const id = requestedId || slugifyMayorId(city_en, name_en);
@@ -402,7 +405,7 @@ export function parseMayorInput(body = {}) {
 export function mayorInputMessage(parsed) {
   if (!parsed?.error) return "";
   if (parsed.error === "missing_fields") {
-    return `أكمل البيانات الأساسية المطلوبة: ${(parsed.detail || []).join("، ")}`;
+    return `أكمل بيانات المكتب بنفس قاعدة السجل: ${(parsed.detail || []).join("، ")}`;
   }
   if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
   return parsed.error;

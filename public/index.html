@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui21" />
+    <link rel="stylesheet" href="/styles.css?v=ui22" />
   </head>
   <body>
     <div class="sheet">
@@ -95,70 +95,128 @@
           <div>
             <p class="gazette">الإعدادات</p>
             <h2 id="settings-title">العمداء ومنصات الرصد</h2>
-            <p class="sub">أضف هوية عمدة جديد بالبيانات الأساسية. المنصات تبقى من السجل المعتمد ولا تُفتح نطاقات من هنا.</p>
+            <p class="sub">كل مكتب كالسجل: اسم عربي للعرض، اسم إنجليزي واسم بلغة الأم للرصد، ثم ثلاثة مواقع فقط — رسمي، محلي، وطني.</p>
           </div>
           <button type="button" class="settings-close" id="settings-close">إغلاق</button>
         </div>
         <div class="settings-scroll">
         <form id="add-mayor-form" class="settings-add" autocomplete="off">
-          <h3>إضافة عمدة</h3>
-          <p class="settings-add-note">الحقول المطلوبة تكفي لإنشاء المكتب. النطاق الرسمي للعرض والتصنيف فقط، ولا يصبح منصة رصد.</p>
-          <div class="settings-fields">
-            <label class="settings-field">
-              الاسم بالعربية *
-              <input name="name_ar" required maxlength="120" placeholder="نورة العبدالله">
-            </label>
-            <label class="settings-field">
-              الاسم بالإنجليزية *
-              <input name="name_en" required maxlength="120" placeholder="Noura Alabdullah" dir="ltr">
-            </label>
-            <label class="settings-field">
-              الاسم بلغة الأم
-              <input name="name_native" maxlength="120" placeholder="إن تُرك يُنسخ من الإنجليزية">
-            </label>
-            <label class="settings-field">
-              المدينة بالعربية *
-              <input name="city_ar" required maxlength="80" placeholder="الرياض">
-            </label>
-            <label class="settings-field">
-              المدينة بالإنجليزية *
-              <input name="city_en" required maxlength="80" placeholder="Riyadh" dir="ltr">
-            </label>
-            <label class="settings-field">
-              الدولة بالعربية *
-              <input name="country_ar" required maxlength="80" placeholder="السعودية">
-            </label>
-            <label class="settings-field">
-              رمز الدولة *
-              <input name="country_code" required maxlength="2" placeholder="SA" dir="ltr" pattern="[A-Za-z]{2}">
-            </label>
-            <label class="settings-field">
-              لغة الرصد *
-              <input name="native_lang" required maxlength="12" placeholder="ar" dir="ltr" pattern="[A-Za-z]{2,3}(-[A-Za-z]{2})?">
-            </label>
-            <label class="settings-field">
-              لغة الرصد بالعربية
-              <input name="native_lang_ar" maxlength="40" placeholder="تُستنتج من رمز اللغة إن عُرفت">
-            </label>
-            <label class="settings-field">
-              المنصب بالعربية
-              <input name="title_ar" maxlength="120" placeholder="عمدة الرياض">
-            </label>
-            <label class="settings-field">
-              المنصب بالإنجليزية
-              <input name="title_en" maxlength="120" placeholder="Mayor of Riyadh" dir="ltr">
-            </label>
-            <label class="settings-field">
-              النطاق الرسمي
-              <input name="official_host" maxlength="253" placeholder="alriyadh.gov.sa" dir="ltr">
-            </label>
-            <label class="settings-field">
-              معرّف المكتب
-              <input name="id" maxlength="40" placeholder="يُشتق تلقائياً من المدينة والاسم" dir="ltr" pattern="[A-Za-z][A-Za-z0-9-]{1,39}">
-            </label>
-          </div>
+          <h3>إضافة مكتب</h3>
+          <p class="settings-add-note">الحقول مطابقة لمكاتب المرحلة الأولى. لغة الأم ليست الإنجليزية إلا إذا كانت لغة المدينة إنجليزية. المواقع الثلاثة هي منصات الرصد، وليست محركات بحث.</p>
+
+          <fieldset class="settings-group">
+            <legend>الهوية</legend>
+            <div class="settings-fields">
+              <label class="settings-field">
+                الاسم بالعربية — للعرض
+                <input name="name_ar" required maxlength="120" placeholder="أوه سيه هون">
+              </label>
+              <label class="settings-field">
+                الاسم بالإنجليزية — للرصد
+                <input name="name_en" required maxlength="120" placeholder="Oh Se-hoon" dir="ltr">
+              </label>
+              <label class="settings-field">
+                الاسم بلغة الأم — للرصد
+                <input name="name_native" required maxlength="120" placeholder="오세훈 أو Stefano Lo Russo أو يوسف الشواربة" dir="auto">
+              </label>
+              <label class="settings-field">
+                لغة الأم
+                <select name="native_lang" required>
+                  <option value="">اختر لغة المدينة</option>
+                  <option value="ar">العربية</option>
+                  <option value="en">الإنجليزية</option>
+                  <option value="es">الإسبانية</option>
+                  <option value="it">الإيطالية</option>
+                  <option value="ja">اليابانية</option>
+                  <option value="ko">الكورية</option>
+                  <option value="el">اليونانية</option>
+                  <option value="sq">الألبانية</option>
+                  <option value="zh">الصينية</option>
+                  <option value="fr">الفرنسية</option>
+                  <option value="de">الألمانية</option>
+                  <option value="pt">البرتغالية</option>
+                  <option value="tr">التركية</option>
+                  <option value="fa">الفارسية</option>
+                  <option value="ur">الأردية</option>
+                  <option value="hi">الهندية</option>
+                  <option value="ru">الروسية</option>
+                  <option value="nl">الهولندية</option>
+                  <option value="sv">السويدية</option>
+                  <option value="pl">البولندية</option>
+                  <option value="uk">الأوكرانية</option>
+                  <option value="id">الإندونيسية</option>
+                  <option value="ms">الملايوية</option>
+                  <option value="th">التايلاندية</option>
+                  <option value="vi">الفيتنامية</option>
+                  <option value="he">العبرية</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>المكان والمنصب</legend>
+            <div class="settings-fields">
+              <label class="settings-field">
+                المدينة بالعربية
+                <input name="city_ar" required maxlength="80" placeholder="سيئول">
+              </label>
+              <label class="settings-field">
+                المدينة بالإنجليزية
+                <input name="city_en" required maxlength="80" placeholder="Seoul" dir="ltr">
+              </label>
+              <label class="settings-field">
+                الدولة بالعربية
+                <input name="country_ar" required maxlength="80" placeholder="كوريا الجنوبية">
+              </label>
+              <label class="settings-field">
+                رمز الدولة
+                <input name="country_code" required maxlength="2" placeholder="KR" dir="ltr" pattern="[A-Za-z]{2}">
+              </label>
+              <label class="settings-field">
+                المنصب بالعربية
+                <input name="title_ar" required maxlength="120" placeholder="عمدة سيئول">
+              </label>
+              <label class="settings-field">
+                المنصب بالإنجليزية
+                <input name="title_en" required maxlength="120" placeholder="Mayor of Seoul" dir="ltr">
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>منصات الرصد — ثلاثة مواقع</legend>
+            <p class="settings-add-note">مثل تورينو: غرفة أخبار البلدية، أقوى تغطية محلية، ثم وكالة أو صحيفة وطنية. الرابط يكفي؛ الاسم اختياري.</p>
+            <div class="settings-fields">
+              <label class="settings-field">
+                ١ · غرفة الأخبار الرسمية
+                <input name="official_url" required maxlength="500" placeholder="https://english.seoul.go.kr/" dir="ltr">
+              </label>
+              <label class="settings-field">
+                اسم الموقع الرسمي
+                <input name="official_name" maxlength="120" placeholder="Seoul Metropolitan Government" dir="ltr">
+              </label>
+              <label class="settings-field">
+                ٢ · أقوى تغطية محلية
+                <input name="local_url" required maxlength="500" placeholder="https://www.yna.co.kr/" dir="ltr">
+              </label>
+              <label class="settings-field">
+                اسم التغطية المحلية
+                <input name="local_name" maxlength="120" placeholder="Yonhap News" dir="ltr">
+              </label>
+              <label class="settings-field">
+                ٣ · وكالة أو صحيفة وطنية
+                <input name="national_url" required maxlength="500" placeholder="https://www.koreaherald.com/" dir="ltr">
+              </label>
+              <label class="settings-field">
+                اسم الوكالة أو الصحيفة
+                <input name="national_name" maxlength="120" placeholder="The Korea Herald" dir="ltr">
+              </label>
+            </div>
+          </fieldset>
+
           <div class="settings-add-actions">
-            <button type="submit" class="btn-add-mayor">حفظ العمدة</button>
+            <button type="submit" class="btn-add-mayor">حفظ المكتب</button>
             <p class="settings-add-status" id="add-mayor-status" role="status"></p>
           </div>
         </form>
@@ -166,6 +224,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=ui21"></script>
+    <script src="/app.js?v=ui22"></script>
   </body>
 </html>
