@@ -44,7 +44,10 @@ test("public health lists every AI slot without leaking secrets", async () => {
     assert.equal(Object.hasOwn(slot, "vars"), false);
   }
   assert.equal(payload.ai.configured, true);
-  assert.equal(payload.ai.budget.remaining, payload.ai.slots.reduce((sum, slot) => sum + slot.budget.remaining, 0));
+  const usable = payload.ai.slots
+    .filter((slot) => slot.bound && !slot.blocked)
+    .reduce((sum, slot) => sum + slot.budget.remaining, 0);
+  assert.equal(payload.ai.budget.remaining, usable);
   const raw = JSON.stringify(payload);
   assert.doesNotMatch(raw, /gem-secret-value|deep-secret-value|qwen-secret-value/);
   assert.doesNotMatch(raw, /GEMINI_API_KEY|DEEPSEEK_API_KEY|QWEN_API_KEY/);

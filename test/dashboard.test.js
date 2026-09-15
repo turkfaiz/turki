@@ -231,6 +231,38 @@ test("status cards sum remaining quota across every bound slot", () => {
   assert.match(html, /جيميني، ديبسيك، كوين/);
 });
 
+test("a paused slot is left out of the usable remaining quota", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.ai.slots = [
+    {
+      id: "gemini",
+      nameAr: "جيميني",
+      bound: true,
+      blocked: false,
+      budget: { remaining: 379, dailyLimit: 400, blocked: false, mergeLimit: 120, minIntervalMs: 4500 },
+    },
+    {
+      id: "deepseek",
+      nameAr: "ديبسيك",
+      bound: true,
+      blocked: true,
+      budget: {
+        remaining: 1999,
+        dailyLimit: 2000,
+        blocked: true,
+        blockReason: "provider_unpaid",
+        mergeLimit: 600,
+        minIntervalMs: 800,
+      },
+    },
+  ];
+  const budget = page.displayBudget(data);
+  assert.equal(budget.remaining, 379);
+  assert.equal(budget.dailyLimit, 400);
+  assert.equal(budget.blocked, false);
+});
+
 test("a terminal slot error is shown on that provider card only", () => {
   const page = loadPageScript();
   const data = diagnosticsFixture();

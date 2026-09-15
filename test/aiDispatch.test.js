@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureDb } from "../src/worker.js";
-import { assignPendingLanes, boundSlotWaitMs, providerLaneSnapshot, slotRuntimeStatuses } from "../src/aiDispatch.js";
+import { assignPendingLanes, aggregateSlotBudget, boundSlotWaitMs, providerLaneSnapshot, slotRuntimeStatuses } from "../src/aiDispatch.js";
 import { briefBacklog, translatePending } from "../src/translate.js";
 import { noteAiFailure } from "../src/aiBudget.js";
 import { createTestD1 } from "./helpers/d1.js";
@@ -232,6 +232,50 @@ test("a 402 from DeepSeek defers the page so Gemini can still read it", async ()
   const second = await translatePending(env, 3, null, fetcher);
   assert.equal(second.summarized, 1);
   assert.match(db.one(`SELECT trans_engine FROM items WHERE id = 'a'`).trans_engine, /gemini|qwen/);
+});
+
+test("aggregate budget counts only slots that can run now", () => {
+  const budget = aggregateSlotBudget([
+    {
+      id: "gemini",
+      bound: true,
+      blocked: false,
+      budget: { remaining: 379, dailyLimit: 400, used: 21, mergeLimit: 120, minIntervalMs: 4500, blocked: false },
+    },
+    {
+      id: "deepseek",
+      bound: true,
+      blocked: true,
+      budget: {
+        remaining: 1999,
+        dailyLimit: 2000,
+        used: 1,
+        mergeLimit: 600,
+        minIntervalMs: 800,
+        blocked: true,
+        blockReason: "provider_unpaid",
+        resumesInSeconds: 1700,
+      },
+    },
+    {
+      id: "qwen",
+      bound: true,
+      blocked: true,
+      budget: {
+        remaining: 1999,
+        dailyLimit: 2000,
+        used: 1,
+        mergeLimit: 600,
+        minIntervalMs: 800,
+        blocked: true,
+        blockReason: "provider_rejected",
+        resumesInSeconds: 1700,
+      },
+    },
+  ]);
+  assert.equal(budget.remaining, 379);
+  assert.equal(budget.dailyLimit, 400);
+  assert.equal(budget.blocked, false);
 });
 
 test("drain wait follows the fastest bound slot, not Gemini alone", () => {

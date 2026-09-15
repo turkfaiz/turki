@@ -200,14 +200,18 @@ export function aggregateSlotBudget(slots) {
       resumesInSeconds: 0,
     };
   }
-  const remaining = bound.reduce((sum, row) => sum + Number(row.budget?.remaining || 0), 0);
-  const dailyLimit = bound.reduce((sum, row) => sum + Number(row.budget?.dailyLimit || 0), 0);
-  const used = bound.reduce((sum, row) => sum + Number(row.budget?.used || 0), 0);
-  const mergeLimit = bound.reduce((sum, row) => sum + Number(row.budget?.mergeLimit || 0), 0);
+  const active = bound.filter((row) => !(row.blocked || row.budget?.blocked));
+  const pool = active.length ? active : bound;
+  const remaining = active.length
+    ? active.reduce((sum, row) => sum + Number(row.budget?.remaining || 0), 0)
+    : 0;
+  const dailyLimit = pool.reduce((sum, row) => sum + Number(row.budget?.dailyLimit || 0), 0);
+  const used = pool.reduce((sum, row) => sum + Number(row.budget?.used || 0), 0);
+  const mergeLimit = pool.reduce((sum, row) => sum + Number(row.budget?.mergeLimit || 0), 0);
   const minIntervalMs = Math.min(
-    ...bound.map((row) => Number(row.budget?.minIntervalMs ?? row.minIntervalMs ?? 0)),
+    ...pool.map((row) => Number(row.budget?.minIntervalMs ?? row.minIntervalMs ?? 0)),
   );
-  const allBlocked = bound.every((row) => row.blocked || row.budget?.blocked);
+  const allBlocked = active.length === 0;
   const resumesInSeconds = allBlocked
     ? Math.min(...bound.map((row) => Number(row.budget?.resumesInSeconds || 0)))
     : 0;
