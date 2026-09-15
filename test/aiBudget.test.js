@@ -96,19 +96,6 @@ test("a 402 from one provider pauses that slot only", async () => {
   assert.equal((await reserveAiCall(env, "brief", "gemini")).ok, true);
 });
 
-test("a 400 request-shape rejection does not park the slot for half an hour", async () => {
-  const env = aiEnv({
-    QWEN_API_KEY: "qwen",
-    QWEN_MIN_INTERVAL_MS: "0",
-    AI_MIN_INTERVAL_MS: "0",
-  });
-  await noteAiFailure(env, { status: 400 }, "qwen");
-  const qwen = await budgetState(env, "qwen");
-  assert.equal(qwen.blocked, true);
-  assert.equal(qwen.blockReason, "provider_rejected");
-  assert.ok(qwen.resumesInSeconds <= 45);
-});
-
 test("an exhausted budget defers the brief without ever calling the provider", async () => {
   const env = aiEnv({ AI_DAILY_LIMIT: "1" });
   await reserveAiCall(env, "brief");

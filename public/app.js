@@ -358,18 +358,10 @@ function displayBudget(d) {
   return budgetFromSlots(d.ai?.slots) || budgetFromSlots(d.providers?.lanes) || d.ai?.budget || {};
 }
 
-function slotPauseLabel(budget) {
-  const reason = budget?.blockReason;
-  if (reason === "provider_unpaid") return "الحساب غير مدفوع — لن يعمل حتى يُشحن الرصيد";
-  if (reason === "provider_rejected") return "المزود رفض الطلب — ليس انتظار ثلاثين دقيقة";
-  if (budget?.blocked) return `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
-  return "";
-}
-
 function boundSlotNote(d, budget) {
   const slots = (d.ai?.slots || d.providers?.lanes || []).filter((row) => row.bound);
   if (!d.ai?.configured && !slots.length) return "المفتاح غير مربوط";
-  if (budget.blocked) return slotPauseLabel(budget) || `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
+  if (budget.blocked) return `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`;
   if (slots.length > 1) {
     return `${slots.map((row) => row.nameAr || row.id).join("، ")} · نداء واحد لكل موجز`;
   }
@@ -392,7 +384,7 @@ function renderProviderLanes(providers) {
             : !lane.enabled
               ? `موقوف من ${lane.vars.enabled}`
               : budget.blocked
-                ? slotPauseLabel(budget)
+                ? `متوقف · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
                 : `${lane.model} · يعمل`;
           const lastError = lane.lastError?.code
             ? `<small class="readout-note">آخر خطأ: ${escapeHtml(briefErrorReason(lane.lastError.code))}</small>`

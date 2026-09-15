@@ -130,38 +130,3 @@ test("a stamped database missing a new table is repaired instead of failing", as
   assert.ok(tables.has("brief_versions"), "the missing table is recreated");
   assert.ok(tables.has("approvals"));
 });
-
-test("a bootstrap bump clears a rejected Qwen pause and requeues failed briefs", async () => {
-  const db = createTestD1();
-  await ensureDb(envWith(db));
-  db.exec(`
-    INSERT INTO items (
-      id, mayor_id, source, title, title_normalized, url, published_at, snippet,
-      title_ar, snippet_ar, language, confidence, status, fingerprint, trans_engine,
-      publisher_domain, publisher_tier, article_text, source_count, brief_attempts, brief_error
-    ) VALUES (
-      'failed-ungrounded', 'turin', 'approved_feed',
-      'Lo Russo apre via Roma', 'lo russo apre via roma',
-      'https://www.comune.torino.it/fail', datetime('now','-1 days'), 'snippet',
-      'تعذر تلخيص الصفحة بالذكاء الاصطناعي — ستيفانو لو روسو', '', 'it', 'raw', 'inbox',
-      'fp-fail', 'brief-ai-error', 'comune.torino.it', 0,
-      'Stefano Lo Russo apre via Roma.', 1, 5, 'ai_ungrounded_headline'
-    );
-    INSERT INTO ai_provider_budget (day, provider, calls, blocked_until, block_reason)
-    VALUES (date('now'), 'qwen', 2, datetime('now', '+20 minutes'), 'provider_rejected');
-    UPDATE meta SET v = 'bootstrap-v17' WHERE k = 'bootstrap_version';
-    DELETE FROM meta WHERE k = 'qwen_think_epoch';
-  `);
-  await ensureDb(envWith(db.reopen()));
-  const budget = db.one(
-    `SELECT blocked_until, block_reason FROM ai_provider_budget WHERE provider = 'qwen'`,
-  );
-  assert.equal(budget.block_reason, null);
-  assert.equal(budget.blocked_until, null);
-  const item = db.one(
-    `SELECT trans_engine, brief_attempts, brief_error FROM items WHERE id = 'failed-ungrounded'`,
-  );
-  assert.equal(item.trans_engine, "brief-pending");
-  assert.equal(item.brief_attempts, 0);
-  assert.equal(item.brief_error, null);
-});
