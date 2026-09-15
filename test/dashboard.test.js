@@ -333,6 +333,8 @@ test("a blocked AI budget is reported as a pause with a resume time", () => {
 test("failure codes are explained in Arabic instead of shown raw", () => {
   const { briefErrorReason } = loadPageScript();
   assert.match(briefErrorReason("ai_ungrounded_headline"), /جملة حرفية/);
+  assert.match(briefErrorReason("ai_headline_has_source_language"), /لغة المصدر/);
+  assert.match(briefErrorReason("ai_facts_mismatch_headline"), /حدث العنوان/);
   assert.match(briefErrorReason("ai_deferred:daily_limit"), /نفدت حصة/);
   assert.match(briefErrorReason("article_text_too_short"), /أقصر/);
   assert.match(briefErrorReason("The operation was aborted"), /المهلة/);
@@ -437,6 +439,16 @@ test("the settings panel includes a form for the required mayor identity fields"
     assert.match(html, new RegExp(`name="${field}"`));
   }
   assert.match(html, /حفظ العمدة/);
+});
+
+test("the waiting lane stays collapsed until the user opens it", () => {
+  const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="waiting-lane"/);
+  assert.match(html, /id="waiting-list"/);
+  assert.match(html, /قيد القراءة/);
+  assert.doesNotMatch(html, /<details[^>]*id="waiting-lane"[^>]*open/);
+  const css = fs.readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.waiting-lane/);
 });
 
 test("the settings overlay stays closed until the user opens it", () => {

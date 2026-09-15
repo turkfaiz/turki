@@ -165,3 +165,18 @@ test("a bootstrap bump clears a rejected Qwen pause and requeues failed briefs",
   assert.equal(item.brief_attempts, 0);
   assert.equal(item.brief_error, null);
 });
+
+test("a missing desk wipe epoch clears news but keeps offices and platforms", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  seedWorkingData(db);
+  db.exec(`UPDATE meta SET v = 'bootstrap-v18' WHERE k = 'bootstrap_version'`);
+  db.exec(`DELETE FROM meta WHERE k = 'desk_wipe_epoch'`);
+  await ensureDb(envWith(db.reopen()));
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM items`).n, 0);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM scans`).n, 0);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n, 0);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM mayors`).n, 12);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM sources`).n, 36);
+  assert.equal(db.one(`SELECT v FROM meta WHERE k = 'desk_wipe_epoch'`).v, "fresh-desk-v1");
+});

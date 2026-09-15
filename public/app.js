@@ -42,7 +42,9 @@ function confidenceLabel(c) {
 }
 
 function displayTitle(it) {
-  return it.news_title_ar || it.title || "—";
+  const ar = it.news_title_ar || "";
+  if (ar && !/^(بانتظار|تعذر)/.test(ar)) return ar;
+  return it.title || ar || "—";
 }
 
 /** الشارة تعكس مستوى التحقق الفعلي، لا مجرد وجود موجز. */
@@ -72,6 +74,8 @@ function briefErrorReason(code) {
     [/aborted|AbortError|timeout/i, "انتهت المهلة قبل أن يرد الذكاء الاصطناعي على قراءة الصفحة."],
     [/subrequest|too many subrequests|worker invocation/i, "توقف النداء لأن جلب الصفحات والقراءة وقعا في نفس التشغيل وتجاوزا حد طلبات العامل. القراءة صارت في مسار مستقل وتُعاد تلقائيًا."],
     [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
+    [/ai_headline_has_source_language/i, "العنوان احتفظ بكلمات من لغة المصدر. يُرفض ويُعاد حتى يُصاغ بالعربية فقط مع نقل الأسماء."],
+    [/ai_facts_mismatch_headline/i, "الحقائق لم تكمل حدث العنوان، فإما كرّرته أو جاءت من خبر آخر في الصفحة."],
     [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
     [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
     [/article_text_too_short/i, "نص الصفحة أقصر من أن يُستخرج منه موجز موثّق."],
@@ -209,6 +213,14 @@ async function loadStats() {
   $("stat-dup").textContent = num(s.week?.duplicates);
   state.aiReady = s.sources?.ai_brief === "ready";
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
+  const waiting = Number(mayorId ? row?.waiting || 0 : s.waiting) || 0;
+  state.waitingCount = waiting;
+  const waitingHead = $("waiting-headline");
+  if (waitingHead && !$("waiting-lane")?.open) {
+    waitingHead.textContent = waiting
+      ? `${num(waiting)} تُقرأ الآن — اضغط للدخول`
+      : "مخفي حتى يُفتح";
+  }
 }
 
 function humanWait(seconds) {
@@ -586,19 +598,8 @@ function itemsQuery() {
   return `/api/items?${qs.toString()}`;
 }
 
-async function loadItems() {
-  $("list").innerHTML = `<div class="empty">جاري التحميل…</div>`;
-  const { items } = await api(itemsQuery());
-  state.items = items;
-  renderItems(items);
-}
-
-function renderItems(items) {
-  if (!items.length) {
-    $("list").innerHTML = `<div class="empty">لا توجد بطاقات في هذا القسم. اضغط بحث لتشغيل المسار على النطاق الحالي.</div>`;
-    return;
-  }
-  $("list").innerHTML = items
+function itemCardsHtml(items) {
+  return items
     .map((it) => `
       <button type="button" class="result ${it.id === state.selectedId ? "selected" : ""}" data-id="${it.id}">
         <p class="kicker">${escapeHtml(it.country_ar)} · ${escapeHtml(it.city_ar)} · ${escapeHtml(it.name_ar)}</p>
@@ -618,19 +619,55 @@ function renderItems(items) {
     .join("");
 }
 
+async function loadItems() {
+  $("list").innerHTML = `<div class="empty">جاري التحميل…</div>`;
+  const { items } = await api(itemsQuery());
+  state.items = items;
+  renderItems(items);
+}
+
+function renderItems(items) {
+  if (!items.length) {
+    $("list").innerHTML = `<div class="empty">لا توجد بطاقات في هذا القسم. اضغط بحث لتشغيل المسار على النطاق الحالي.</div>`;
+    return;
+  }
+  $("list").innerHTML = itemCardsHtml(items);
+}
+
+async function loadWaiting() {
+  const list = $("waiting-list");
+  const head = $("waiting-headline");
+  if (!list) return;
+  const qs = new URLSearchParams({ status: "waiting" });
+  const mayorId = selectedMayorId();
+  if (mayorId) qs.set("mayor_id", mayorId);
+  const { items } = await api(`/api/items?${qs.toString()}`);
+  state.waitingItems = items;
+  const n = items.length;
+  if (head) {
+    head.textContent = n ? `${num(n)} تُقرأ الآن` : "لا أخبار قيد القراءة";
+  }
+  if (!n) {
+    list.innerHTML = `<div class="empty">لا أخبار تُقرأ الآن. بعد الرصد تظهر هنا حتى يكتمل الموجز العربي.</div>`;
+    return;
+  }
+  list.innerHTML = itemCardsHtml(items);
+}
+
 async function loadDetail(id) {
   state.selectedId = id;
   const { item } = await api(`/api/items/${id}`);
-  const ar = item.news_title_ar || item.title || "—";
+  const ar = displayTitle(item);
   const facts = factItems(item.news_snippet_ar);
   const sources = mergedSources(item);
   const excludeBox =
     item.status === "excluded"
       ? `<p class="meta">سبب الاستبعاد: ${escapeHtml(item.exclude_reason || "—")}</p>`
       : "";
+  const readyBrief = /^brief-ai-[a-z0-9]+-v2:/i.test(item.trans_engine || "");
   $("detail").innerHTML = `
     <div class="brief-head">
-      <strong>نشرة جاهزة للقرار</strong>
+      <strong>${readyBrief ? "نشرة جاهزة للقرار" : "ما زال يُقرأ — بعد اكتمال الموجز ينتقل تلقائيًا إلى بانتظار القرار"}</strong>
       <span>${escapeHtml(item.country_ar)} · ${escapeHtml(item.city_ar)}</span>
     </div>
     <div class="brief-body">
@@ -679,7 +716,13 @@ async function loadDetail(id) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadItems(), loadDiagnostics()]);
+  const waitingOpen = Boolean($("waiting-lane")?.open);
+  await Promise.all([
+    loadStats(),
+    loadItems(),
+    loadDiagnostics(),
+    waitingOpen ? loadWaiting() : Promise.resolve(),
+  ]);
   if (state.selectedId) {
     try {
       await loadDetail(state.selectedId);
@@ -702,6 +745,30 @@ document.querySelectorAll(".tab").forEach((tab) => {
 $("list").addEventListener("click", (e) => {
   const btn = e.target.closest(".result");
   if (btn) loadDetail(btn.dataset.id);
+});
+
+$("waiting-list").addEventListener("click", (e) => {
+  const btn = e.target.closest(".result");
+  if (btn) loadDetail(btn.dataset.id);
+});
+
+let waitingPoll = 0;
+$("waiting-lane").addEventListener("toggle", () => {
+  window.clearInterval(waitingPoll);
+  if (!$("waiting-lane").open) {
+    loadStats();
+    return;
+  }
+  loadWaiting();
+  waitingPoll = window.setInterval(() => {
+    if (!$("waiting-lane").open) return;
+    loadWaiting();
+    loadStats();
+    if (state.status === "inbox") loadItems();
+    if (state.selectedId) {
+      loadDetail(state.selectedId).catch(() => {});
+    }
+  }, 4000);
 });
 
 $("detail").addEventListener("click", async (e) => {

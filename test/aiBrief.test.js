@@ -62,6 +62,8 @@ test("AI prompt contains the fetched page body, not only its headline", () => {
   assert.match(prompt, /FINE-PAGINA-VERIFICATA/);
   assert.match(prompt, /استخرج الزبدة من نص الصفحة/);
   assert.match(prompt, /اقتباسًا حرفيًا/);
+  assert.match(prompt, /العربية فقط/);
+  assert.match(prompt, /تكمل نفس الحدث/);
 });
 
 test("Gemini brief accepts only facts backed by exact page quotes", async () => {
@@ -474,5 +476,79 @@ test("an invented quote is still rejected no matter how it attributes", () => {
         "brief-test",
       ),
     /ai_ungrounded_headline/,
+  );
+});
+
+test("an Arabic headline that keeps source-language words is rejected", () => {
+  const source = `${article.title}\n${article.snippet}\n${article.article_text}`;
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          headline_ar: "ستيفانو لو روسو يفتتح Via Roma",
+          headline_evidence: "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
+          facts: [
+            {
+              fact_ar: "موعد الاحتفال السبت 12 سبتمبر.",
+              evidence: "La festa è prevista sabato 12 settembre.",
+            },
+          ],
+          topic_ar: "افتتاح",
+        },
+        source,
+        turin,
+        "brief-ai-test",
+      ),
+    /ai_headline_has_source_language/,
+  );
+});
+
+test("a Korean leftover in the Arabic headline is rejected", () => {
+  const source = "오세훈 시장이 청년주택을 공개했다. 120가구가 입주한다.";
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          headline_ar: "أوه سيه هون يفتتح 오세훈 إسكان الشباب",
+          headline_evidence: "오세훈 시장이 청년주택을 공개했다.",
+          facts: [
+            {
+              fact_ar: "المشروع يضم 120 وحدة.",
+              evidence: "120가구가 입주한다.",
+            },
+          ],
+          topic_ar: "إسكان",
+        },
+        source,
+        seoul,
+        "brief-ai-test",
+      ),
+    /ai_headline_has_source_language/,
+  );
+});
+
+test("a fact about a different event in the same page cannot become the brief", () => {
+  const source =
+    `${article.title}\n${article.snippet}\n${article.article_text}\n` +
+    `${"padding ".repeat(90)}\nIl consiglio approva il bilancio preventivo da 40 milioni.`;
+  assert.throws(
+    () =>
+      validateAiBrief(
+        {
+          headline_ar: "ستيفانو لو روسو يفتتح شارع فيا روما للمشاة",
+          headline_evidence: "Stefano Lo Russo inaugura la nuova via pedonale di Via Roma.",
+          facts: [
+            {
+              fact_ar: "المجلس أقر ميزانية تقديرية بأربعين مليونًا.",
+              evidence: "Il consiglio approva il bilancio preventivo da 40 milioni.",
+            },
+          ],
+          topic_ar: "افتتاح",
+        },
+        source,
+        turin,
+        "brief-ai-test",
+      ),
+    /ai_facts_mismatch_headline/,
   );
 });

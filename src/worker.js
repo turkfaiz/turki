@@ -49,7 +49,7 @@ import {
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
-import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
+import { anyAiKey, aiBriefEnabled, completedBriefSql } from "./aiProviders.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -253,7 +253,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v18";
+const BOOTSTRAP_VERSION = "bootstrap-v19";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -387,6 +387,7 @@ export async function ensureDb(env) {
   await migrateItems(env);
   await migrateAiProviderBudget(env);
   await migrateVersions(env);
+  await wipeNewsDesk(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
     .run();
@@ -755,6 +756,32 @@ async function migrateItems(env) {
       .bind(qwenThinkEpoch)
       .run();
   }
+}
+
+/**
+ * الموجزات المختلطة اللغة والوارد المختلط مع قيد القراءة لم تعد صالحة للعرض.
+ * تُمسح الأخبار والوظائف مرة واحدة بعد وجود جداول النسخ، وتبقى المكاتب والمنصات.
+ */
+async function wipeNewsDesk(env) {
+  const wipeEpoch = "fresh-desk-v1";
+  const currentWipe = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'desk_wipe_epoch'`).first();
+  if (currentWipe?.v === wipeEpoch) return;
+  await env.DB.prepare(`DELETE FROM approvals`).run();
+  await env.DB.prepare(`DELETE FROM brief_versions`).run();
+  await env.DB.prepare(`DELETE FROM candidates`).run();
+  await env.DB.prepare(`DELETE FROM scan_sources`).run();
+  await env.DB.prepare(`DELETE FROM search_job_tasks`).run();
+  await env.DB.prepare(`DELETE FROM search_jobs`).run();
+  await env.DB.prepare(`DELETE FROM scans`).run();
+  await env.DB.prepare(`DELETE FROM ai_budget`).run();
+  await env.DB.prepare(
+    `UPDATE ai_provider_budget
+     SET calls = 0, last_call_at = NULL, blocked_until = NULL, block_reason = NULL`,
+  ).run();
+  await env.DB.prepare(`DELETE FROM items`).run();
+  await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('desk_wipe_epoch', ?)`)
+    .bind(wipeEpoch)
+    .run();
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -1639,9 +1666,11 @@ async function readBody(request) {
 }
 
 async function stats(env) {
+  const done = completedBriefSql("items");
   const row = await env.DB.prepare(
     `SELECT
-      SUM(CASE WHEN status = 'inbox' THEN 1 ELSE 0 END) AS inbox,
+      SUM(CASE WHEN status = 'inbox' AND (${done}) THEN 1 ELSE 0 END) AS inbox,
+      SUM(CASE WHEN status = 'inbox' AND NOT (${done}) THEN 1 ELSE 0 END) AS waiting,
       SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
       SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
       COUNT(*) AS total
@@ -1649,7 +1678,8 @@ async function stats(env) {
   ).first();
   const byMayor = await env.DB.prepare(
     `SELECT mayor_id, COUNT(*) AS total,
-            SUM(CASE WHEN status = 'inbox' THEN 1 ELSE 0 END) AS inbox,
+            SUM(CASE WHEN status = 'inbox' AND (${done}) THEN 1 ELSE 0 END) AS inbox,
+            SUM(CASE WHEN status = 'inbox' AND NOT (${done}) THEN 1 ELSE 0 END) AS waiting,
             SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
             SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded
      FROM items GROUP BY mayor_id`,
@@ -1676,6 +1706,7 @@ async function stats(env) {
   const overview = await slotOverview(env);
   return {
     inbox: row?.inbox || 0,
+    waiting: row?.waiting || 0,
     approved: row?.approved || 0,
     excluded: row?.excluded || 0,
     total: row?.total || 0,
@@ -2129,14 +2160,22 @@ async function handleApi(request, env) {
   }
 
   if (path === "/api/items" && method === "GET") {
-    const status = url.searchParams.get("status") || "inbox";
+    const rawStatus = url.searchParams.get("status") || "inbox";
+    const laneParam = url.searchParams.get("lane");
     const mayorId = url.searchParams.get("mayor_id");
     const q = url.searchParams.get("q");
+    const done = completedBriefSql("items");
+    const waitingLane =
+      rawStatus === "waiting" || (rawStatus === "inbox" && laneParam === "waiting");
+    const readyLane = rawStatus === "inbox" && !waitingLane;
+    const status = rawStatus === "waiting" ? "inbox" : rawStatus;
     const clauses = [
       "status = ?",
       `COALESCE(items.published_at, items.created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
     ];
     const binds = [status];
+    if (waitingLane) clauses.push(`NOT (${done})`);
+    if (readyLane) clauses.push(`(${done})`);
     if (mayorId) {
       clauses.push("mayor_id = ?");
       binds.push(mayorId);

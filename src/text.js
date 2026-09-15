@@ -4,6 +4,15 @@ export function arabicRatio(text) {
   return (chars.match(/[\u0600-\u06FF]/g) || []).length / chars.length;
 }
 
+/**
+ * بقايا لغة المصدر في العنوان أو الحقائق: لاتيني، أو كوري، أو صيني، أو ياباني.
+ * الأرقام وعلامات الترقيم مسموحة؛ الأسماء تُنقل إلى العربية لا تُترك كما هي.
+ */
+export function hasSourceScript(text) {
+  const value = String(text || "");
+  return /[A-Za-zÀ-ÿ]/.test(value) || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(value);
+}
+
 export function decodeEntities(value) {
   return String(value || "")
     .replace(/&nbsp;/gi, " ")

@@ -507,6 +507,25 @@ h1 {
   color: var(--ink);
 }
 
+.waiting-lane > summary {
+  border-inline-start-color: var(--navy);
+}
+
+.waiting-body {
+  padding: 12px 16px 16px;
+}
+
+.waiting-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.waiting-list {
+  max-height: 320px;
+}
+
 .diag-section {
   margin-top: 14px;
   border-top: 1px dashed var(--rule);

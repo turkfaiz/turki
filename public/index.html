@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui20" />
+    <link rel="stylesheet" href="/styles.css?v=ui21" />
   </head>
   <body>
     <div class="sheet">
@@ -57,6 +57,17 @@
           <small id="diag-headline">اضغط للعرض</small>
         </summary>
         <div class="diag-body" id="diag-body">جاري التحميل…</div>
+      </details>
+
+      <details class="diagnostics waiting-lane" id="waiting-lane">
+        <summary>
+          <span>قيد القراءة</span>
+          <small id="waiting-headline">مخفي حتى يُفتح</small>
+        </summary>
+        <div class="waiting-body">
+          <p class="waiting-note">هذه الأخبار ما زال الذكاء الاصطناعي يقرأ صفحاتها. بعد اكتمال الموجز العربي تنتقل تلقائيًا إلى «بانتظار القرار».</p>
+          <div id="waiting-list" class="list waiting-list">جاري التحميل…</div>
+        </div>
       </details>
 
       <section class="desk">
@@ -155,6 +166,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=ui20"></script>
+    <script src="/app.js?v=ui21"></script>
   </body>
 </html>
