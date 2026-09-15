@@ -79,6 +79,21 @@ npx wrangler secret put DASHBOARD_PASSWORD
 يُحذف** — النافذة للعرض والأرشيف للقرارات. وإعادة الضبط إجراء إداري صريح عبر
 `POST /api/admin/reset` بتأكيد نصي، ولا تقع ضمن أي مسار قراءة أو ترحيل.
 
+المكتب يعرض أربع مسارات تشغيلية مستقلة، و`status=inbox` في الواجهة البرمجية
+يعني **بانتظار القرار** لا كل الوارد:
+
+| المسار | الشرط |
+|---|---|
+| `reading` | الخبر داخل النافذة وما زال يُقرأ أو يُلخَّص |
+| `verifying` | توجد نسخة حالية و`verify_state = pending` |
+| `decision_ready` | نسخة حالية + `verify_state = passed` + داخل نافذة العرض |
+| `attention_required` | تعثر أو استنفاد أو موجز بلا نسخة محفوظة |
+
+اكتمال `trans_engine` وحده **لا** يُدخل الخبر إلى بانتظار القرار. bootstrap
+additive: لا يمسح `items` ولا `approvals` ولا `brief_versions` ولا `scans`
+ولا `jobs`، ولا يصفّر حصص الذكاء الاصطناعي. تقرير dry-run متاح من
+`GET /api/admin/migrations/desk-lanes`.
+
 قبل أول نشر أنشئ طابور Cloudflare المعرّف في `wrangler.toml`:
 
 ```bash

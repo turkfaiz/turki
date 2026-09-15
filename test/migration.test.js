@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureDb } from "../src/worker.js";
 import { createTestD1 } from "./helpers/d1.js";
+import { seedPopulatedDesk, snapshotProtected } from "./helpers/populatedDesk.js";
 
 function envWith(db, overrides = {}) {
   return {
@@ -129,4 +130,110 @@ test("a stamped database missing a new table is repaired instead of failing", as
   );
   assert.ok(tables.has("brief_versions"), "the missing table is recreated");
   assert.ok(tables.has("approvals"));
+});
+
+test("an upgrade over a full legacy desk keeps decisions, versions, evidence, sources, and custom mayors", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  seedPopulatedDesk(db);
+  const before = snapshotProtected(db);
+  assert.equal(before.approvals, 1);
+  assert.equal(before.passed_versions, 3);
+  assert.equal(before.approved_versions, 1);
+  assert.ok(before.evidence_versions >= 5);
+  assert.equal(before.custom_mayors, 1);
+  assert.equal(before.custom_sources, 1);
+  assert.equal(before.ai_calls, 42);
+
+  db.exec(`UPDATE meta SET v = 'bootstrap-v1' WHERE k = 'bootstrap_version'`);
+  await ensureDb(envWith(db.reopen()));
+
+  const after = snapshotProtected(db);
+  assert.deepEqual(after, before, "bootstrap must not drop protected production rows");
+  assert.equal(db.one(`SELECT title_ar FROM approvals WHERE id = 'appr-1'`).title_ar, "ستيفانو لو روسو يعتمد مشروعًا");
+  assert.equal(
+    db.one(`SELECT evidence FROM brief_versions WHERE id = 'ver-approved'`).evidence.includes("La festa"),
+    true,
+  );
+  assert.ok(db.one(`SELECT id FROM items WHERE id = 'item-approved'`), "a decided article is never deleted");
+  assert.ok(db.one(`SELECT id FROM items WHERE id = 'item-stale-ready'`), "old verified news is moved, not deleted");
+  assert.equal(db.one(`SELECT name_ar FROM mayors WHERE id = 'riyadh-noura'`).name_ar, "نورة العبدالله");
+  assert.equal(
+    db.one(`SELECT domain FROM sources WHERE id = 'riyadh-noura:alriyadh.gov.sa'`).domain,
+    "alriyadh.gov.sa",
+  );
+  assert.equal(db.one(`SELECT desk_lane FROM items WHERE id = 'item-ready'`).desk_lane, "decision_ready");
+  assert.equal(db.one(`SELECT desk_lane FROM items WHERE id = 'item-reading'`).desk_lane, "reading");
+});
+
+test("desk_lane columns are added to a pre-lane items table without wiping it", async () => {
+  const db = createTestD1();
+  db.exec(`
+    CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
+    CREATE TABLE mayors (
+      id TEXT PRIMARY KEY, country_ar TEXT NOT NULL, city_ar TEXT NOT NULL, city_en TEXT NOT NULL,
+      title_ar TEXT NOT NULL, title_en TEXT NOT NULL, name_en TEXT NOT NULL, name_native TEXT NOT NULL,
+      name_ar TEXT NOT NULL, native_lang TEXT NOT NULL, native_lang_ar TEXT NOT NULL,
+      country_code TEXT NOT NULL, gn_hl TEXT NOT NULL, gn_gl TEXT NOT NULL, official_host TEXT
+    );
+    INSERT INTO mayors VALUES (
+      'turin', 'إيطاليا', 'تورينو', 'Turin', 'عمدة تورينو', 'Mayor of Turin',
+      'Stefano Lo Russo', 'Stefano Lo Russo', 'ستيفانو لو روسو', 'it', 'الإيطالية',
+      'IT', 'it', 'IT', 'comune.torino.it'
+    );
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY, mayor_id TEXT NOT NULL, scan_id TEXT, source TEXT NOT NULL,
+      title TEXT NOT NULL, title_normalized TEXT NOT NULL, url TEXT NOT NULL, published_at TEXT,
+      snippet TEXT, title_ar TEXT, snippet_ar TEXT, language TEXT, confidence TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'inbox', exclude_reason TEXT, fingerprint TEXT NOT NULL,
+      trans_engine TEXT, publisher_domain TEXT, publisher_tier INTEGER,
+      article_text TEXT, brief_provider TEXT, created_at TEXT
+    );
+    INSERT INTO items (
+      id, mayor_id, source, title, title_normalized, url, published_at, snippet,
+      title_ar, snippet_ar, language, confidence, status, fingerprint, trans_engine,
+      publisher_domain, publisher_tier, created_at
+    ) VALUES (
+      'keep-decided', 'turin', 'approved_feed', 'Lo Russo', 'lo russo',
+      'https://www.comune.torino.it/old', datetime('now','-2 days'), 'snippet',
+      'عنوان معتمد', 'حقيقة معتمدة.', 'it', 'raw', 'approved', 'fp-old-decided',
+      'brief-ai-gemini-v2:gemini-test', 'comune.torino.it', 0, datetime('now')
+    );
+    CREATE TABLE brief_versions (
+      id TEXT PRIMARY KEY, item_id TEXT NOT NULL, source_hash TEXT NOT NULL, engine TEXT NOT NULL,
+      title_ar TEXT NOT NULL, snippet_ar TEXT NOT NULL, evidence TEXT NOT NULL,
+      sent_excerpts TEXT, sent_source_ids TEXT,
+      verify_state TEXT NOT NULL DEFAULT 'pending', verify_detail TEXT,
+      verify_attempts INTEGER NOT NULL DEFAULT 0, verify_after TEXT, superseded_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO brief_versions (
+      id, item_id, source_hash, engine, title_ar, snippet_ar, evidence, verify_state, verify_attempts
+    ) VALUES (
+      'ver-old', 'keep-decided', 'hash-old', 'brief-ai-gemini-v2:gemini-test',
+      'عنوان معتمد', 'حقيقة معتمدة.', '{"quote":"Via Roma"}', 'passed', 1
+    );
+    CREATE TABLE approvals (
+      id TEXT PRIMARY KEY, item_id TEXT NOT NULL, version_id TEXT NOT NULL, decision TEXT NOT NULL,
+      reviewer TEXT NOT NULL, reviewer_known INTEGER NOT NULL DEFAULT 1, decided_at TEXT NOT NULL,
+      source_hash TEXT NOT NULL, title_ar TEXT NOT NULL, snippet_ar TEXT NOT NULL, evidence TEXT
+    );
+    INSERT INTO approvals (
+      id, item_id, version_id, decision, reviewer, reviewer_known, decided_at,
+      source_hash, title_ar, snippet_ar, evidence
+    ) VALUES (
+      'appr-old', 'keep-decided', 'ver-old', 'approved', 'mayorwatch', 1, datetime('now'),
+      'hash-old', 'عنوان معتمد', 'حقيقة معتمدة.', '{"quote":"Via Roma"}'
+    );
+  `);
+
+  await ensureDb(envWith(db));
+  const columns = new Set(db.query(`PRAGMA table_info(items)`).map((c) => c.name));
+  assert.ok(columns.has("desk_lane"));
+  assert.ok(columns.has("desk_attention_reason"));
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM items`).n, 1);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM approvals`).n, 1);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM brief_versions`).n, 1);
+  assert.equal(db.one(`SELECT title_ar FROM approvals WHERE id = 'appr-old'`).title_ar, "عنوان معتمد");
+  assert.match(db.one(`SELECT evidence FROM brief_versions WHERE id = 'ver-old'`).evidence, /Via Roma/);
 });

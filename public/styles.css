@@ -230,14 +230,18 @@ h1 {
   min-height: 560px;
   overflow: hidden;
 }
-.tabs { display: flex; border-bottom: 1px solid var(--rule); background: #f9fafb; }
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule);
+  background: #f9fafb;
+}
 .tab {
-  flex: 1;
   font: inherit;
   background: transparent;
   color: var(--muted);
   border: 0;
-  padding: 12px 8px;
+  padding: 12px 6px;
   cursor: pointer;
   transition: color 140ms ease, background 140ms ease;
 }
@@ -413,18 +417,19 @@ h1 {
 
 @media (max-width: 960px) {
   .mast, .command, .kpis, .desk { grid-template-columns: 1fr; }
+  .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .platforms { flex-direction: row; flex-wrap: wrap; }
   .progress-tasks { grid-template-columns: 1fr; }
 }
 
 /* ===== لمسات لونية خضراء مائلة للأزرق تُبرز ما هو حيّ وموثوق ===== */
 
-.kpis article:first-child b,
+.kpis article.kpi-decision b,
 .mast-stamp b {
   color: var(--teal);
 }
 
-.kpis article:first-child {
+.kpis article.kpi-decision {
   border-color: var(--teal-rule);
   background: linear-gradient(180deg, var(--teal-soft) 0%, var(--card) 70%);
 }

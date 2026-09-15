@@ -46,6 +46,18 @@ import {
   protectedItemsSql,
   recordDecision,
 } from "./versions.js";
+import {
+  applyDeskLaneMigration,
+  attentionReasonCaseSql,
+  deskLaneCaseSql,
+  deskLanePredicateSql,
+  deskLaneStatSql,
+  DISPLAY_WINDOW_DAYS,
+  inDisplayWindowSql,
+  planDeskLaneMigration,
+  publicLaneStats,
+  resolveDeskQuery,
+} from "./deskLanes.js";
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
@@ -115,6 +127,8 @@ const SCHEMA_STATEMENTS = [
     brief_claimed_at TEXT,
     brief_after TEXT,
     brief_provider TEXT,
+    desk_lane TEXT,
+    desk_attention_reason TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
@@ -253,7 +267,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v17";
+const BOOTSTRAP_VERSION = "bootstrap-v18";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -387,6 +401,7 @@ export async function ensureDb(env) {
   await migrateItems(env);
   await migrateAiProviderBudget(env);
   await migrateVersions(env);
+  await applyDeskLaneMigration(env, { dryRun: false });
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
     .run();
@@ -394,8 +409,8 @@ export async function ensureDb(env) {
 }
 
 /**
- * السجل في الشيفرة هو المرجع، والجدول مرآة له تحمل بيانات الصحة. أي مصدر خرج
- * من السجل يُحذف من الجدول حتى لا يبقى نطاق معتمد بالخطأ.
+ * الشيفرة بذرة أولية للسجل. الجدول يحتفظ بصفوف أُضيفت خارج البذرة، ولا يُحذف
+ * مصدر في bootstrap حتى لا يضيع تاريخ مكتب مضاف من الإعدادات.
  */
 /**
  * إنشاء الجدول لا يضيف أعمدة لجدول قائم، فأي عمود جديد يحتاج ترحيلًا صريحًا
@@ -457,12 +472,10 @@ async function seedSources(env) {
        tier = excluded.tier, kind = excluded.kind, url = excluded.url, rank = excluded.rank,
        verified = excluded.verified, curated_at = excluded.curated_at`,
   );
-  const keep = APPROVED_SOURCES.map((source) => source.id);
-  await env.DB.prepare(
-    `DELETE FROM sources WHERE id NOT IN (${keep.map(() => "?").join(", ")})`,
-  )
-    .bind(...keep)
-    .run();
+  /**
+   * السجل في الشيفرة بذرة فقط. صف أُضيف من الإعدادات أو بقي من نسخة أقدم
+   * لا يُحذف هنا؛ إخراجه من الرصد يتم بتعطيله لاحقًا لا بالمسح.
+   */
 }
 
 /** يسجّل ما حدث فعلًا لكل مصدر حتى تكون الحوكمة مبنية على واقع الإنتاج. */
@@ -588,8 +601,17 @@ async function migrateItems(env) {
   if (!names.has("brief_provider")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_provider TEXT`).run();
   }
+  if (!names.has("desk_lane")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN desk_lane TEXT`).run();
+  }
+  if (!names.has("desk_attention_reason")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN desk_attention_reason TEXT`).run();
+  }
   await env.DB.prepare(
     `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
+  ).run();
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_desk_lane ON items(desk_lane)`,
   ).run();
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
@@ -738,12 +760,14 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
     WHERE brief_versions.id = items.current_version_id) AS verify_state,
   (SELECT verify_detail FROM brief_versions
     WHERE brief_versions.id = items.current_version_id) AS verify_detail,
+  ${deskLaneCaseSql("items")} AS desk_lane,
+  ${attentionReasonCaseSql("items")} AS attention_reason,
   mayors.name_ar, mayors.name_en, mayors.name_native, mayors.city_ar, mayors.country_ar,
   mayors.title_ar AS office_ar, mayors.title_en, mayors.official_host, mayors.native_lang_ar`;
 
 const WEEKLY_CRON = "0 3 * * SUN";
 /** نافذة الرصد سبعة أيام، ويُحفظ يومان إضافيان لاستقرار الترحيل. */
-const ITEM_WINDOW_DAYS = 7;
+const ITEM_WINDOW_DAYS = DISPLAY_WINDOW_DAYS;
 const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
 const DRAIN_MAX_BRIEFS = 8;
@@ -1603,9 +1627,10 @@ async function readBody(request) {
 }
 
 async function stats(env) {
+  const laneSql = deskLaneStatSql("items");
   const row = await env.DB.prepare(
     `SELECT
-      SUM(CASE WHEN status = 'inbox' THEN 1 ELSE 0 END) AS inbox,
+      ${laneSql},
       SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
       SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
       COUNT(*) AS total
@@ -1613,7 +1638,7 @@ async function stats(env) {
   ).first();
   const byMayor = await env.DB.prepare(
     `SELECT mayor_id, COUNT(*) AS total,
-            SUM(CASE WHEN status = 'inbox' THEN 1 ELSE 0 END) AS inbox,
+            ${laneSql},
             SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
             SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded
      FROM items GROUP BY mayor_id`,
@@ -1628,22 +1653,29 @@ async function stats(env) {
     `SELECT COUNT(*) AS duplicates
      FROM items
      WHERE exclude_reason = ?
-       AND COALESCE(published_at, created_at) >= datetime('now', '-7 days')`,
+       AND COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
   )
     .bind(REASON.DUPLICATE)
     .first();
   const weekFound = await env.DB.prepare(
     `SELECT COUNT(*) AS found
      FROM items
-     WHERE COALESCE(published_at, created_at) >= datetime('now', '-7 days')`,
+     WHERE COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
   ).first();
   const overview = await slotOverview(env);
+  const lanes = publicLaneStats(row);
   return {
-    inbox: row?.inbox || 0,
+    ...lanes,
     approved: row?.approved || 0,
     excluded: row?.excluded || 0,
     total: row?.total || 0,
-    byMayor: byMayor.results || [],
+    byMayor: (byMayor.results || []).map((entry) => ({
+      mayor_id: entry.mayor_id,
+      total: entry.total || 0,
+      approved: entry.approved || 0,
+      excluded: entry.excluded || 0,
+      ...publicLaneStats(entry),
+    })),
     lastWeekly,
     lastManual,
     week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
@@ -2076,6 +2108,23 @@ async function handleApi(request, env) {
     );
   }
 
+  if (path === "/api/admin/migrations/desk-lanes" && method === "GET") {
+    const stored = await env.DB.prepare(
+      `SELECT v FROM meta WHERE k = 'desk_lane_migration_report'`,
+    ).first();
+    let lastApplied = null;
+    try {
+      lastApplied = stored?.v ? JSON.parse(stored.v) : null;
+    } catch {
+      lastApplied = null;
+    }
+    return json({
+      dryRun: true,
+      plan: await planDeskLaneMigration(env),
+      lastApplied,
+    });
+  }
+
   if (path === "/api/stats" && method === "GET") {
     return json(await stats(env));
   }
@@ -2093,14 +2142,25 @@ async function handleApi(request, env) {
   }
 
   if (path === "/api/items" && method === "GET") {
-    const status = url.searchParams.get("status") || "inbox";
+    const rawStatus = url.searchParams.get("status") || "inbox";
+    const laneParam = url.searchParams.get("lane");
+    const resolved = resolveDeskQuery(rawStatus, laneParam);
+    if (resolved.kind === "invalid") {
+      return json({ error: "bad_status", requested: resolved.requested }, 400);
+    }
     const mayorId = url.searchParams.get("mayor_id");
     const q = url.searchParams.get("q");
-    const clauses = [
-      "status = ?",
-      `COALESCE(items.published_at, items.created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
-    ];
-    const binds = [status];
+    const clauses = [];
+    const binds = [];
+    if (resolved.kind === "lane") {
+      clauses.push("items.status = 'inbox'");
+      clauses.push(inDisplayWindowSql("items"));
+      clauses.push(deskLanePredicateSql(resolved.value, "items"));
+    } else {
+      clauses.push("items.status = ?");
+      binds.push(resolved.value);
+      clauses.push(inDisplayWindowSql("items"));
+    }
     if (mayorId) {
       clauses.push("mayor_id = ?");
       binds.push(mayorId);
@@ -2115,7 +2175,11 @@ async function handleApi(request, env) {
                  ORDER BY COALESCE(items.published_at, items.created_at) DESC
                  LIMIT 200`;
     const { results } = await env.DB.prepare(sql).bind(...binds).all();
-    return json({ items: results });
+    return json({
+      items: results,
+      lane: resolved.kind === "lane" ? resolved.value : null,
+      status: resolved.kind === "status" ? resolved.value : "inbox",
+    });
   }
 
   const itemMatch = path.match(/^\/api\/items\/([0-9a-f-]+)$/i);

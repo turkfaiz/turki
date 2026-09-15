@@ -1,5 +1,5 @@
 const state = {
-  status: "inbox",
+  status: "decision_ready",
   mayors: [],
   items: [],
   selectedId: null,
@@ -39,6 +39,33 @@ function sourceLabel(source) {
 
 function confidenceLabel(c) {
   return { raw: "خام", merged: "مدمج", official: "مؤكد رسمي" }[c] || c;
+}
+
+const LANE_EMPTY = {
+  reading: "لا توجد أخبار تُقرأ الآن. بعد الرصد تظهر هنا حتى يكتمل الموجز.",
+  verifying: "لا توجد موجزات بانتظار التدقيق الدلالي.",
+  decision_ready: "لا توجد نشرات جاهزة للقرار. لا يظهر هنا إلا موجز له نسخة حالية اجتازت التدقيق داخل نافذة العرض.",
+  attention_required: "لا يوجد ما يحتاج تدخلاً الآن.",
+  approved: "لا توجد بطاقات معتمدة في نافذة العرض.",
+  excluded: "لا توجد بطاقات مستبعدة في نافذة العرض.",
+};
+
+const ATTENTION_REASON_AR = {
+  verify_failed: "رُفض الموجز في التدقيق الدلالي ويحتاج مراجعة أو إعادة إنتاج.",
+  ai_unconfigured: "مفتاح الذكاء الاصطناعي غير مربوط، فتوقفت القراءة.",
+  brief_exhausted: "استُنفدت محاولات التلخيص دون موجز صالح.",
+  brief_error: "تعذر التلخيص بعد خطأ تشغيلي ويحتاج تدخلاً.",
+  brief_without_version: "يوجد موجز مكتمل بلا نسخة محفوظة، فلا يُعتمد.",
+  verify_exhausted: "استُنفدت محاولات التدقيق دون اجتياز.",
+};
+
+function deskHeading(item) {
+  if (item.status === "approved") return "نشرة معتمدة";
+  if (item.status === "excluded") return "خبر مستبعد";
+  if (item.desk_lane === "decision_ready") return "نشرة جاهزة للقرار";
+  if (item.desk_lane === "verifying") return "موجز بانتظار التدقيق";
+  if (item.desk_lane === "attention_required") return "يحتاج تدخلاً";
+  return "خبر قيد القراءة";
 }
 
 function displayTitle(it) {
@@ -203,12 +230,14 @@ async function loadStats() {
   const s = await api("/api/stats");
   const mayorId = selectedMayorId();
   const row = mayorId ? (s.byMayor || []).find((m) => m.mayor_id === mayorId) : null;
-  $("stat-inbox").textContent = num(mayorId ? row?.inbox || 0 : s.inbox);
-  $("stat-approved").textContent = num(mayorId ? row?.approved || 0 : s.approved);
-  $("stat-excluded").textContent = num(mayorId ? row?.excluded || 0 : s.excluded);
-  $("stat-dup").textContent = num(s.week?.duplicates);
+  const src = mayorId ? row || {} : s;
+  $("stat-reading").textContent = num(src.reading);
+  $("stat-verifying").textContent = num(src.verifying);
+  $("stat-decision-ready").textContent = num(src.decision_ready ?? src.inbox);
+  $("stat-attention").textContent = num(src.attention_required);
   state.aiReady = s.sources?.ai_brief === "ready";
   $("last-weekly").textContent = s.lastWeekly ? fmtDate(s.lastWeekly.started_at) : "—";
+  return s;
 }
 
 function humanWait(seconds) {
@@ -587,7 +616,7 @@ async function loadItems() {
 
 function renderItems(items) {
   if (!items.length) {
-    $("list").innerHTML = `<div class="empty">لا توجد بطاقات في هذا القسم. اضغط بحث لتشغيل المسار على النطاق الحالي.</div>`;
+    $("list").innerHTML = `<div class="empty">${LANE_EMPTY[state.status] || "لا توجد بطاقات في هذا القسم. اضغط بحث لتشغيل المسار على النطاق الحالي."}</div>`;
     return;
   }
   $("list").innerHTML = items
@@ -620,9 +649,15 @@ async function loadDetail(id) {
     item.status === "excluded"
       ? `<p class="meta">سبب الاستبعاد: ${escapeHtml(item.exclude_reason || "—")}</p>`
       : "";
+  const attentionBox =
+    item.desk_lane === "attention_required"
+      ? `<div class="brief-error"><b>سبب التعثر</b><br />${escapeHtml(
+          ATTENTION_REASON_AR[item.attention_reason] || briefErrorReason(item.brief_error || item.verify_detail) || "يحتاج تدخلاً قبل أن يدخل مسار القرار.",
+        )}</div>`
+      : "";
   $("detail").innerHTML = `
     <div class="brief-head">
-      <strong>نشرة جاهزة للقرار</strong>
+      <strong>${escapeHtml(deskHeading(item))}</strong>
       <span>${escapeHtml(item.country_ar)} · ${escapeHtml(item.city_ar)}</span>
     </div>
     <div class="brief-body">
@@ -640,6 +675,7 @@ async function loadDetail(id) {
         <span class="num">${fmtDate(item.published_at || item.created_at)}</span>
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+      ${attentionBox}
       ${briefErrorBox(item)}
       ${(() => {
         const reader = providerFromItem(item);
@@ -671,7 +707,7 @@ async function loadDetail(id) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadItems(), loadDiagnostics()]);
+  const [stats] = await Promise.all([loadStats(), loadItems(), loadDiagnostics()]);
   if (state.selectedId) {
     try {
       await loadDetail(state.selectedId);
@@ -679,6 +715,7 @@ async function refreshAll() {
       $("detail").innerHTML = `<p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>`;
     }
   }
+  return stats;
 }
 
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -865,11 +902,11 @@ $("search-form").addEventListener("submit", async (e) => {
   setDeskStatus(mayorId ? "النظام يفتح المصدر ويدمج الحدث ويكتب النشرة…" : "بدء البحث في كل المكاتب…");
   try {
     const result = await runDeskSearch($("q").value.trim(), mayorId);
-    state.status = "inbox";
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "inbox"));
+    state.status = "decision_ready";
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "decision_ready"));
     state.selectedId = null;
-    await refreshAll();
-    const ready = (state.items || []).length;
+    const stats = await refreshAll();
+    const ready = Number(stats?.decision_ready) || (state.items || []).length;
     const failed = Number(result.failedOffices)
       ? ` · تعذر ${num(result.failedOffices)} مكتب`
       : "";
@@ -887,7 +924,7 @@ $("search-form").addEventListener("submit", async (e) => {
         ? ` · بانتظار AI ${num(result.aiPending)}`
         : "";
     setDeskStatus(
-      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · بانتظار القرار ${num(ready)}${topicNote}${aiWarning}${sourceWarning}${failed}.`,
+      `اكتشف ${num(result.discovered)} · قرأ ${num(result.opened)} صفحة · جديد ${num(result.found)} · دُمج ${num(result.duplicates)} · لخص AI ${num(result.summarized)} · قيد القراءة ${num(stats?.reading)} · تدقيق ${num(stats?.verifying)} · بانتظار القرار ${num(ready)} · تدخل ${num(stats?.attention_required)}${topicNote}${aiWarning}${sourceWarning}${failed}.`,
     );
     if (state.items[0]) {
       await loadDetail(state.items[0].id);
