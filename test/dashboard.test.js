@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, deskHeading };`,
   )();
   return { ...exported, element };
 }
@@ -434,4 +434,24 @@ test("the settings overlay stays closed until the user opens it", () => {
   assert.match(css, /\.settings-layer:not\(\[hidden\]\)\s*\{\s*display:\s*flex;/);
   assert.match(css, /\.settings-layer\s*\{[\s\S]*?display:\s*none;/);
   assert.match(css, /\.settings-office\.is-new/);
+});
+
+test("the desk splits reading, verifying, decision, and attention into separate paths", () => {
+  const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  for (const status of ["reading", "verifying", "decision_ready", "attention_required", "approved", "excluded"]) {
+    assert.match(html, new RegExp(`data-status="${status}"`));
+  }
+  assert.match(html, /id="stat-reading"/);
+  assert.match(html, /id="stat-verifying"/);
+  assert.match(html, /id="stat-decision-ready"/);
+  assert.match(html, /id="stat-attention"/);
+  assert.doesNotMatch(html, /id="stat-inbox"/);
+  assert.match(html, /class="tab on" data-status="decision_ready"/);
+  const { deskHeading } = loadPageScript();
+  assert.equal(deskHeading({ status: "inbox", desk_lane: "decision_ready" }), "نشرة جاهزة للقرار");
+  assert.equal(
+    deskHeading({ status: "inbox", desk_lane: "reading", trans_engine: "brief-ai-gemini-v2:x" }),
+    "خبر قيد القراءة",
+  );
+  assert.equal(deskHeading({ status: "inbox", desk_lane: "attention_required" }), "يحتاج تدخلاً");
 });

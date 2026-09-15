@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS items (
   trans_engine TEXT,
   publisher_domain TEXT,
   publisher_tier INTEGER,
+  desk_lane TEXT,
+  desk_attention_reason TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

@@ -230,9 +230,9 @@ h1 {
   min-height: 560px;
   overflow: hidden;
 }
-.tabs { display: flex; border-bottom: 1px solid var(--rule); background: #f9fafb; }
+.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--rule); background: #f9fafb; }
 .tab {
-  flex: 1;
+  flex: 1 1 110px;
   font: inherit;
   background: transparent;
   color: var(--muted);
@@ -419,12 +419,12 @@ h1 {
 
 /* ===== لمسات لونية خضراء مائلة للأزرق تُبرز ما هو حيّ وموثوق ===== */
 
-.kpis article:first-child b,
+.kpis article.kpi-decision b,
 .mast-stamp b {
   color: var(--teal);
 }
 
-.kpis article:first-child {
+.kpis article.kpi-decision {
   border-color: var(--teal-rule);
   background: linear-gradient(180deg, var(--teal-soft) 0%, var(--card) 70%);
 }

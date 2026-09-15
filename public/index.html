@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui19" />
+    <link rel="stylesheet" href="/styles.css?v=ui20" />
   </head>
   <body>
     <div class="sheet">
@@ -45,10 +45,10 @@
       </section>
 
       <section class="kpis">
-        <article><span>بانتظار القرار</span><b class="num" id="stat-inbox">0</b></article>
-        <article><span>المعتمد</span><b class="num" id="stat-approved">0</b></article>
-        <article><span>المستبعد</span><b class="num" id="stat-excluded">0</b></article>
-        <article><span>دُمج هذا الأسبوع</span><b class="num" id="stat-dup">0</b></article>
+        <article><span>قيد القراءة</span><b class="num" id="stat-reading">0</b></article>
+        <article><span>التدقيق</span><b class="num" id="stat-verifying">0</b></article>
+        <article class="kpi-decision"><span>بانتظار القرار</span><b class="num" id="stat-decision-ready">0</b></article>
+        <article><span>يحتاج تدخلاً</span><b class="num" id="stat-attention">0</b></article>
       </section>
 
       <details class="diagnostics" id="diagnostics">
@@ -62,12 +62,15 @@
       <section class="desk">
         <div class="index">
           <nav class="tabs" role="tablist">
-            <button type="button" class="tab on" data-status="inbox">بانتظار القرار</button>
+            <button type="button" class="tab" data-status="reading">قيد القراءة</button>
+            <button type="button" class="tab" data-status="verifying">التدقيق</button>
+            <button type="button" class="tab on" data-status="decision_ready">بانتظار القرار</button>
+            <button type="button" class="tab" data-status="attention_required">يحتاج تدخلاً</button>
             <button type="button" class="tab" data-status="approved">المعتمد</button>
             <button type="button" class="tab" data-status="excluded">المستبعد</button>
           </nav>
           <p class="index-meta">
-            <span id="desk-status">النطاق الحالي: كل المكاتب. الوارد يخرج نشرة جاهزة.</span>
+            <span id="desk-status">النطاق الحالي: كل المكاتب. بانتظار القرار للموجز المدقَّق فقط.</span>
             <span>آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></span>
           </p>
           <div id="list" class="list">جاري التحميل…</div>
@@ -155,6 +158,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=ui19"></script>
+    <script src="/app.js?v=ui20"></script>
   </body>
 </html>
