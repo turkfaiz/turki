@@ -447,6 +447,8 @@ test("the desk splits reading, verifying, decision, and attention into separate 
   assert.match(html, /id="stat-attention"/);
   assert.doesNotMatch(html, /id="stat-inbox"/);
   assert.match(html, /class="tab on" data-status="decision_ready"/);
+  const css = fs.readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /grid-template-columns:\s*repeat\(6/);
   const { deskHeading } = loadPageScript();
   assert.equal(deskHeading({ status: "inbox", desk_lane: "decision_ready" }), "نشرة جاهزة للقرار");
   assert.equal(

@@ -230,14 +230,18 @@ h1 {
   min-height: 560px;
   overflow: hidden;
 }
-.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--rule); background: #f9fafb; }
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule);
+  background: #f9fafb;
+}
 .tab {
-  flex: 1 1 110px;
   font: inherit;
   background: transparent;
   color: var(--muted);
   border: 0;
-  padding: 12px 8px;
+  padding: 12px 6px;
   cursor: pointer;
   transition: color 140ms ease, background 140ms ease;
 }
@@ -413,6 +417,7 @@ h1 {
 
 @media (max-width: 960px) {
   .mast, .command, .kpis, .desk { grid-template-columns: 1fr; }
+  .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .platforms { flex-direction: row; flex-wrap: wrap; }
   .progress-tasks { grid-template-columns: 1fr; }
 }
