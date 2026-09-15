@@ -45,6 +45,7 @@ import {
   migrateVersions,
   protectedItemsSql,
   recordDecision,
+  verificationBacklog,
 } from "./versions.js";
 import {
   applyDeskLaneMigration,
@@ -58,6 +59,7 @@ import {
   publicLaneStats,
   resolveDeskQuery,
 } from "./deskLanes.js";
+import { assessMayorJourney, resolveScanId } from "./journey.js";
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
@@ -267,7 +269,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v18";
+const BOOTSTRAP_VERSION = "bootstrap-v19";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -610,9 +612,7 @@ async function migrateItems(env) {
   await env.DB.prepare(
     `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
   ).run();
-  await env.DB.prepare(
-    `CREATE INDEX IF NOT EXISTS idx_items_desk_lane ON items(desk_lane)`,
-  ).run();
+  await env.DB.prepare(`DROP INDEX IF EXISTS idx_items_desk_lane`).run();
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -923,13 +923,14 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     if (still.length) continue;
     const waitMs = boundSlotWaitMs(env);
     if (Date.now() - startedAt + waitMs >= maxMs) {
-      if (summary.pending > 0) {
+      if (summary.pending > 0 || checked.pending > 0) {
         await enqueueBriefPump(env, { delaySeconds: Math.max(1, Math.ceil(waitMs / 1000)) });
       }
       break;
     }
     await sleep(waitMs + 250);
   }
+  await refreshOpenSearchJobs(env);
   return totals;
 }
 
@@ -1001,49 +1002,137 @@ async function enqueueArticleFetches(env, { ids, mayorId, scanId, jobId }) {
   return batches.length;
 }
 
-async function completeMayorDesk(env, { mayorId, jobId, scanId }) {
+async function persistMayorJourney(env, { mayorId, jobId, scanId = null, result = null }) {
+  if (!jobId || !mayorId) return null;
+  const resolvedScanId = await resolveScanId(env, { jobId, mayorId, scanId });
+  const assessment = await assessMayorJourney(env, { mayorId, scanId: resolvedScanId });
+  const previous = parseTaskResult(
+    (
+      await env.DB.prepare(
+        `SELECT result_json FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
+      )
+        .bind(jobId, mayorId)
+        .first()
+    )?.result_json,
+  );
+  const merged = {
+    ...previous,
+    ...(result || {}),
+    scanId: resolvedScanId || previous.scanId || result?.scanId || null,
+    journey: {
+      stage: assessment.stage,
+      reading: assessment.reading,
+      verifying: assessment.verifying,
+      settled: assessment.settled,
+      total: assessment.total,
+      resumeAt: assessment.resumeAt,
+    },
+  };
+  const terminal = assessment.status === "completed";
+  await env.DB.prepare(
+    `UPDATE search_job_tasks
+     SET status = ?,
+         stage = ?,
+         detail = ?,
+         finished_at = CASE WHEN ? THEN datetime('now') ELSE NULL END,
+         result_json = ?,
+         error = NULL
+     WHERE job_id = ? AND mayor_id = ?
+       AND IFNULL(status, '') <> 'failed'`,
+  )
+    .bind(
+      assessment.status,
+      assessment.stage,
+      String(assessment.detail || "").slice(0, 300),
+      terminal ? 1 : 0,
+      JSON.stringify(merged),
+      jobId,
+      mayorId,
+    )
+    .run();
+  await refreshSearchJobStatus(env, jobId);
+  return assessment;
+}
+
+async function refreshJobJourney(env, jobId) {
+  if (!jobId) return;
+  const { results: tasks } = await env.DB.prepare(
+    `SELECT mayor_id FROM search_job_tasks
+     WHERE job_id = ? AND status NOT IN ('completed', 'failed')`,
+  )
+    .bind(jobId)
+    .all();
+  for (const task of tasks || []) {
+    await persistMayorJourney(env, { mayorId: task.mayor_id, jobId });
+  }
+}
+
+async function refreshOpenSearchJobs(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT DISTINCT job_id FROM search_job_tasks
+     WHERE status IN ('running', 'waiting', 'retrying')`,
+  ).all();
+  for (const row of results || []) {
+    await refreshJobJourney(env, row.job_id);
+  }
+}
+
+function earliestIso(left, right) {
+  if (!left) return right || null;
+  if (!right) return left;
+  return left < right ? left : right;
+}
+
+export async function completeMayorDesk(env, { mayorId, jobId, scanId }) {
   const review = await reviewInbox(env, { mayorId, limit: 500, useAiMerge: false });
   const lanes = await assignPendingLanes(env, mayorId);
   const backlog = await briefBacklog(env, mayorId);
-  if (backlog.pending > 0) await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
-  if (jobId) {
-    const pending = await pendingCandidateCount(env, mayorId, scanId);
-    const foundRow = scanId
-      ? await env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM items WHERE scan_id = ? AND mayor_id = ?`,
-        )
-          .bind(scanId, mayorId)
-          .first()
-      : { n: 0 };
-    const result = {
-      found: Number(foundRow?.n) || 0,
-      review,
-      assigned: lanes.assigned,
-      aiPending: backlog.pending,
-      pendingCandidates: pending,
-    };
-    await env.DB.prepare(
-      `UPDATE search_job_tasks
-       SET status = 'completed', finished_at = datetime('now'),
-           stage = 'completed',
-           detail = ?,
-           result_json = ?, error = NULL
-       WHERE job_id = ? AND mayor_id = ?`,
-    )
-      .bind(
-        lanes.assigned
-          ? `اكتمل فحص المصادر ووُزّع ${lanes.assigned} خبرًا على نماذج القراءة`
-          : backlog.pending
-            ? `اكتمل الفحص وبقي ${backlog.pending} خبرًا في طابور القراءة`
-            : "اكتمل فحص المصادر",
-        JSON.stringify(result),
-        jobId,
-        mayorId,
+  const verify = await verificationBacklog(env);
+  const pending = await pendingCandidateCount(env, mayorId, scanId);
+  const foundRow = scanId
+    ? await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM items WHERE scan_id = ? AND mayor_id = ?`,
       )
-      .run();
-    await refreshSearchJobStatus(env, jobId);
+        .bind(scanId, mayorId)
+        .first()
+    : { n: 0 };
+  const result = {
+    found: Number(foundRow?.n) || 0,
+    review,
+    assigned: lanes.assigned,
+    aiPending: backlog.pending,
+    pendingCandidates: pending,
+    scanId: scanId || null,
+  };
+  const assessment = jobId
+    ? await persistMayorJourney(env, { mayorId, jobId, scanId, result })
+    : await assessMayorJourney(env, { mayorId, scanId });
+  if (assessment?.status !== "completed") {
+    const ready = await slotsWithCapacity(env, "brief");
+    const pendingWork = (backlog.pending || 0) + (verify.pending || 0);
+    if (ready.length && ((backlog.eligible || 0) > 0 || (verify.eligible || 0) > 0)) {
+      await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
+    } else if (
+      shouldContinueBriefs({
+        pending: pendingWork,
+        deferred: assessment?.blocked ? 1 : 0,
+        nextAt: assessment?.resumeAt || backlog.nextAt || verify.nextAt,
+      })
+    ) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: continuationDelaySeconds({
+          nextAt: assessment?.resumeAt || backlog.nextAt || verify.nextAt,
+        }),
+      });
+    }
   }
-  return { review, assigned: lanes.assigned, aiPending: backlog.pending };
+  return {
+    review,
+    assigned: lanes.assigned,
+    aiPending: backlog.pending,
+    journey: assessment,
+  };
 }
 
 async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
@@ -1227,7 +1316,11 @@ export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
       totals.sourceErrors += Array.isArray(result.errors) ? result.errors.length : 0;
     } else if (task.status === "failed") {
       failed += 1;
-    } else if (task.status === "running" || task.status === "retrying") {
+    } else if (
+      task.status === "running" ||
+      task.status === "retrying" ||
+      task.status === "waiting"
+    ) {
       running += 1;
     }
   }
@@ -1333,15 +1426,24 @@ async function processBriefContinuation(env, message) {
     await verifyPending(env, BRIEF_BATCH_SIZE);
     await assignPendingLanes(env);
     const leftover = await briefBacklog(env);
-    if (leftover.eligible > 0) {
+    const verify = await verificationBacklog(env);
+    if (jobId) await refreshJobJourney(env, jobId);
+    const nextAt = earliestIso(leftover.nextAt, verify.nextAt);
+    if ((leftover.eligible || 0) > 0 || (verify.eligible || 0) > 0) {
       await enqueueBriefPump(env, {
         jobId,
         delaySeconds: summary.summarized > 0 || summary.failed > 0 ? 0 : 5,
       });
-    } else if (shouldContinueBriefs({ ...summary, pending: leftover.pending, nextAt: leftover.nextAt })) {
+    } else if (
+      shouldContinueBriefs({
+        ...summary,
+        pending: (leftover.pending || 0) + (verify.pending || 0),
+        nextAt,
+      })
+    ) {
       await enqueueBriefPump(env, {
         jobId,
-        delaySeconds: continuationDelaySeconds({ ...summary, nextAt: leftover.nextAt }),
+        delaySeconds: continuationDelaySeconds({ ...summary, nextAt }),
       });
     }
     message.ack();
@@ -1422,25 +1524,16 @@ async function processQueuedSearch(env, message) {
       query: body.query || "",
       mayorId,
     }, onProgress);
-    if (result.aiPending > 0) {
+    const assessment = jobId
+      ? await persistMayorJourney(env, {
+          mayorId,
+          jobId,
+          scanId: result.scanId || null,
+          result: { ...result, scanId: result.scanId || null },
+        })
+      : await assessMayorJourney(env, { mayorId, scanId: result.scanId || null });
+    if (assessment?.status !== "completed") {
       await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
-    }
-    if (jobId) {
-      const finalDetail = result.assigned
-        ? `جُمعت الأخبار ووُزّع ${result.assigned} خبرًا على نماذج القراءة`
-        : result.aiPending
-          ? `جُمعت الأخبار وبقي ${result.aiPending} خبرًا في طابور القراءة`
-          : "اكتمل الجمع ولا أخبار معلّقة للقراءة";
-      await env.DB.prepare(
-        `UPDATE search_job_tasks
-         SET status = 'completed', finished_at = datetime('now'),
-             stage = 'completed', detail = ?,
-             result_json = ?, error = NULL
-         WHERE job_id = ? AND mayor_id = ?`,
-      )
-        .bind(finalDetail, JSON.stringify(result), jobId, mayorId)
-        .run();
-      await refreshSearchJobStatus(env, jobId);
     }
     message.ack();
   } catch (error) {
@@ -2352,7 +2445,8 @@ export default {
         }
         await drainBriefs(env);
         const leftover = await briefBacklog(env);
-        if (leftover.pending > 0) await enqueueBriefPump(env);
+        const verify = await verificationBacklog(env);
+        if (leftover.pending > 0 || verify.pending > 0) await enqueueBriefPump(env);
       })(),
     );
   },

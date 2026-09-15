@@ -17,6 +17,7 @@ export const VERIFY_STATE = {
 };
 
 export const MAX_VERIFY_ATTEMPTS = 4;
+export const VERIFY_CLAIM_TIMEOUT_MINUTES = 10;
 
 export const VERSION_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS brief_versions (
@@ -33,6 +34,8 @@ export const VERSION_SCHEMA = [
     verify_detail TEXT,
     verify_attempts INTEGER NOT NULL DEFAULT 0,
     verify_after TEXT,
+    verify_claim_id TEXT,
+    verify_claimed_at TEXT,
     superseded_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
@@ -87,6 +90,18 @@ export async function migrateVersions(env) {
       await env.DB.prepare(`ALTER TABLE items ADD COLUMN ${column} ${type}`).run();
     }
   }
+
+  const versionInfo = await env.DB.prepare(`PRAGMA table_info(brief_versions)`).all();
+  const versionNames = new Set((versionInfo.results || []).map((column) => column.name));
+  const versionAdditions = [
+    ["verify_claim_id", "TEXT"],
+    ["verify_claimed_at", "TEXT"],
+  ];
+  for (const [column, type] of versionAdditions) {
+    if (!versionNames.has(column)) {
+      await env.DB.prepare(`ALTER TABLE brief_versions ADD COLUMN ${column} ${type}`).run();
+    }
+  }
 }
 
 /**
@@ -132,26 +147,43 @@ export async function currentVersion(env, itemId) {
     .first();
 }
 
+export function liveVerifyClaimSql(alias = "brief_versions") {
+  return `${alias}.verify_claim_id IS NOT NULL
+    AND ${alias}.verify_claimed_at > datetime('now', '-${VERIFY_CLAIM_TIMEOUT_MINUTES} minutes')`;
+}
+
 /**
- * النسخ التي تنتظر تدقيقًا وحلّ وقتها. الوقت المحفوظ هو ما يجعل التأجيل
- * استئنافًا لا فقدانًا.
+ * حجز ذري قبل نداء التدقيق. SELECT وحده كان يسمح لمستهلكين متزامنين
+ * بتدقيق النسخة نفسها. الحجز ينتهي بعد المهلة فيُسترد إن مات العامل.
  */
 export async function claimVerifications(env, limit = 1) {
+  const claimId = crypto.randomUUID();
+  await env.DB.prepare(
+    `UPDATE brief_versions
+     SET verify_claim_id = ?, verify_claimed_at = datetime('now')
+     WHERE id IN (
+       SELECT id FROM brief_versions
+       WHERE verify_state = '${VERIFY_STATE.PENDING}'
+         AND superseded_at IS NULL
+         AND verify_attempts < ${MAX_VERIFY_ATTEMPTS}
+         AND (verify_after IS NULL OR verify_after <= datetime('now'))
+         AND NOT (${liveVerifyClaimSql()})
+       ORDER BY created_at ASC
+       LIMIT ?
+     )`,
+  )
+    .bind(claimId, limit)
+    .run();
+
   const { results } = await env.DB.prepare(
     `SELECT brief_versions.*, items.mayor_id, items.article_text, items.title, items.snippet,
             mayors.name_ar, mayors.name_en, mayors.name_native
      FROM brief_versions
      JOIN items ON items.id = brief_versions.item_id
      JOIN mayors ON mayors.id = items.mayor_id
-     WHERE brief_versions.verify_state = '${VERIFY_STATE.PENDING}'
-       AND brief_versions.superseded_at IS NULL
-       AND brief_versions.verify_attempts < ${MAX_VERIFY_ATTEMPTS}
-       AND (brief_versions.verify_after IS NULL
-            OR brief_versions.verify_after <= datetime('now'))
-     ORDER BY brief_versions.created_at ASC
-     LIMIT ?`,
+     WHERE brief_versions.verify_claim_id = ?`,
   )
-    .bind(limit)
+    .bind(claimId)
     .all();
   return results || [];
 }
@@ -177,40 +209,50 @@ export async function verificationBacklog(env) {
   };
 }
 
-export async function recordVerificationPass(env, versionId, keptFacts, evidence) {
-  await env.DB.prepare(
-    `UPDATE brief_versions
-     SET verify_state = '${VERIFY_STATE.PASSED}', verify_detail = NULL,
-         verify_attempts = verify_attempts + 1, verify_after = NULL,
-         snippet_ar = ?, evidence = ?
-     WHERE id = ?`,
-  )
-    .bind(keptFacts, evidence, versionId)
-    .run();
+function claimWriteSql(extraSet) {
+  return `UPDATE brief_versions
+     SET ${extraSet},
+         verify_claim_id = NULL, verify_claimed_at = NULL
+     WHERE id = ? AND verify_claim_id = ?`;
 }
 
-export async function recordVerificationFailure(env, versionId, detail) {
-  await env.DB.prepare(
-    `UPDATE brief_versions
-     SET verify_state = '${VERIFY_STATE.FAILED}', verify_detail = ?,
-         verify_attempts = verify_attempts + 1, verify_after = NULL
-     WHERE id = ?`,
+async function wroteClaimedRow(result) {
+  return (Number(result?.meta?.changes) || 0) > 0;
+}
+
+export async function recordVerificationPass(env, versionId, keptFacts, evidence, claimId) {
+  if (!claimId) return false;
+  const result = await env.DB.prepare(
+    claimWriteSql(`verify_state = '${VERIFY_STATE.PASSED}', verify_detail = NULL,
+         verify_attempts = verify_attempts + 1, verify_after = NULL,
+         snippet_ar = ?, evidence = ?`),
   )
-    .bind(String(detail || "").slice(0, 240), versionId)
+    .bind(keptFacts, evidence, versionId, claimId)
     .run();
+  return wroteClaimedRow(result);
+}
+
+export async function recordVerificationFailure(env, versionId, detail, claimId) {
+  if (!claimId) return false;
+  const result = await env.DB.prepare(
+    claimWriteSql(`verify_state = '${VERIFY_STATE.FAILED}', verify_detail = ?,
+         verify_attempts = verify_attempts + 1, verify_after = NULL`),
+  )
+    .bind(String(detail || "").slice(0, 240), versionId, claimId)
+    .run();
+  return wroteClaimedRow(result);
 }
 
 /** تأجيل بلا فقدان: تبقى النسخة محفوظة ويُسجَّل أقرب وقت لإعادة التدقيق. */
-export async function deferVerification(env, versionId, seconds, detail) {
+export async function deferVerification(env, versionId, seconds, detail, claimId) {
   const wait = Math.max(1, Math.round(Number(seconds) || 60));
-  await env.DB.prepare(
-    `UPDATE brief_versions
-     SET verify_after = datetime('now', ?), verify_detail = ?
-     WHERE id = ?`,
+  if (!claimId) return 0;
+  const result = await env.DB.prepare(
+    claimWriteSql(`verify_after = datetime('now', ?), verify_detail = ?`),
   )
-    .bind(`+${wait} seconds`, String(detail || "").slice(0, 240), versionId)
+    .bind(`+${wait} seconds`, String(detail || "").slice(0, 240), versionId, claimId)
     .run();
-  return wait;
+  return wroteClaimedRow(result) ? wait : 0;
 }
 
 export function isReadyForApproval(version) {

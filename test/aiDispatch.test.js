@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureDb } from "../src/worker.js";
 import { assignPendingLanes, aggregateSlotBudget, boundSlotWaitMs, providerLaneSnapshot, slotRuntimeStatuses } from "../src/aiDispatch.js";
+import { boundSlots } from "../src/aiProviders.js";
 import { briefBacklog, translatePending } from "../src/translate.js";
 import { noteAiFailure } from "../src/aiBudget.js";
 import { createTestD1 } from "./helpers/d1.js";
@@ -53,6 +54,7 @@ function threeSlotEnv(db) {
     QWEN_MODEL: "qwen-flash",
     QWEN_MIN_INTERVAL_MS: "0",
     QWEN_DAILY_LIMIT: "2000",
+    QWEN_ENABLED: "1",
   };
 }
 
@@ -284,6 +286,7 @@ test("drain wait follows the fastest bound slot, not Gemini alone", () => {
       GEMINI_API_KEY: "g",
       DEEPSEEK_API_KEY: "d",
       QWEN_API_KEY: "q",
+      QWEN_ENABLED: "1",
       AI_MIN_INTERVAL_MS: "4500",
       DEEPSEEK_MIN_INTERVAL_MS: "800",
       QWEN_MIN_INTERVAL_MS: "800",
@@ -327,4 +330,76 @@ test("terminal slot errors stay on the failed provider, not the rotated pending 
   const snap = await providerLaneSnapshot(env, await briefBacklog(env));
   assert.equal(snap.lanes.find((lane) => lane.id === "gemini")?.lastError?.code, "ai_http_402:invalid_request_error");
   assert.equal(snap.lanes.find((lane) => lane.id === "deepseek")?.lastError, null);
+});
+
+test("a disabled Qwen slot is not bound and receives no HTTP requests", async () => {
+  const db = createTestD1();
+  const env = { ...threeSlotEnv(db), QWEN_ENABLED: "0" };
+  await ensureDb(env);
+  insertPending(db, "a");
+  insertPending(db, "b");
+
+  assert.deepEqual(boundSlots(env).map((slot) => slot.id), ["gemini", "deepseek"]);
+  await assignPendingLanes(env);
+  const providers = db.query(`SELECT brief_provider AS id FROM items`).map((row) => row.id);
+  assert.equal(providers.includes("qwen"), false);
+
+  const urls = [];
+  await translatePending(env, 2, null, async (url) => {
+    urls.push(String(url));
+    if (String(url).includes("chat/completions")) return openaiShape(FACTS);
+    return geminiShape(FACTS);
+  });
+  assert.equal(urls.some((url) => url.includes("dashscope")), false);
+  assert.equal(
+    db.query(`SELECT trans_engine FROM items`).every((row) => !String(row.trans_engine).includes("qwen")),
+    true,
+  );
+});
+
+test("Gemini continues reading when DeepSeek is down and Qwen is unbound", async () => {
+  const db = createTestD1();
+  const env = { ...threeSlotEnv(db), QWEN_ENABLED: "0" };
+  await ensureDb(env);
+  await noteAiFailure(env, { status: 429, quotaScope: "day" }, "deepseek");
+  insertPending(db, "a");
+  await assignPendingLanes(env);
+  assert.deepEqual(
+    db.query(`SELECT brief_provider AS id FROM items`).map((row) => row.id),
+    ["gemini"],
+  );
+
+  const urls = [];
+  const summary = await translatePending(env, 1, null, async (url) => {
+    urls.push(String(url));
+    if (String(url).includes("chat/completions")) {
+      throw new Error("DeepSeek and Qwen must not be called");
+    }
+    return geminiShape(FACTS);
+  });
+  assert.equal(summary.summarized, 1);
+  assert.equal(urls.some((url) => url.includes("dashscope") || url.includes("deepseek")), false);
+  assert.match(db.one(`SELECT trans_engine FROM items WHERE id = 'a'`).trans_engine, /gemini/);
+});
+
+test("DeepSeek continues reading when Gemini is down and Qwen is unbound", async () => {
+  const db = createTestD1();
+  const env = { ...threeSlotEnv(db), QWEN_ENABLED: "0" };
+  await ensureDb(env);
+  await noteAiFailure(env, { status: 429, quotaScope: "day" }, "gemini");
+  insertPending(db, "a");
+  await assignPendingLanes(env);
+  assert.deepEqual(
+    db.query(`SELECT brief_provider AS id FROM items`).map((row) => row.id),
+    ["deepseek"],
+  );
+
+  const summary = await translatePending(env, 1, null, async (url) => {
+    if (!String(url).includes("chat/completions")) {
+      throw new Error("Gemini must not be called");
+    }
+    return openaiShape(FACTS);
+  });
+  assert.equal(summary.summarized, 1);
+  assert.match(db.one(`SELECT trans_engine FROM items WHERE id = 'a'`).trans_engine, /deepseek/);
 });

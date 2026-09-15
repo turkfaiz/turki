@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureDb, pruneOldItems, reviewerOf } from "../src/worker.js";
 import { translatePending, verifyPending } from "../src/translate.js";
-import { currentVersion, isReadyForApproval, recordDecision } from "../src/versions.js";
+import {
+  claimVerifications,
+  currentVersion,
+  isReadyForApproval,
+  recordDecision,
+  recordVerificationPass,
+  VERIFY_CLAIM_TIMEOUT_MINUTES,
+} from "../src/versions.js";
 import { createTestD1 } from "./helpers/d1.js";
 
 const ARTICLE =
@@ -247,4 +254,72 @@ test("the reviewer is taken from the authenticated identity", () => {
   assert.equal(reviewerOf(request, {}), "hala");
   const anonymous = new Request("https://example.com/api/items/a/status", { method: "POST" });
   assert.equal(reviewerOf(anonymous, { DASHBOARD_USER: "mayorwatch" }), "mayorwatch");
+});
+
+test("two concurrent verifiers run AI on a version only once", async () => {
+  const { env } = await desk();
+  await translatePending(env, 1, null, async () => briefResponse());
+  let calls = 0;
+  const fetcher = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return verdictResponse();
+  };
+  const [first, second] = await Promise.all([
+    verifyPending(env, 1, fetcher),
+    verifyPending(env, 1, fetcher),
+  ]);
+  assert.equal(calls, 1, "the second consumer must not call the model");
+  assert.equal((first.verified || 0) + (second.verified || 0), 1);
+  const version = await currentVersion(env, "a");
+  assert.equal(version.verify_state, "passed");
+  assert.equal(version.verify_claim_id, null);
+});
+
+test("an expired verification lease can be reclaimed", async () => {
+  const { db, env } = await desk();
+  await translatePending(env, 1, null, async () => briefResponse());
+  const saved = await currentVersion(env, "a");
+  db.exec(`
+    UPDATE brief_versions
+       SET verify_claim_id = 'dead-worker',
+           verify_claimed_at = datetime('now', '-${VERIFY_CLAIM_TIMEOUT_MINUTES + 1} minutes')
+     WHERE id = '${saved.id}'
+  `);
+  let calls = 0;
+  const result = await verifyPending(env, 1, async () => {
+    calls += 1;
+    return verdictResponse();
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.verified, 1);
+  const passed = await currentVersion(env, "a");
+  assert.equal(passed.verify_state, "passed");
+  assert.equal(passed.verify_claim_id, null);
+});
+
+test("a stale claim id cannot overwrite a newer verification claim", async () => {
+  const { db, env } = await desk();
+  await translatePending(env, 1, null, async () => briefResponse());
+  const claimed = await claimVerifications(env, 1);
+  assert.equal(claimed.length, 1);
+  const staleId = claimed[0].verify_claim_id;
+  db.exec(`
+    UPDATE brief_versions
+       SET verify_claim_id = 'newer-claim',
+           verify_claimed_at = datetime('now')
+     WHERE id = '${claimed[0].id}'
+  `);
+  const wrote = await recordVerificationPass(
+    env,
+    claimed[0].id,
+    "حقائق لا تخص الحجز الحالي",
+    "[]",
+    staleId,
+  );
+  assert.equal(wrote, false);
+  const row = db.one(`SELECT verify_state, snippet_ar, verify_claim_id FROM brief_versions WHERE id = ?`, claimed[0].id);
+  assert.equal(row.verify_state, "pending");
+  assert.notEqual(row.snippet_ar, "حقائق لا تخص الحجز الحالي");
+  assert.equal(row.verify_claim_id, "newer-claim");
 });

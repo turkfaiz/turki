@@ -220,7 +220,14 @@ export async function verifyPending(env, limit = 1, fetcher = undefined) {
         },
         fetcher,
       );
-      await recordVerificationPass(env, version.id, checked.snippet_ar, checked.evidence);
+      const wrote = await recordVerificationPass(
+        env,
+        version.id,
+        checked.snippet_ar,
+        checked.evidence,
+        version.verify_claim_id,
+      );
+      if (!wrote) return "stale";
       await env.DB.prepare(
         `UPDATE items SET snippet_ar = ?, brief_evidence = ?
          WHERE id = ? AND current_version_id = ?`,
@@ -230,16 +237,22 @@ export async function verifyPending(env, limit = 1, fetcher = undefined) {
       return "verified";
     } catch (error) {
       if (isDeferredAiError(error) || transientAiError(error)) {
-        await deferVerification(
+        const deferred = await deferVerification(
           env,
           version.id,
           Number(error?.retryAfterSeconds) || 60,
           String(error?.message || error),
+          version.verify_claim_id,
         );
-        return "deferred";
+        return deferred ? "deferred" : "stale";
       }
-      await recordVerificationFailure(env, version.id, String(error?.message || error));
-      return "rejected";
+      const wrote = await recordVerificationFailure(
+        env,
+        version.id,
+        String(error?.message || error),
+        version.verify_claim_id,
+      );
+      return wrote ? "rejected" : "stale";
     }
   };
 

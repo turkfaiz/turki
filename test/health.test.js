@@ -91,5 +91,10 @@ test("diagnostics exposes one tool chip per AI slot and requires auth when keys 
   assert.equal(ids.includes("ai"), false);
   assert.equal(payload.tools.find((tool) => tool.id === "merge")?.ok, true);
   assert.equal(payload.ai.slots.length, 3);
-  assert.equal(payload.ai.slots.every((slot) => slot.bound && slot.hasKey), true);
+  const byId = Object.fromEntries(payload.ai.slots.map((slot) => [slot.id, slot]));
+  assert.equal(byId.gemini.bound, true);
+  assert.equal(byId.deepseek.bound, true);
+  assert.equal(byId.qwen.hasKey, true);
+  assert.equal(byId.qwen.bound, false);
+  assert.equal(byId.qwen.enabled, false);
 });

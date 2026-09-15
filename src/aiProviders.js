@@ -78,6 +78,8 @@ export const AI_SLOTS = [
     defaultBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     defaultDailyLimit: 2000,
     defaultIntervalMs: 800,
+    /** معطّل ما لم يُرفع QWEN_ENABLED صراحة. الدعم يبقى في الشيفرة. */
+    defaultEnabled: false,
   },
 ];
 
@@ -90,7 +92,7 @@ export function hasSlotKey(env, slot) {
 }
 
 export function slotEnabled(env, slot) {
-  return flag(env, slot.enabledVar, true);
+  return flag(env, slot.enabledVar, slot.defaultEnabled !== false);
 }
 
 export function slotBound(env, slot) {

@@ -237,3 +237,17 @@ test("desk_lane columns are added to a pre-lane items table without wiping it", 
   assert.equal(db.one(`SELECT title_ar FROM approvals WHERE id = 'appr-old'`).title_ar, "عنوان معتمد");
   assert.match(db.one(`SELECT evidence FROM brief_versions WHERE id = 'ver-old'`).evidence, /Via Roma/);
 });
+
+test("verify claim columns are added to existing brief_versions without deleting rows", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  seedPopulatedDesk(db);
+  const before = snapshotProtected(db);
+  db.exec(`UPDATE meta SET v = 'bootstrap-v18' WHERE k = 'bootstrap_version'`);
+  await ensureDb(envWith(db.reopen()));
+  const columns = new Set(db.query(`PRAGMA table_info(brief_versions)`).map((c) => c.name));
+  assert.ok(columns.has("verify_claim_id"));
+  assert.ok(columns.has("verify_claimed_at"));
+  assert.deepEqual(snapshotProtected(db), before);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM brief_versions WHERE id = 'ver-passed'`).n, 1);
+});
