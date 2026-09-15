@@ -253,7 +253,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v17";
+const BOOTSTRAP_VERSION = "bootstrap-v18";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
