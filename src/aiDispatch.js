@@ -154,9 +154,7 @@ export async function assignPendingLanes(env, mayorId = null) {
 export async function nextSlotForFailover(env, currentId) {
   const { bound, states } = await slotStates(env);
   const open = openSlotIds(states).filter((id) => id !== currentId);
-  const fallback = bound.map((slot) => slot.id).filter((id) => id !== currentId);
-  const pick = open[0] || fallback[0];
-  return bound.find((slot) => slot.id === pick) || null;
+  return bound.find((slot) => slot.id === open[0]) || null;
 }
 
 export function failoverAttemptLimit(env) {
@@ -255,7 +253,11 @@ export async function slotRuntimeStatuses(env) {
       hasKey: binding.hasKey,
       blocked: Boolean(budget.blocked),
       budget,
-      lastError: errors[slot.id] || null,
+      lastError:
+        errors[slot.id] ||
+        (budget.blocked && budget.blockReason
+          ? { code: `ai_deferred:${budget.blockReason}`, at: null }
+          : null),
     });
   }
   return statuses;
@@ -286,6 +288,10 @@ export async function providerLaneSnapshot(env, backlog) {
       budget: await budgetState(env, binding.id),
       lastError: errors[binding.id] || null,
     });
+    const lane = lanes[lanes.length - 1];
+    if (!lane.lastError && lane.budget?.blocked && lane.budget.blockReason) {
+      lane.lastError = { code: `ai_deferred:${lane.budget.blockReason}`, at: null };
+    }
   }
   const unassigned = Number(
     (
