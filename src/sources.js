@@ -1,24 +1,28 @@
 /**
  * سجل المصادر المعتمدة — حوكمة الرصد.
  *
- * لا يفتح المكتب أي رابط لا ينتمي إلى نطاق معتمد هنا. لا محركات بحث ولا مجمّعات:
- * روابط جوجل نيوز ملفوفة ومعمّاة ومحدودة المعدل فلا تُقرأ أصلًا، وبينج يعيد
- * نطاقات غير موثوقة نستبعدها بعد أن ندفع كلفة فتحها. إغلاق القائمة يجعل كل
- * رابط مكتشف موثوقًا قبل فتحه، فترتفع الدقة وتنخفض الكلفة معًا.
+ * لا يفتح المكتب أي رابط لا ينتمي إلى نطاق معتمد هنا. لا محركات بحث ولا مجمّعات.
+ * الاكتشاف مرتّب داخل المصدر: RSS ثم غرفة الأخبار ثم Sitemap/API ثم بحث داخلي
+ * مختبر ثم Browser Rendering إن رُبط، دون تجاوز CAPTCHA.
  *
- * لكل مكتب ثلاثة مصادر على الأكثر، مرتبة بالأولوية:
+ * لكل مكتب ثلاثة مصادر على الأكثر:
  *   1. غرفة الأخبار الرسمية للمدينة.
- *   2. أقوى تغطية محلية للمدينة.
- *   3. وكالة أو صحيفة وطنية تغطي المدينة.
- *
- * `kind` يحدد طريقة الوصول لا مستوى الثقة:
- *   feed — تغذية RSS/Atom مُتحقَّق منها، وهي الأرخص والأدق.
- *   page — صفحة أخبار الموقع نفسه، لمن لا ينشر تغذية. الاستخراج محصور في
- *          النطاق المعتمد نفسه، فلا تتسع القائمة ضمنًا.
- *
- * كل تغذية أدناه تم فحصها بطلب فعلي: تعيد عناصر، وروابطها مباشرة لا ملفوفة.
- * ما لا تغذية له وُضع بصيغة page بعد التأكد من عدم إعلانه أي تغذية.
+ *   2. أقوى تغطية محلية.
+ *   3. وكالة أو صحيفة وطنية.
  */
+
+const STRATEGY_KIND = {
+  rss: "feed",
+  newsroom: "page",
+  sitemap: "sitemap",
+  api: "api",
+  internal_search: "search",
+  browser: "browser",
+};
+
+function step(type, spec = {}) {
+  return { type, enabled: spec.enabled !== false, ...spec };
+}
 
 const REGISTRY = {
   turin: [
@@ -26,22 +30,25 @@ const REGISTRY = {
       domain: "comune.torino.it",
       name: "Comune di Torino",
       tier: 0,
-      kind: "feed",
-      url: "https://www.comune.torino.it/rss.xml",
+      platform: "official",
+      discovery: [
+        step("rss", { url: "https://www.comune.torino.it/rss.xml" }),
+        step("newsroom", { url: "https://www.comune.torino.it/", adapter: "generic" }),
+      ],
     },
     {
       domain: "torinoclick.it",
       name: "Torino Click",
       tier: 0,
-      kind: "feed",
-      url: "https://www.torinoclick.it/feed/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.torinoclick.it/feed/" })],
     },
     {
       domain: "torino.repubblica.it",
       name: "La Repubblica Torino",
       tier: 1,
-      kind: "feed",
-      url: "https://torino.repubblica.it/rss/rss2.0.xml",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://torino.repubblica.it/rss/rss2.0.xml" })],
     },
   ],
   seoul: [
@@ -49,22 +56,29 @@ const REGISTRY = {
       domain: "seoul.go.kr",
       name: "Seoul Metropolitan Government",
       tier: 0,
-      kind: "feed",
-      url: "https://english.seoul.go.kr/rss",
+      platform: "official",
+      discovery: [
+        step("rss", { url: "https://english.seoul.go.kr/feed/" }),
+        step("newsroom", { url: "https://english.seoul.go.kr/", adapter: "seoul-wp" }),
+        step("api", {
+          url: "https://english.seoul.go.kr/wp-json/wp/v2/posts?per_page=20",
+          format: "wp-json",
+        }),
+      ],
     },
     {
       domain: "yna.co.kr",
       name: "Yonhap News",
       tier: 1,
-      kind: "feed",
-      url: "https://www.yna.co.kr/rss/politics.xml",
+      platform: "agency",
+      discovery: [step("rss", { url: "https://www.yna.co.kr/rss/politics.xml" })],
     },
     {
       domain: "koreaherald.com",
       name: "The Korea Herald",
       tier: 1,
-      kind: "feed",
-      url: "https://www.koreaherald.com/rss/newsAll",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.koreaherald.com/rss/newsAll" })],
     },
   ],
   madrid: [
@@ -72,22 +86,29 @@ const REGISTRY = {
       domain: "diario.madrid.es",
       name: "Diario de Madrid",
       tier: 0,
-      kind: "page",
-      url: "https://diario.madrid.es/",
+      platform: "official",
+      discovery: [
+        step("newsroom", { url: "https://diario.madrid.es/", adapter: "madrid-diario" }),
+        step("sitemap", {
+          url: "https://diario.madrid.es/sitemap.xml",
+          include_patterns: ["blog", "noticia", "20"],
+        }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "europapress.es",
       name: "Europa Press Madrid",
       tier: 1,
-      kind: "feed",
-      url: "https://www.europapress.es/rss/rss.aspx?ch=283",
+      platform: "agency",
+      discovery: [step("rss", { url: "https://www.europapress.es/rss/rss.aspx?ch=289" })],
     },
     {
       domain: "elmundo.es",
       name: "El Mundo Madrid",
       tier: 1,
-      kind: "feed",
-      url: "https://www.elmundo.es/rss/madrid.xml",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.elmundo.es/rss/madrid.xml" })],
     },
   ],
   malaga: [
@@ -95,22 +116,28 @@ const REGISTRY = {
       domain: "malaga.eu",
       name: "Ayuntamiento de Málaga",
       tier: 0,
-      kind: "page",
-      url: "https://prensa.malaga.eu/",
+      platform: "official",
+      discovery: [
+        step("newsroom", {
+          url: "https://www.malaga.eu/el-ayuntamiento/notas-de-prensa/",
+          adapter: "malaga-press",
+        }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "diariosur.es",
       name: "Diario Sur Málaga",
       tier: 1,
-      kind: "feed",
-      url: "https://www.diariosur.es/rss/2.0/?section=malaga",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.diariosur.es/rss/2.0/?section=malaga" })],
     },
     {
       domain: "europapress.es",
       name: "Europa Press Andalucía",
       tier: 1,
-      kind: "feed",
-      url: "https://www.europapress.es/rss/rss.aspx?ch=00356",
+      platform: "agency",
+      discovery: [step("rss", { url: "https://www.europapress.es/rss/rss.aspx?ch=00356" })],
     },
   ],
   "northeast-england": [
@@ -118,22 +145,31 @@ const REGISTRY = {
       domain: "northeast-ca.gov.uk",
       name: "North East Combined Authority",
       tier: 0,
-      kind: "page",
-      url: "https://www.northeast-ca.gov.uk/news/",
+      platform: "official",
+      discovery: [
+        step("newsroom", { url: "https://www.northeast-ca.gov.uk/news", adapter: "neca-news" }),
+        step("sitemap", {
+          url: "https://www.northeast-ca.gov.uk/sitemap.xml",
+          include_patterns: ["/news/"],
+        }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "chroniclelive.co.uk",
       name: "Chronicle Live",
       tier: 1,
-      kind: "feed",
-      url: "https://www.chroniclelive.co.uk/news/north-east-news/?service=rss",
+      platform: "newspaper",
+      discovery: [
+        step("rss", { url: "https://www.chroniclelive.co.uk/news/north-east-news/?service=rss" }),
+      ],
     },
     {
       domain: "thenorthernecho.co.uk",
       name: "The Northern Echo",
       tier: 1,
-      kind: "feed",
-      url: "https://www.thenorthernecho.co.uk/news/rss/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.thenorthernecho.co.uk/news/rss/" })],
     },
   ],
   amman: [
@@ -141,22 +177,28 @@ const REGISTRY = {
       domain: "ammancity.gov.jo",
       name: "أمانة عمّان الكبرى",
       tier: 0,
-      kind: "page",
-      url: "https://www.ammancity.gov.jo/ar/gam/news.aspx",
+      platform: "official",
+      discovery: [
+        step("newsroom", {
+          url: "https://www.ammancity.gov.jo/ar/gam/news.aspx",
+          adapter: "amman-gam",
+        }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "roya.tv",
       name: "رؤيا",
       tier: 1,
-      kind: "feed",
-      url: "https://roya.tv/rss",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://roya.tv/rss" })],
     },
     {
       domain: "almamlakatv.com",
       name: "المملكة",
       tier: 1,
-      kind: "feed",
-      url: "https://www.almamlakatv.com/rss.xml",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://almamlakatv.com/rss.xml" })],
     },
   ],
   baghdad: [
@@ -164,22 +206,28 @@ const REGISTRY = {
       domain: "amanatbaghdad.gov.iq",
       name: "أمانة بغداد",
       tier: 0,
-      kind: "page",
-      url: "https://amanatbaghdad.gov.iq/news",
+      platform: "official",
+      discovery: [
+        step("newsroom", { url: "https://amanatbaghdad.gov.iq/news", adapter: "baghdad-amanat" }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "baghdadtoday.news",
       name: "بغداد اليوم",
       tier: 1,
-      kind: "feed",
-      url: "https://baghdadtoday.news/rss.xml",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://baghdadtoday.news/rss.xml" })],
     },
     {
       domain: "ina.iq",
       name: "الوكالة العراقية للأنباء",
       tier: 1,
-      kind: "feed",
-      url: "https://www.ina.iq/rss.xml",
+      platform: "agency",
+      discovery: [
+        step("rss", { url: "https://www.ina.iq/rss.xml" }),
+        step("newsroom", { url: "https://ina.iq/ar/local", adapter: "ina-local" }),
+      ],
     },
   ],
   muscat: [
@@ -187,22 +235,30 @@ const REGISTRY = {
       domain: "mm.gov.om",
       name: "بلدية مسقط",
       tier: 0,
-      kind: "page",
-      url: "https://www.mm.gov.om/",
+      platform: "official",
+      discovery: [
+        step("rss", { url: "https://www.mm.gov.om/ar/rss.aspx" }),
+        step("newsroom", {
+          url: "https://www.mm.gov.om/ar/Page.aspx?PAID=2",
+          adapter: "muscat-mm",
+        }),
+      ],
     },
     {
       domain: "timesofoman.com",
       name: "Times of Oman",
       tier: 1,
-      kind: "feed",
-      url: "https://timesofoman.com/feed/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://timesofoman.com/feed/" })],
     },
     {
       domain: "omanobserver.om",
       name: "Oman Observer",
       tier: 1,
-      kind: "page",
-      url: "https://www.omanobserver.om/oman",
+      platform: "newspaper",
+      discovery: [
+        step("newsroom", { url: "https://www.omanobserver.om/oman", adapter: "oman-observer" }),
+      ],
     },
   ],
   osaka: [
@@ -210,22 +266,29 @@ const REGISTRY = {
       domain: "city.osaka.lg.jp",
       name: "大阪市",
       tier: 0,
-      kind: "page",
-      url: "https://www.city.osaka.lg.jp/hodohappyo/",
+      platform: "official",
+      discovery: [
+        step("rss", { url: "https://www.city.osaka.lg.jp/main/rss/rss.xml" }),
+        step("newsroom", {
+          url: "https://www.city.osaka.lg.jp/shisei/news/curr.html",
+          adapter: "osaka-city",
+          also: ["https://www.city.osaka.lg.jp/shisei/news/prev1.html"],
+        }),
+      ],
     },
     {
       domain: "nhk.or.jp",
       name: "NHK",
       tier: 1,
-      kind: "feed",
-      url: "https://www.nhk.or.jp/rss/news/cat0.xml",
+      platform: "agency",
+      discovery: [step("rss", { url: "https://www3.nhk.or.jp/rss/news/cat0.xml" })],
     },
     {
       domain: "asahi.com",
       name: "朝日新聞",
       tier: 1,
-      kind: "feed",
-      url: "https://www.asahi.com/rss/asahi/newsheadlines.rdf",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.asahi.com/rss/asahi/newsheadlines.rdf" })],
     },
   ],
   athens: [
@@ -233,22 +296,33 @@ const REGISTRY = {
       domain: "cityofathens.gr",
       name: "Δήμος Αθηναίων",
       tier: 0,
-      kind: "page",
-      url: "https://www.cityofathens.gr/",
+      platform: "official",
+      discovery: [
+        step("rss", { url: "https://www.cityofathens.gr/feed/" }),
+        step("newsroom", { url: "https://www.cityofathens.gr/news/", adapter: "athens-wp" }),
+        step("api", {
+          url: "https://www.cityofathens.gr/wp-json/wp/v2/posts?per_page=20",
+          format: "wp-json",
+        }),
+        step("sitemap", {
+          url: "https://www.cityofathens.gr/post-sitemap.xml",
+          include_patterns: ["deltio-typoy", "anakoinosi"],
+        }),
+      ],
     },
     {
       domain: "efsyn.gr",
       name: "Εφημερίδα των Συντακτών",
       tier: 1,
-      kind: "feed",
-      url: "https://www.efsyn.gr/rss.xml",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.efsyn.gr/rss.xml" })],
     },
     {
       domain: "in.gr",
       name: "in.gr",
       tier: 1,
-      kind: "feed",
-      url: "https://www.in.gr/feed/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.in.gr/feed/" })],
     },
   ],
   pristina: [
@@ -256,60 +330,61 @@ const REGISTRY = {
       domain: "prishtinaonline.com",
       name: "Komuna e Prishtinës",
       tier: 0,
-      kind: "page",
-      url: "https://prishtinaonline.com/lajme",
+      platform: "official",
+      discovery: [
+        step("newsroom", { url: "https://prishtinaonline.com/lajmet", adapter: "pristina-lajmet" }),
+      ],
     },
     {
       domain: "telegrafi.com",
       name: "Telegrafi",
       tier: 1,
-      kind: "feed",
-      url: "https://telegrafi.com/feed/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://telegrafi.com/feed/" })],
     },
     {
       domain: "kallxo.com",
       name: "Kallxo",
       tier: 1,
-      kind: "feed",
-      url: "https://kallxo.com/feed/",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://kallxo.com/feed/" })],
     },
   ],
   rabat: [
     {
-      domain: "rabat.ma",
+      domain: "mairiederabat.ma",
       name: "جماعة الرباط",
       tier: 0,
-      kind: "page",
-      url: "https://www.rabat.ma/",
+      platform: "official",
+      discovery: [
+        step("newsroom", { url: "https://mairiederabat.ma/ar-AR", adapter: "rabat-mairie" }),
+        step("browser", { enabled: false }),
+      ],
     },
     {
       domain: "hespress.com",
       name: "هسبريس",
       tier: 1,
-      kind: "feed",
-      url: "https://www.hespress.com/feed",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://www.hespress.com/feed" })],
     },
     {
       domain: "telquel.ma",
       name: "TelQuel",
       tier: 1,
-      kind: "feed",
-      url: "https://telquel.ma/feed",
+      platform: "newspaper",
+      discovery: [step("rss", { url: "https://telquel.ma/feed" })],
     },
   ],
 };
 
 export const MAX_SOURCES_PER_OFFICE = 3;
+export const CURATED_AT = "2026-09-14";
+export const SOURCE_POLL_MAX_REQUESTS = 6;
+export const ARTICLE_FETCH_BATCH = 3;
+export const INLINE_ARTICLE_FETCH_LIMIT = 12;
+export const FEED_STALE_DAYS = 21;
 
-/** تاريخ الفحص العميق الذي اختير على أساسه هذا السجل. */
-export const CURATED_AT = "2026-09-10";
-
-/**
- * نتيجة الفحص العميق لكل مصدر: أعاد عناصر حقيقية بروابط مباشرة أم لا.
- * غرف الأخبار الرسمية الغائبة هنا فُحصت كذلك لكنها لم تستجب من شبكة الفحص
- * (حجب 403، أو تعذّر DNS، أو صفحة بلا روابط أخبار)، وتبقى في السجل لأنها
- * المصدر الأصلي للمدينة وقد تستجيب من شبكة Cloudflare، فيحكم عليها التشغيل.
- */
 const VERIFIED_AT_CURATION = new Set([
   "turin:comune.torino.it",
   "turin:torinoclick.it",
@@ -319,6 +394,7 @@ const VERIFIED_AT_CURATION = new Set([
   "seoul:koreaherald.com",
   "madrid:europapress.es",
   "madrid:elmundo.es",
+  "malaga:malaga.eu",
   "malaga:diariosur.es",
   "malaga:europapress.es",
   "northeast-england:chroniclelive.co.uk",
@@ -327,26 +403,75 @@ const VERIFIED_AT_CURATION = new Set([
   "amman:almamlakatv.com",
   "baghdad:baghdadtoday.news",
   "baghdad:ina.iq",
+  "muscat:mm.gov.om",
   "muscat:timesofoman.com",
   "muscat:omanobserver.om",
+  "osaka:city.osaka.lg.jp",
   "osaka:nhk.or.jp",
   "osaka:asahi.com",
+  "athens:cityofathens.gr",
   "athens:efsyn.gr",
   "athens:in.gr",
+  "pristina:prishtinaonline.com",
   "pristina:telegrafi.com",
   "pristina:kallxo.com",
   "rabat:hespress.com",
   "rabat:telquel.ma",
 ]);
 
+export function discoverySteps(source) {
+  return (source?.discovery || []).filter((entry) => entry && entry.enabled !== false);
+}
+
+export function primaryStrategy(source) {
+  return discoverySteps(source).find((entry) => entry.url) || discoverySteps(source)[0] || null;
+}
+
+export function strategyKind(type) {
+  return STRATEGY_KIND[type] || "page";
+}
+
+export function platformLabelAr(source) {
+  const platform = source.platform || (source.tier === 0 ? "official" : "newspaper");
+  const labels = {
+    official: "موقع رسمي",
+    newspaper: "صحيفة",
+    agency: "وكالة",
+  };
+  return labels[platform] || platform;
+}
+
+export function strategyLabelAr(type) {
+  return (
+    {
+      rss: "RSS",
+      newsroom: "غرفة أخبار",
+      sitemap: "Sitemap",
+      api: "واجهة الموقع",
+      internal_search: "بحث داخلي",
+      browser: "Browser",
+    }[type] || type
+  );
+}
+
 function withIds(mayorId, entries) {
   return entries.slice(0, MAX_SOURCES_PER_OFFICE).map((entry, index) => {
     const id = `${mayorId}:${entry.domain}`;
+    const discovery = (entry.discovery || []).map((row, rank) => ({
+      ...row,
+      enabled: row.enabled !== false,
+      rank: rank + 1,
+    }));
+    const primary = discovery.find((row) => row.enabled && row.url) || discovery[0] || {};
     return {
       ...entry,
       id,
       mayor_id: mayorId,
       rank: index + 1,
+      discovery,
+      kind: strategyKind(primary.type),
+      url: primary.url || "",
+      adapter: discovery.find((row) => row.type === "newsroom")?.adapter || "generic",
       verified: VERIFIED_AT_CURATION.has(id) ? 1 : 0,
       curated_at: CURATED_AT,
     };
@@ -359,6 +484,10 @@ export const APPROVED_SOURCES = Object.entries(REGISTRY).flatMap(([mayorId, entr
 
 export function sourcesFor(mayorId) {
   return APPROVED_SOURCES.filter((source) => source.mayor_id === mayorId);
+}
+
+export function sourceById(id) {
+  return APPROVED_SOURCES.find((source) => source.id === id) || null;
 }
 
 function hostOf(value) {
@@ -378,9 +507,7 @@ function domainMatches(host, domain) {
 export function approvedSourceFor(url, mayorId) {
   const host = hostOf(url);
   if (!host) return null;
-  return (
-    sourcesFor(mayorId).find((source) => domainMatches(host, source.domain)) || null
-  );
+  return sourcesFor(mayorId).find((source) => domainMatches(host, source.domain)) || null;
 }
 
 export function isApprovedUrl(url, mayorId) {

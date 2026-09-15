@@ -185,7 +185,7 @@ export const MAYORS = [
     country_code: "MA",
     gn_hl: "ar",
     gn_gl: "MA",
-    official_host: "rabat.ma",
+    official_host: "mairiederabat.ma",
   },
   {
     id: "athens",
@@ -208,6 +208,255 @@ export const MAYORS = [
 
 export function mayorById(id) {
   return MAYORS.find((m) => m.id === id) || null;
+}
+
+export const SEED_MAYOR_IDS = new Set(MAYORS.map((mayor) => mayor.id));
+
+const MAYOR_FIELDS = [
+  "id",
+  "country_ar",
+  "city_ar",
+  "city_en",
+  "title_ar",
+  "title_en",
+  "name_en",
+  "name_native",
+  "name_ar",
+  "native_lang",
+  "native_lang_ar",
+  "country_code",
+  "gn_hl",
+  "gn_gl",
+  "official_host",
+];
+
+function clip(value, max) {
+  return String(value || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+export function mayorFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    country_ar: row.country_ar,
+    city_ar: row.city_ar,
+    city_en: row.city_en,
+    title_ar: row.title_ar,
+    title_en: row.title_en,
+    name_en: row.name_en,
+    name_native: row.name_native,
+    name_ar: row.name_ar,
+    native_lang: row.native_lang,
+    native_lang_ar: row.native_lang_ar,
+    country_code: row.country_code,
+    gn_hl: row.gn_hl,
+    gn_gl: row.gn_gl,
+    official_host: row.official_host || "",
+    origin: SEED_MAYOR_IDS.has(row.id) ? "seed" : "custom",
+  };
+}
+
+export function slugifyMayorId(cityEn, nameEn) {
+  const raw = `${cityEn || ""}-${nameEn || ""}`
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  if (/^[a-z][a-z0-9-]{1,39}$/.test(raw)) return raw;
+  return "";
+}
+
+export function normalizeOfficialHost(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let host = raw;
+  try {
+    if (/^https?:\/\//i.test(raw) || raw.includes("/")) {
+      const url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+      host = url.hostname;
+    }
+  } catch {
+    return "";
+  }
+  host = host.replace(/^www\./i, "").replace(/\.$/, "").toLowerCase();
+  if (!/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(host)) {
+    return "";
+  }
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)
+  ) {
+    return "";
+  }
+  return host;
+}
+
+const LANG_AR = {
+  ar: "العربية",
+  en: "الإنجليزية",
+  es: "الإسبانية",
+  it: "الإيطالية",
+  ja: "اليابانية",
+  ko: "الكورية",
+  el: "اليونانية",
+  sq: "الألبانية",
+  zh: "الصينية",
+  fr: "الفرنسية",
+  de: "الألمانية",
+  pt: "البرتغالية",
+  tr: "التركية",
+  fa: "الفارسية",
+  ur: "الأردية",
+  hi: "الهندية",
+  ru: "الروسية",
+  nl: "الهولندية",
+  sv: "السويدية",
+  pl: "البولندية",
+  uk: "الأوكرانية",
+  id: "الإندونيسية",
+  ms: "الملايوية",
+  th: "التايلاندية",
+  vi: "الفيتنامية",
+  he: "العبرية",
+};
+
+export function parseMayorInput(body = {}) {
+  const name_ar = clip(body.name_ar, 120);
+  const name_en = clip(body.name_en, 120);
+  const name_native = clip(body.name_native, 120) || name_en;
+  const city_ar = clip(body.city_ar, 80);
+  const city_en = clip(body.city_en, 80);
+  const country_ar = clip(body.country_ar, 80);
+  const country_code = clip(body.country_code, 8).toUpperCase();
+  const title_ar = clip(body.title_ar, 120) || (city_ar ? `عمدة ${city_ar}` : "");
+  const title_en = clip(body.title_en, 120) || (city_en ? `Mayor of ${city_en}` : "");
+  const native_lang = clip(body.native_lang, 12).toLowerCase();
+  const native_lang_ar =
+    clip(body.native_lang_ar, 40) || LANG_AR[native_lang.split("-")[0]] || "";
+  const official_host = body.official_host ? normalizeOfficialHost(body.official_host) : "";
+  if (body.official_host && !official_host) {
+    return { error: "bad_official_host", detail: "النطاق الرسمي يجب أن يكون اسم مضيف عامًا، بلا مسار." };
+  }
+  const required = {
+    name_ar,
+    name_en,
+    name_native,
+    city_ar,
+    city_en,
+    country_ar,
+    country_code,
+    title_ar,
+    title_en,
+    native_lang,
+    native_lang_ar,
+  };
+  const missing = Object.entries(required)
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+  if (missing.length) {
+    return { error: "missing_fields", detail: missing };
+  }
+  if (!/^[A-Z]{2}$/.test(country_code)) {
+    return { error: "bad_country_code", detail: "رمز الدولة حرفان لاتينيان، مثل SA." };
+  }
+  if (!/^[a-z]{2,3}(?:-[a-z]{2})?$/i.test(native_lang)) {
+    return { error: "bad_native_lang", detail: "رمز لغة الرصد مثل ar أو ja أو zh." };
+  }
+  const requestedId = clip(body.id, 40).toLowerCase();
+  const id = requestedId || slugifyMayorId(city_en, name_en);
+  if (!/^[a-z][a-z0-9-]{1,39}$/.test(id)) {
+    return { error: "bad_id", detail: "معرّف المكتب يُشتق من المدينة والاسم الإنجليزي بأحرف لاتينية." };
+  }
+  if (SEED_MAYOR_IDS.has(id)) {
+    return { error: "seed_mayor", detail: "هذا المكتب موجود في السجل الأساسي ولا يُضاف من الواجهة." };
+  }
+  return {
+    mayor: {
+      id,
+      country_ar,
+      city_ar,
+      city_en,
+      title_ar,
+      title_en,
+      name_en,
+      name_native,
+      name_ar,
+      native_lang,
+      native_lang_ar,
+      country_code,
+      gn_hl: native_lang,
+      gn_gl: country_code,
+      official_host,
+      origin: "custom",
+    },
+  };
+}
+
+export function mayorInputMessage(parsed) {
+  if (!parsed?.error) return "";
+  if (parsed.error === "missing_fields") {
+    return `أكمل البيانات الأساسية المطلوبة: ${(parsed.detail || []).join("، ")}`;
+  }
+  if (typeof parsed.detail === "string" && parsed.detail) return parsed.detail;
+  return parsed.error;
+}
+
+export async function insertCustomMayor(env, mayor) {
+  await env.DB.prepare(
+    `INSERT INTO mayors (
+       id, country_ar, city_ar, city_en, title_ar, title_en, name_en, name_native, name_ar,
+       native_lang, native_lang_ar, country_code, gn_hl, gn_gl, official_host
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      mayor.id,
+      mayor.country_ar,
+      mayor.city_ar,
+      mayor.city_en,
+      mayor.title_ar,
+      mayor.title_en,
+      mayor.name_en,
+      mayor.name_native,
+      mayor.name_ar,
+      mayor.native_lang,
+      mayor.native_lang_ar,
+      mayor.country_code,
+      mayor.gn_hl,
+      mayor.gn_gl,
+      mayor.official_host || "",
+    )
+    .run();
+  return { ...mayor, origin: "custom" };
+}
+
+export async function listMayors(env) {
+  if (!env?.DB) return MAYORS.map((mayor) => ({ ...mayor, origin: "seed" }));
+  const { results } = await env.DB.prepare(
+    `SELECT ${MAYOR_FIELDS.join(", ")} FROM mayors ORDER BY country_ar, city_ar, name_ar`,
+  ).all();
+  const rows = (results || []).map(mayorFromRow);
+  return rows.length ? rows : MAYORS.map((mayor) => ({ ...mayor, origin: "seed" }));
+}
+
+export async function resolveMayor(env, id) {
+  if (!id) return null;
+  if (env?.DB) {
+    const row = await env.DB.prepare(
+      `SELECT ${MAYOR_FIELDS.join(", ")} FROM mayors WHERE id = ?`,
+    )
+      .bind(id)
+      .first();
+    if (row) return mayorFromRow(row);
+  }
+  const seeded = mayorById(id);
+  return seeded ? { ...seeded, origin: "seed" } : null;
 }
 
 export function buildSearchQueries(mayor, extra = "") {

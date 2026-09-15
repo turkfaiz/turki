@@ -161,6 +161,19 @@ export const PUBLISHERS = buildPublishers();
 
 export function matchPublisher(domain, mayor) {
   if (!domain || isAggregatorHost(domain)) return null;
+  const official = String(mayor?.official_host || "")
+    .replace(/^www\./i, "")
+    .toLowerCase();
+  if (official && (domain === official || domain.endsWith(`.${official}`))) {
+    return {
+      id: `${mayor.id}:${official}`,
+      domain: official,
+      name: mayor.title_en || mayor.name_en,
+      tier: 0,
+      country_code: mayor.country_code || null,
+      mayor_id: mayor.id,
+    };
+  }
   const hits = PUBLISHERS.filter((p) => {
     const same =
       domain === p.domain || domain.endsWith(`.${p.domain}`) || p.domain.endsWith(`.${domain}`);

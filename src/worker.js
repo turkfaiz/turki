@@ -1,12 +1,36 @@
-import { MAYORS } from "./mayors.js";
+import {
+  MAYORS,
+  insertCustomMayor,
+  listMayors,
+  mayorInputMessage,
+  parseMayorInput,
+  resolveMayor,
+} from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import {
+  enabledSources,
+  fetchCandidateBatch,
+  pendingCandidateCount,
+  pendingFetchIds,
+  pollOneSource,
+} from "./pipeline.js";
+import {
+  ARTICLE_FETCH_BATCH,
+  INLINE_ARTICLE_FETCH_LIMIT,
+  platformLabelAr,
+  sourceById,
+  strategyLabelAr,
+} from "./sources.js";
+import {
   MAX_BRIEF_ATTEMPTS,
+  assignPendingLanes,
   briefBacklog,
   pendingBriefCount,
+  slotsWithCapacity,
   translatePending,
   verifyPending,
 } from "./translate.js";
+import { providerLaneSnapshot } from "./aiDispatch.js";
 import { budgetSettings, budgetState, pruneAiBudget } from "./aiBudget.js";
 import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
@@ -20,6 +44,7 @@ import {
 import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
+import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -84,10 +109,12 @@ const SCHEMA_STATEMENTS = [
     brief_claim_id TEXT,
     brief_claimed_at TEXT,
     brief_after TEXT,
+    brief_provider TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_scans_started ON scans(started_at DESC)`,
   `CREATE TABLE IF NOT EXISTS search_jobs (
@@ -137,15 +164,82 @@ const SCHEMA_STATEMENTS = [
     last_ok_at TEXT,
     last_status TEXT,
     last_items INTEGER DEFAULT 0,
-    consecutive_failures INTEGER DEFAULT 0
+    consecutive_failures INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    connect_status TEXT,
+    http_status INTEGER,
+    parse_status TEXT,
+    discovered_count INTEGER DEFAULT 0,
+    new_count INTEGER DEFAULT 0,
+    read_count INTEGER DEFAULT 0,
+    relevant_count INTEGER DEFAULT 0,
+    last_success_at TEXT,
+    last_discovery_at TEXT,
+    last_fresh_at TEXT,
+    fail_reason TEXT,
+    last_strategy TEXT,
+    last_discovered_url TEXT,
+    etag TEXT,
+    last_modified TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sources_mayor ON sources(mayor_id, rank)`,
+  `CREATE TABLE IF NOT EXISTS candidates (
+    id TEXT PRIMARY KEY,
+    mayor_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    scan_id TEXT,
+    url TEXT NOT NULL,
+    canonical_url TEXT,
+    title TEXT,
+    snippet TEXT,
+    published_at TEXT,
+    discovered_at TEXT NOT NULL,
+    discovery_type TEXT,
+    stage TEXT NOT NULL DEFAULT 'candidate_discovered',
+    fetch_status TEXT NOT NULL DEFAULT 'pending',
+    http_status INTEGER,
+    skip_reason TEXT,
+    etag TEXT,
+    last_modified TEXT,
+    fetched_at TEXT,
+    attempts INTEGER DEFAULT 0
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_source_url ON candidates(source_id, url)`,
+  `CREATE INDEX IF NOT EXISTS idx_candidates_fetch ON candidates(fetch_status, mayor_id)`,
+  `CREATE TABLE IF NOT EXISTS settings_audit (
+    id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    source_id TEXT,
+    mayor_id TEXT,
+    before_json TEXT,
+    after_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS scan_sources (
+    scan_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    mayor_id TEXT NOT NULL,
+    job_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    detail TEXT,
+    PRIMARY KEY (scan_id, source_id)
+  )`,
   `CREATE TABLE IF NOT EXISTS ai_budget (
     day TEXT PRIMARY KEY,
     calls INTEGER NOT NULL DEFAULT 0,
     last_call_at TEXT,
     blocked_until TEXT,
     block_reason TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+    day TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    last_call_at TEXT,
+    blocked_until TEXT,
+    block_reason TEXT,
+    PRIMARY KEY (day, provider)
   )`,
   `CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -154,7 +248,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v13";
+const BOOTSTRAP_VERSION = "bootstrap-v17";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -179,6 +273,26 @@ async function migrateSearchJobs(env) {
   }
 }
 
+async function migrateAiProviderBudget(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS ai_provider_budget (
+      day TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      calls INTEGER NOT NULL DEFAULT 0,
+      last_call_at TEXT,
+      blocked_until TEXT,
+      block_reason TEXT,
+      PRIMARY KEY (day, provider)
+    )`,
+  ).run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO ai_provider_budget
+       (day, provider, calls, last_call_at, blocked_until, block_reason)
+     SELECT day, 'gemini', calls, last_call_at, blocked_until, block_reason
+     FROM ai_budget`,
+  ).run();
+}
+
 const REQUIRED_TABLES = [
   "mayors",
   "items",
@@ -187,7 +301,11 @@ const REQUIRED_TABLES = [
   "search_job_tasks",
   "publishers",
   "sources",
+  "candidates",
+  "settings_audit",
+  "scan_sources",
   "ai_budget",
+  "ai_provider_budget",
   "brief_versions",
   "approvals",
 ];
@@ -262,6 +380,7 @@ export async function ensureDb(env) {
   );
   await seedSources(env);
   await migrateItems(env);
+  await migrateAiProviderBudget(env);
   await migrateVersions(env);
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
@@ -281,12 +400,32 @@ async function migrateSources(env) {
   const info = await env.DB.prepare(`PRAGMA table_info(sources)`).all();
   const names = new Set((info.results || []).map((column) => column.name));
   if (!names.size) return;
-  if (!names.has("verified")) {
-    await env.DB.prepare(`ALTER TABLE sources ADD COLUMN verified INTEGER DEFAULT 0`).run();
-  }
-  if (!names.has("curated_at")) {
-    await env.DB.prepare(`ALTER TABLE sources ADD COLUMN curated_at TEXT`).run();
-  }
+  const add = async (column, sql) => {
+    if (!names.has(column)) await env.DB.prepare(sql).run();
+  };
+  await add("verified", `ALTER TABLE sources ADD COLUMN verified INTEGER DEFAULT 0`);
+  await add("curated_at", `ALTER TABLE sources ADD COLUMN curated_at TEXT`);
+  await add("last_checked_at", `ALTER TABLE sources ADD COLUMN last_checked_at TEXT`);
+  await add("last_ok_at", `ALTER TABLE sources ADD COLUMN last_ok_at TEXT`);
+  await add("last_status", `ALTER TABLE sources ADD COLUMN last_status TEXT`);
+  await add("last_items", `ALTER TABLE sources ADD COLUMN last_items INTEGER DEFAULT 0`);
+  await add("consecutive_failures", `ALTER TABLE sources ADD COLUMN consecutive_failures INTEGER DEFAULT 0`);
+  await add("enabled", `ALTER TABLE sources ADD COLUMN enabled INTEGER DEFAULT 1`);
+  await add("connect_status", `ALTER TABLE sources ADD COLUMN connect_status TEXT`);
+  await add("http_status", `ALTER TABLE sources ADD COLUMN http_status INTEGER`);
+  await add("parse_status", `ALTER TABLE sources ADD COLUMN parse_status TEXT`);
+  await add("discovered_count", `ALTER TABLE sources ADD COLUMN discovered_count INTEGER DEFAULT 0`);
+  await add("new_count", `ALTER TABLE sources ADD COLUMN new_count INTEGER DEFAULT 0`);
+  await add("read_count", `ALTER TABLE sources ADD COLUMN read_count INTEGER DEFAULT 0`);
+  await add("relevant_count", `ALTER TABLE sources ADD COLUMN relevant_count INTEGER DEFAULT 0`);
+  await add("last_success_at", `ALTER TABLE sources ADD COLUMN last_success_at TEXT`);
+  await add("last_discovery_at", `ALTER TABLE sources ADD COLUMN last_discovery_at TEXT`);
+  await add("last_fresh_at", `ALTER TABLE sources ADD COLUMN last_fresh_at TEXT`);
+  await add("fail_reason", `ALTER TABLE sources ADD COLUMN fail_reason TEXT`);
+  await add("last_strategy", `ALTER TABLE sources ADD COLUMN last_strategy TEXT`);
+  await add("last_discovered_url", `ALTER TABLE sources ADD COLUMN last_discovered_url TEXT`);
+  await add("etag", `ALTER TABLE sources ADD COLUMN etag TEXT`);
+  await add("last_modified", `ALTER TABLE sources ADD COLUMN last_modified TEXT`);
 }
 
 async function seedSources(env) {
@@ -348,21 +487,44 @@ export async function recordSourceHealth(env, rows) {
     `UPDATE sources
      SET last_checked_at = datetime('now'),
          last_ok_at = CASE WHEN ? THEN datetime('now') ELSE last_ok_at END,
+         last_success_at = CASE WHEN ? THEN datetime('now') ELSE last_success_at END,
+         last_discovery_at = CASE WHEN ? > 0 THEN datetime('now') ELSE last_discovery_at END,
+         last_fresh_at = CASE WHEN ? > 0 THEN datetime('now') ELSE last_fresh_at END,
          last_status = ?, last_items = ?,
+         connect_status = ?, http_status = ?, parse_status = ?,
+         discovered_count = ?, new_count = ?,
+         fail_reason = ?, last_strategy = ?, last_discovered_url = ?,
+         etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
          consecutive_failures = CASE WHEN ? THEN 0 ELSE IFNULL(consecutive_failures, 0) + 1 END
      WHERE id = ?`,
   );
   for (let i = 0; i < rows.length; i += 20) {
     await env.DB.batch(
-      rows.slice(i, i + 20).map((row) =>
-        stmt.bind(
-          row.ok ? 1 : 0,
+      rows.slice(i, i + 20).map((row) => {
+        const ok = Boolean(row.ok);
+        const discovered = Number(row.discovered ?? row.items) || 0;
+        const fresh = Number(row.new_count) || 0;
+        return stmt.bind(
+          ok ? 1 : 0,
+          ok ? 1 : 0,
+          discovered,
+          fresh,
           String(row.status || "").slice(0, 160),
           Number(row.items) || 0,
-          row.ok ? 1 : 0,
+          String(row.connect_status || row.status || "").slice(0, 80),
+          row.http_status ?? null,
+          String(row.parse_status || "").slice(0, 80),
+          discovered,
+          fresh,
+          String(row.fail_reason || "").slice(0, 160),
+          String(row.last_strategy || "").slice(0, 40),
+          String(row.last_discovered_url || "").slice(0, 500),
+          row.etag || null,
+          row.last_modified || null,
+          ok ? 1 : 0,
           row.id,
-        ),
-      ),
+        );
+      }),
     );
   }
 }
@@ -418,6 +580,12 @@ async function migrateItems(env) {
   if (!names.has("brief_claimed_at")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claimed_at TEXT`).run();
   }
+  if (!names.has("brief_provider")) {
+    await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_provider TEXT`).run();
+  }
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
+  ).run();
   await env.DB.prepare(
     `UPDATE items SET exclude_reason = ?
      WHERE status = 'excluded'
@@ -502,6 +670,56 @@ async function migrateItems(env) {
       .bind(repairEpoch)
       .run();
   }
+  /**
+   * حد طلبات العامل وألقاب غير المسندة أُغلقت كتعذر نهائي بينما المشكلة في
+   * التشغيل أو في نموذج واحد. تُعاد للتوزيع على الفتحات الحية.
+   */
+  const dispatchEpoch = "lane-dispatch-v1";
+  const currentDispatch = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'dispatch_epoch'`).first();
+  if (currentDispatch?.v !== dispatchEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine IN ('brief-ai-error', 'brief-deferred', 'brief-working')
+          OR brief_error LIKE '%subrequest%'
+          OR brief_error LIKE '%Too many%'
+          OR brief_error LIKE '%Worker invocation%'
+          OR brief_error LIKE 'ai_ungrounded%'
+          OR brief_error LIKE 'ai_has_no_grounded%'`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('dispatch_epoch', ?)`)
+      .bind(dispatchEpoch)
+      .run();
+  }
+  /**
+   * 402/400 من ديبسيك أو كوين ليسا عيب الصفحة. حُسبتا محاولة وأُغلق الخبر.
+   * بعد اعتبارها عطل فتحة تُعاد الصفوف لتقرأها النماذج العاملة.
+   */
+  const slotFaultEpoch = "provider-slot-fault-v1";
+  const currentSlotFault = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'slot_fault_epoch'`).first();
+  if (currentSlotFault?.v !== slotFaultEpoch) {
+    await env.DB.prepare(
+      `UPDATE items
+       SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           brief_after = NULL, trans_engine = 'brief-pending',
+           title_ar = 'بانتظار قراءة الذكاء الاصطناعي — ' ||
+             COALESCE((SELECT name_ar FROM mayors WHERE mayors.id = items.mayor_id), mayor_id),
+           snippet_ar = ''
+       WHERE trans_engine = 'brief-ai-error'
+         AND (brief_error LIKE 'ai_http_40%'
+           OR brief_error LIKE 'ai_ungrounded%'
+           OR brief_error LIKE 'ai_has_no_grounded%')`,
+    ).run();
+    await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('slot_fault_epoch', ?)`)
+      .bind(slotFaultEpoch)
+      .run();
+  }
 }
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
@@ -510,7 +728,7 @@ const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, item
   items.status, items.exclude_reason, items.fingerprint, items.created_at, items.trans_engine,
   items.publisher_domain, items.publisher_tier, items.merged_sources, items.source_count,
   items.brief_evidence, items.brief_error, items.brief_attempted_at, items.brief_attempts,
-  items.current_version_id, items.approved_version_id, items.needs_review,
+  items.brief_provider, items.current_version_id, items.approved_version_id, items.needs_review,
   (SELECT verify_state FROM brief_versions
     WHERE brief_versions.id = items.current_version_id) AS verify_state,
   (SELECT verify_detail FROM brief_versions
@@ -523,14 +741,17 @@ const WEEKLY_CRON = "0 3 * * SUN";
 const ITEM_WINDOW_DAYS = 7;
 const ITEM_RETENTION_DAYS = 9;
 const BRIEF_BATCH_SIZE = 3;
-const DRAIN_MAX_BRIEFS = 12;
-const DRAIN_MAX_MS = 45000;
+const DRAIN_MAX_BRIEFS = 8;
+const DRAIN_MAX_MS = 40000;
 const CONTINUATION_MIN_SECONDS = 10;
 const CONTINUATION_MAX_SECONDS = 900;
 /** التأجيل الطويل (كنفاد حصة اليوم) يُترك لمهمة التصريف الدورية لا للطابور. */
 const CONTINUATION_DEFER_CEILING = 300;
 
-/** مسار المكتب الوحيد: جمع → تحقق → دمج المصادر → تلخيص AI → قرار الموظف. */
+/**
+ * جمع الصفحات منفصل عن القراءة. خلطهما في نفس تشغيل العامل يستنفد حد
+ * الطلبات الخمسين فيتوقف النداء ويُسجَّل اعتذارًا على الخبر.
+ */
 async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const result = await runScan(env, scanOpts, onProgress);
   await recordSourceHealth(env, result.sourceHealth);
@@ -538,17 +759,20 @@ async function finishDesk(env, scanOpts, onProgress = async () => {}) {
   const review = await reviewInbox(env, {
     mayorId: scanOpts.mayorId || null,
     limit: 500,
-    useAiMerge: result.found > 0 || result.updated > 0,
+    useAiMerge: false,
   });
-  const summary = await summarizeBatch(env, scanOpts.mayorId || null, onProgress);
+  await onProgress("assigning", "يوزّع الأخبار على نماذج القراءة");
+  const lanes = await assignPendingLanes(env, scanOpts.mayorId || null);
+  const backlog = await briefBacklog(env, scanOpts.mayorId || null);
   return {
     ...result,
     review,
-    summarized: summary.summarized,
-    aiFailed: summary.failed,
-    aiDeferred: summary.deferred,
-    aiPending: summary.pending,
-    aiRetryAfterSeconds: summary.retryAfterSeconds,
+    assigned: lanes.assigned,
+    summarized: 0,
+    aiFailed: 0,
+    aiDeferred: 0,
+    aiPending: backlog.pending,
+    aiRetryAfterSeconds: 0,
   };
 }
 
@@ -619,13 +843,20 @@ export function shouldContinueBriefs(summary) {
   return wait <= CONTINUATION_DEFER_CEILING;
 }
 
-async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+async function enqueueBriefPump(env, { jobId = null, delaySeconds = 0 } = {}) {
   if (!env.SCAN_QUEUE) return false;
   await env.SCAN_QUEUE.send(
-    { type: "brief", mayorId, jobId },
-    { contentType: "json", delaySeconds: continuationDelaySeconds({ retryAfterSeconds }) },
+    { type: "brief", mayorId: null, jobId },
+    { contentType: "json", delaySeconds: Math.max(0, Number(delaySeconds) || 0) },
   );
   return true;
+}
+
+async function enqueueBriefContinuation(env, mayorId, jobId, retryAfterSeconds = 0) {
+  return enqueueBriefPump(env, {
+    jobId,
+    delaySeconds: continuationDelaySeconds({ retryAfterSeconds }),
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -636,7 +867,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = DRAIN_MAX_MS } = {}) {
   const startedAt = Date.now();
-  const { minIntervalMs } = budgetSettings(env);
   const totals = {
     summarized: 0,
     failed: 0,
@@ -646,9 +876,12 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     pending: 0,
     rounds: 0,
   };
+  await assignPendingLanes(env);
   while (totals.summarized + totals.failed < maxBriefs && Date.now() - startedAt < maxMs) {
-    const summary = await translatePending(env, 1, null);
-    const checked = await verifyPending(env, 1);
+    const ready = await slotsWithCapacity(env, "brief");
+    const batch = Math.max(1, Math.min(BRIEF_BATCH_SIZE, ready.length || 1));
+    const summary = await translatePending(env, batch, null);
+    const checked = await verifyPending(env, batch);
     totals.verified += checked.verified;
     totals.rejected += checked.rejected;
     totals.rounds += 1;
@@ -656,19 +889,244 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
     totals.failed += summary.failed;
     totals.deferred += summary.deferred;
     totals.pending = summary.pending;
-    if (summary.deferred > 0) break;
     if (summary.pending === 0 && checked.pending === 0) break;
-    if (summary.summarized === 0 && summary.failed === 0 && checked.verified === 0) break;
-    if (minIntervalMs > 0) await sleep(minIntervalMs + 250);
+    const still = await slotsWithCapacity(env, "brief");
+    if (still.length) continue;
+    const waitMs = Math.max(Number(budgetSettings(env).minIntervalMs) || 0, 1000);
+    if (Date.now() - startedAt + waitMs >= maxMs) {
+      if (summary.pending > 0) {
+        await enqueueBriefPump(env, { delaySeconds: Math.max(1, Math.ceil(waitMs / 1000)) });
+      }
+      break;
+    }
+    await sleep(waitMs + 250);
   }
   return totals;
+}
+
+async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = null }) {
+  const scanId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO scans (id, type, query, mayor_id, started_at, found_count, duplicate_count, excluded_count, error_count)
+     VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+  )
+    .bind(scanId, type, query || null, mayorIds.length === 1 ? mayorIds[0] : null, new Date().toISOString())
+    .run();
+
+  const messages = [];
+  for (const mayorId of mayorIds) {
+    const sources = await enabledSources(env, mayorId);
+    if (!sources.length) {
+      if (jobId) {
+        await env.DB.prepare(
+          `UPDATE search_job_tasks
+           SET status = 'completed', finished_at = datetime('now'),
+               stage = 'completed', detail = 'لا منصات رصد مفعّلة لهذا المكتب',
+               result_json = ?, error = NULL
+           WHERE job_id = ? AND mayor_id = ?`,
+        )
+          .bind(JSON.stringify({ found: 0, pendingCandidates: 0 }), jobId, mayorId)
+          .run();
+        await refreshSearchJobStatus(env, jobId);
+      }
+      continue;
+    }
+    const insert = env.DB.prepare(
+      `INSERT OR REPLACE INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail)
+       VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر')`,
+    );
+    await env.DB.batch(
+      sources.map((source) => insert.bind(scanId, source.id, mayorId, jobId)),
+    );
+    for (const source of sources) {
+      messages.push({
+        body: { type: "source_poll", mayorId, sourceId: source.id, scanId, jobId, query },
+        contentType: "json",
+      });
+    }
+  }
+  for (let i = 0; i < messages.length; i += 100) {
+    await env.SCAN_QUEUE.sendBatch(messages.slice(i, i + 100));
+  }
+  return { scanId, queued: messages.length };
+}
+
+async function enqueueArticleFetches(env, { ids, mayorId, scanId, jobId }) {
+  if (!env.SCAN_QUEUE) return 0;
+  const batches = [];
+  for (let i = 0; i < ids.length; i += ARTICLE_FETCH_BATCH) {
+    batches.push({
+      body: {
+        type: "article_fetch",
+        mayorId,
+        scanId,
+        jobId,
+        candidateIds: ids.slice(i, i + ARTICLE_FETCH_BATCH),
+      },
+      contentType: "json",
+    });
+  }
+  for (let i = 0; i < batches.length; i += 100) {
+    await env.SCAN_QUEUE.sendBatch(batches.slice(i, i + 100));
+  }
+  return batches.length;
+}
+
+async function completeMayorDesk(env, { mayorId, jobId, scanId }) {
+  const review = await reviewInbox(env, { mayorId, limit: 500, useAiMerge: false });
+  const lanes = await assignPendingLanes(env, mayorId);
+  const backlog = await briefBacklog(env, mayorId);
+  if (backlog.pending > 0) await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
+  if (jobId) {
+    const pending = await pendingCandidateCount(env, mayorId, scanId);
+    const foundRow = scanId
+      ? await env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM items WHERE scan_id = ? AND mayor_id = ?`,
+        )
+          .bind(scanId, mayorId)
+          .first()
+      : { n: 0 };
+    const result = {
+      found: Number(foundRow?.n) || 0,
+      review,
+      assigned: lanes.assigned,
+      aiPending: backlog.pending,
+      pendingCandidates: pending,
+    };
+    await env.DB.prepare(
+      `UPDATE search_job_tasks
+       SET status = 'completed', finished_at = datetime('now'),
+           stage = 'completed',
+           detail = ?,
+           result_json = ?, error = NULL
+       WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(
+        lanes.assigned
+          ? `اكتمل فحص المصادر ووُزّع ${lanes.assigned} خبرًا على نماذج القراءة`
+          : backlog.pending
+            ? `اكتمل الفحص وبقي ${backlog.pending} خبرًا في طابور القراءة`
+            : "اكتمل فحص المصادر",
+        JSON.stringify(result),
+        jobId,
+        mayorId,
+      )
+      .run();
+    await refreshSearchJobStatus(env, jobId);
+  }
+  return { review, assigned: lanes.assigned, aiPending: backlog.pending };
+}
+
+async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
+  const polls = await env.DB.prepare(
+    `SELECT COUNT(*) AS n,
+            SUM(CASE WHEN status IN ('polled', 'failed') THEN 1 ELSE 0 END) AS done
+     FROM scan_sources WHERE scan_id = ? AND mayor_id = ?`,
+  )
+    .bind(scanId, mayorId)
+    .first();
+  if (!polls?.n || Number(polls.done) < Number(polls.n)) return { done: false };
+  const pending = await pendingCandidateCount(env, mayorId, scanId);
+  if (pending > 0) {
+    const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH * 8 });
+    if (env.SCAN_QUEUE) await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
+    else await fetchCandidateBatch(env, { ids, limit: INLINE_ARTICLE_FETCH_LIMIT });
+    return { done: false, pending };
+  }
+  await completeMayorDesk(env, { mayorId, jobId, scanId });
+  return { done: true };
+}
+
+async function processSourcePollMessage(env, message) {
+  const body = message.body || {};
+  const { mayorId, sourceId, scanId, jobId, query } = body;
+  if (!mayorId || !sourceId) {
+    message.ack();
+    return;
+  }
+  if (jobId) {
+    await env.DB.prepare(
+      `UPDATE search_job_tasks
+       SET status = 'running', stage = 'source_poll',
+           detail = ?, started_at = COALESCE(started_at, datetime('now'))
+       WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(`يفحص المصدر ${sourceId}`, jobId, mayorId)
+      .run();
+  }
+  await env.DB.prepare(
+    `UPDATE scan_sources SET status = 'polling', detail = 'جاري فحص المصدر' WHERE scan_id = ? AND source_id = ?`,
+  )
+    .bind(scanId, sourceId)
+    .run();
+  try {
+    const polled = await pollOneSource(env, { sourceId, mayorId, scanId, query });
+    await recordSourceHealth(env, [{ ...polled.health, id: sourceId }]);
+    await env.DB.prepare(
+      `UPDATE scan_sources SET status = 'polled', detail = ? WHERE scan_id = ? AND source_id = ?`,
+    )
+      .bind(String(polled.health.status || "ok").slice(0, 160), scanId, sourceId)
+      .run();
+    if (polled.newIds?.length && env.SCAN_QUEUE) {
+      await enqueueArticleFetches(env, {
+        ids: polled.newIds,
+        mayorId,
+        scanId,
+        jobId,
+      });
+    } else if (polled.newIds?.length) {
+      await fetchCandidateBatch(env, { ids: polled.newIds, limit: ARTICLE_FETCH_BATCH });
+    }
+    await maybeFinishMayor(env, { mayorId, jobId, scanId });
+    message.ack();
+  } catch (error) {
+    await env.DB.prepare(
+      `UPDATE scan_sources SET status = 'failed', detail = ? WHERE scan_id = ? AND source_id = ?`,
+    )
+      .bind(String(error.message || error).slice(0, 160), scanId, sourceId)
+      .run();
+    await maybeFinishMayor(env, { mayorId, jobId, scanId });
+    message.ack();
+  }
+}
+
+async function processArticleFetchMessage(env, message) {
+  const body = message.body || {};
+  const { mayorId, scanId, jobId, candidateIds } = body;
+  if (jobId && mayorId) {
+    await env.DB.prepare(
+      `UPDATE search_job_tasks
+       SET status = 'running', stage = 'article_fetch', detail = 'يفتح المقالات المكتشفة'
+       WHERE job_id = ? AND mayor_id = ?`,
+    )
+      .bind(jobId, mayorId)
+      .run();
+  }
+  try {
+    await fetchCandidateBatch(env, {
+      ids: candidateIds || [],
+      mayorId,
+      limit: ARTICLE_FETCH_BATCH,
+    });
+    const pending = await pendingCandidateCount(env, mayorId, scanId);
+    if (pending > 0 && env.SCAN_QUEUE) {
+      const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH });
+      await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
+    } else {
+      await maybeFinishMayor(env, { mayorId, jobId, scanId });
+    }
+    message.ack();
+  } catch {
+    message.retry({ delaySeconds: 20 });
+  }
 }
 
 async function finishAllOffices(env, type = "weekly") {
   const results = [];
   const errors = [];
-  for (let i = 0; i < MAYORS.length; i += 2) {
-    const chunk = MAYORS.slice(i, i + 2);
+  const offices = await listMayors(env);
+  for (let i = 0; i < offices.length; i += 2) {
+    const chunk = offices.slice(i, i + 2);
     const settled = await Promise.allSettled(
       chunk.map((mayor) =>
         finishDesk(env, { type, query: "", mayorId: mayor.id }),
@@ -680,20 +1138,21 @@ async function finishAllOffices(env, type = "weekly") {
       } else {
         errors.push(`${chunk[index].id}: ${String(result.reason?.message || result.reason)}`);
       }
-    });
+    }    );
   }
+  await assignPendingLanes(env);
+  if (env.SCAN_QUEUE) await enqueueBriefPump(env);
+  else await drainBriefs(env);
   return { offices: results.length, failed: errors.length, errors, results };
 }
 
 async function enqueueAllOffices(env, type = "weekly") {
   if (!env.SCAN_QUEUE) return finishAllOffices(env, type);
-  await env.SCAN_QUEUE.sendBatch(
-    MAYORS.map((mayor) => ({
-      body: { type, mayorId: mayor.id },
-      contentType: "json",
-    })),
-  );
-  return { queued: MAYORS.length, type };
+  const queued = await enqueueSourcePolls(env, {
+    mayorIds: (await listMayors(env)).map((mayor) => mayor.id),
+    type,
+  });
+  return { queued: queued.queued, type, scanId: queued.scanId };
 }
 
 const SEARCH_TOTAL_KEYS = [
@@ -721,7 +1180,7 @@ function parseTaskResult(value) {
   }
 }
 
-export function searchJobSnapshot(job, tasks) {
+export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
   const totals = Object.fromEntries(SEARCH_TOTAL_KEYS.map((key) => [key, 0]));
   totals.duplicates = 0;
   totals.sourceErrors = 0;
@@ -766,7 +1225,7 @@ export function searchJobSnapshot(job, tasks) {
     totals,
     tasks: tasks.map((task) => ({
       mayor_id: task.mayor_id,
-      mayor_name: MAYORS.find((mayor) => mayor.id === task.mayor_id)?.name_ar || task.mayor_id,
+      mayor_name: mayors.find((mayor) => mayor.id === task.mayor_id)?.name_ar || task.mayor_id,
       status: task.status,
       stage: task.stage || task.status,
       detail: task.detail || "",
@@ -785,7 +1244,7 @@ async function readSearchJob(env, jobId) {
   )
     .bind(jobId)
     .all();
-  return searchJobSnapshot(job, results || []);
+  return searchJobSnapshot(job, results || [], await listMayors(env));
 }
 
 async function refreshSearchJobStatus(env, jobId) {
@@ -803,7 +1262,8 @@ async function refreshSearchJobStatus(env, jobId) {
 
 async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   if (!env.SCAN_QUEUE) throw new Error("scan_queue_unavailable");
-  const targets = mayorId ? MAYORS.filter((mayor) => mayor.id === mayorId) : MAYORS;
+  const catalog = await listMayors(env);
+  const targets = mayorId ? catalog.filter((mayor) => mayor.id === mayorId) : catalog;
   if (!targets.length) throw new Error("mayor_not_found");
   const jobId = crypto.randomUUID();
   await env.DB.prepare(
@@ -817,12 +1277,13 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   );
   await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
   try {
-    await env.SCAN_QUEUE.sendBatch(
-      targets.map((mayor) => ({
-        body: { type: "manual", mayorId: mayor.id, query, jobId },
-        contentType: "json",
-      })),
-    );
+    const queued = await enqueueSourcePolls(env, {
+      mayorIds: targets.map((mayor) => mayor.id),
+      type: "manual",
+      query,
+      jobId,
+    });
+    return { jobId, queued: queued.queued || targets.length, scanId: queued.scanId };
   } catch (error) {
     await env.DB.prepare(
       `UPDATE search_job_tasks SET status = 'failed', error = ? WHERE job_id = ?`,
@@ -832,27 +1293,27 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
     await refreshSearchJobStatus(env, jobId);
     throw error;
   }
-  return { jobId, queued: targets.length };
 }
 
 async function processBriefContinuation(env, message) {
   const body = message.body || {};
-  const mayorId = body.mayorId || null;
   const jobId = body.jobId || null;
   try {
-    const summary = await summarizeBatch(env, mayorId);
-    if (shouldContinueBriefs(summary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, summary.retryAfterSeconds);
-    }
-    if (jobId) {
-      const { stage, detail } = briefStage(summary);
-      await env.DB.prepare(
-        `UPDATE search_job_tasks
-         SET stage = ?, detail = ?
-         WHERE job_id = ? AND mayor_id = ?`,
-      )
-        .bind(stage, detail, jobId, mayorId)
-        .run();
+    await assignPendingLanes(env);
+    const summary = await summarizeBatch(env, null);
+    await verifyPending(env, BRIEF_BATCH_SIZE);
+    await assignPendingLanes(env);
+    const leftover = await briefBacklog(env);
+    if (leftover.eligible > 0) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: summary.summarized > 0 || summary.failed > 0 ? 0 : 5,
+      });
+    } else if (shouldContinueBriefs({ ...summary, pending: leftover.pending, nextAt: leftover.nextAt })) {
+      await enqueueBriefPump(env, {
+        jobId,
+        delaySeconds: continuationDelaySeconds({ ...summary, nextAt: leftover.nextAt }),
+      });
     }
     message.ack();
   } catch {
@@ -866,8 +1327,27 @@ async function processQueuedSearch(env, message) {
     await processBriefContinuation(env, message);
     return;
   }
+  if (body.type === "source_poll") {
+    await processSourcePollMessage(env, message);
+    return;
+  }
+  if (body.type === "article_fetch") {
+    await processArticleFetchMessage(env, message);
+    return;
+  }
   const mayorId = body.mayorId;
-  if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
+  const mayor = await resolveMayor(env, mayorId);
+  if (!mayorId || !mayor) {
+    message.ack();
+    return;
+  }
+  if (env.SCAN_QUEUE) {
+    await enqueueSourcePolls(env, {
+      mayorIds: [mayorId],
+      type: body.type || "weekly",
+      query: body.query || "",
+      jobId: body.jobId || null,
+    });
     message.ack();
     return;
   }
@@ -913,26 +1393,23 @@ async function processQueuedSearch(env, message) {
       query: body.query || "",
       mayorId,
     }, onProgress);
-    const briefSummary = {
-      summarized: result.summarized,
-      failed: result.aiFailed,
-      deferred: result.aiDeferred,
-      pending: result.aiPending,
-      retryAfterSeconds: result.aiRetryAfterSeconds,
-    };
-    if (shouldContinueBriefs(briefSummary)) {
-      await enqueueBriefContinuation(env, mayorId, jobId, result.aiRetryAfterSeconds);
+    if (result.aiPending > 0) {
+      await enqueueBriefPump(env, { jobId, delaySeconds: 0 });
     }
     if (jobId) {
-      const { stage: finalStage, detail: finalDetail } = briefStage(briefSummary);
+      const finalDetail = result.assigned
+        ? `جُمعت الأخبار ووُزّع ${result.assigned} خبرًا على نماذج القراءة`
+        : result.aiPending
+          ? `جُمعت الأخبار وبقي ${result.aiPending} خبرًا في طابور القراءة`
+          : "اكتمل الجمع ولا أخبار معلّقة للقراءة";
       await env.DB.prepare(
         `UPDATE search_job_tasks
          SET status = 'completed', finished_at = datetime('now'),
-             stage = ?, detail = ?,
+             stage = 'completed', detail = ?,
              result_json = ?, error = NULL
          WHERE job_id = ? AND mayor_id = ?`,
       )
-        .bind(finalStage, finalDetail, JSON.stringify(result), jobId, mayorId)
+        .bind(finalDetail, JSON.stringify(result), jobId, mayorId)
         .run();
       await refreshSearchJobStatus(env, jobId);
     }
@@ -984,7 +1461,7 @@ export function reviewerOf(request, env) {
 }
 
 export function authorized(request, env) {
-  if (!env.DASHBOARD_PASSWORD) return !env.GEMINI_API_KEY;
+  if (!env.DASHBOARD_PASSWORD) return !anyAiKey(env);
   const header = request.headers.get("Authorization") || "";
   if (!header.startsWith("Basic ")) return false;
   try {
@@ -1013,7 +1490,7 @@ async function publicHealth(env) {
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-unconfigured' THEN 1 ELSE 0 END) AS unconfigured,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed
      FROM items`,
   ).first();
   const { results } = await env.DB.prepare(
@@ -1030,7 +1507,7 @@ async function publicHealth(env) {
     briefDrainCron: "every 10 minutes",
     queue: Boolean(env.SCAN_QUEUE),
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       pending: Number(ai?.pending) || 0,
       waitingQuota: Number(ai?.waitingQuota) || 0,
@@ -1099,10 +1576,10 @@ async function stats(env) {
     week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
     sources: {
       ...sourceStatus(env),
-      ai_brief: env.GEMINI_API_KEY ? "ready" : "unconfigured",
+      ai_brief: aiBriefEnabled(env) ? "ready" : "unconfigured",
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       pending: await pendingBriefCount(env),
       budget: await budgetState(env),
     },
@@ -1110,11 +1587,15 @@ async function stats(env) {
   };
 }
 
+async function providerLanes(env) {
+  return providerLaneSnapshot(env, await briefBacklog(env));
+}
+
 /** كل ما يشرح ما يعمل الآن ولماذا، في مكان واحد يفتحه المستخدم عند الحاجة. */
 async function diagnostics(env) {
   const brief = await env.DB.prepare(
     `SELECT
-       SUM(CASE WHEN trans_engine LIKE 'brief-ai-gemini-v2:%' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN trans_engine LIKE 'brief-ai-%-v2:%' THEN 1 ELSE 0 END) AS completed,
        SUM(CASE WHEN trans_engine = 'brief-pending' THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN trans_engine = 'brief-deferred' THEN 1 ELSE 0 END) AS waitingQuota,
        SUM(CASE WHEN trans_engine = 'brief-ai-error' THEN 1 ELSE 0 END) AS failed,
@@ -1130,6 +1611,9 @@ async function diagnostics(env) {
     `SELECT sources.mayor_id, sources.domain, sources.name, sources.tier, sources.kind,
             sources.rank, sources.last_status, sources.last_items, sources.last_ok_at,
             sources.consecutive_failures, sources.verified, sources.curated_at,
+            sources.enabled, sources.connect_status, sources.http_status, sources.parse_status,
+            sources.discovered_count, sources.new_count, sources.last_checked_at,
+            sources.last_discovery_at, sources.fail_reason, sources.last_strategy,
             mayors.name_ar
      FROM sources JOIN mayors ON mayors.id = sources.mayor_id
      ORDER BY sources.mayor_id, sources.rank`,
@@ -1148,7 +1632,9 @@ async function diagnostics(env) {
   ).first();
   const registry = await registrySummary(env);
   const budget = await budgetState(env);
-  const pageSources = APPROVED_SOURCES.filter((source) => source.kind === "page").length;
+  const pageSources = APPROVED_SOURCES.filter((source) =>
+    (source.discovery || []).some((step) => step.type === "newsroom"),
+  ).length;
   const readerOk = Number(window?.total) > 0 || !lastScan;
   return {
     windowDays: ITEM_WINDOW_DAYS,
@@ -1158,8 +1644,7 @@ async function diagnostics(env) {
         id: "registry",
         name: "سجل المصادر",
         icon: "list",
-        ok: registry.failing === 0,
-        detail: `${registry.total} نطاقًا معتمدًا · ${registry.perOffice} لكل مكتب · مُتحقق منها بالفحص ${registry.verified}`,
+        ...registryChip(registry),
       },
       {
         id: "reader",
@@ -1232,7 +1717,7 @@ async function diagnostics(env) {
       errors: errors || [],
     },
     ai: {
-      configured: Boolean(env.GEMINI_API_KEY),
+      configured: aiBriefEnabled(env),
       model: env.GEMINI_MODEL || null,
       budget,
     },
@@ -1249,9 +1734,74 @@ async function diagnostics(env) {
        FROM approvals`,
     ).first(),
     registry,
-    sources: sources || [],
+    sources: (sources || []).map((row) => ({ ...row, operational: operationalStatus(row) })),
     lastScan: lastScan || null,
     queue: Boolean(env.SCAN_QUEUE),
+    providers: await providerLanes(env),
+  };
+}
+
+export function operationalStatus(row) {
+  if (Number(row?.enabled) === 0) {
+    return { code: "disabled", label: "متوقفة يدويًا" };
+  }
+  const status = String(row?.last_status || row?.connect_status || "");
+  if (!row?.last_checked_at && !status) {
+    return { code: "unchecked", label: "لم تُفحص بعد في هذه البيئة" };
+  }
+  if (status === "ok_no_new" || (row?.ok && Number(row.new_count) === 0 && Number(row.consecutive_failures) === 0)) {
+    return { code: "ok_no_new", label: "تعمل ولا توجد أخبار جديدة" };
+  }
+  if (status === "ok") return { code: "ok", label: "تعمل" };
+  if (status === "feed_stalled") {
+    return { code: "feed_stalled", label: "التغذية توقفت عن التحديث" };
+  }
+  if (status === "feed_corrupt") {
+    return { code: "feed_corrupt", label: "التغذية فاسدة" };
+  }
+  if (status === "bad_url" || status === "error_page") {
+    return { code: "bad_url", label: "رابط المصدر غير صحيح" };
+  }
+  if (status === "needs_javascript") {
+    return { code: "needs_javascript", label: "الصفحة تحتاج JavaScript" };
+  }
+  if (status === "worker_rejected" || /403|401/.test(status)) {
+    return { code: "worker_rejected", label: "الموقع يرفض العامل" };
+  }
+  if (status === "empty_parse" || status === "no_article_links") {
+    return { code: "empty_parse", label: "التحليل لم يجد روابط" };
+  }
+  if (status === "not_articles") {
+    return { code: "not_articles", label: "الروابط المكتشفة ليست مقالات" };
+  }
+  if (status === "unrelated") {
+    return { code: "unrelated", label: "المقالات لا تتعلق بالعمدة" };
+  }
+  if (Number(row?.consecutive_failures) >= 3) {
+    return { code: "failing", label: row.fail_reason || status || "متعثر" };
+  }
+  return { code: status || "unknown", label: row.fail_reason || status || "غير معروف" };
+}
+
+export function registryChip(registry) {
+  const failing = Number(registry?.failing) || 0;
+  const total = Number(registry?.total) || 0;
+  const verified = Number(registry?.verified) || 0;
+  const perOffice = Number(registry?.perOffice) || 3;
+  if (!total) {
+    return { ok: false, detail: "السجل فارغ — لا نطاقات معتمدة." };
+  }
+  if (failing > 0) {
+    return {
+      ok: "warn",
+      detail:
+        `السجل يعمل ولم يُوقف. ${failing} مصدرًا من ${total} تعثر ثلاث مرات متتالية عند الجلب ` +
+        `(غالبًا رفض 403 أو مهلة من موقع البلدية). باقي المصادر تُقرأ كالمعتاد.`,
+    };
+  }
+  return {
+    ok: true,
+    detail: `${total} نطاقًا معتمدًا · ${perOffice} لكل مكتب · مُتحقق منها بالفحص ${verified}`,
   };
 }
 
@@ -1275,14 +1825,91 @@ async function registrySummary(env) {
   };
 }
 
+async function settingsOffices(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM sources ORDER BY mayor_id, rank`,
+  ).all();
+  const byMayor = new Map();
+  for (const row of results || []) {
+    if (!byMayor.has(row.mayor_id)) byMayor.set(row.mayor_id, []);
+    const registered = sourceById(row.id);
+    byMayor.get(row.mayor_id).push({
+      id: row.id,
+      domain: row.domain,
+      name: row.name,
+      tier: row.tier,
+      kind: row.kind,
+      url: row.url,
+      rank: row.rank,
+      enabled: Number(row.enabled) !== 0,
+      platform: registered?.platform || (row.tier === 0 ? "official" : "newspaper"),
+      platform_ar: platformLabelAr(registered || row),
+      strategies: (registered?.discovery || []).map((step) => ({
+        type: step.type,
+        type_ar: strategyLabelAr(step.type),
+        url: step.url || null,
+        enabled: step.enabled !== false,
+      })),
+      last_checked_at: row.last_checked_at,
+      last_discovery_at: row.last_discovery_at,
+      last_ok_at: row.last_ok_at,
+      last_status: row.last_status,
+      fail_reason: row.fail_reason,
+      operational: operationalStatus(row),
+    });
+  }
+  const catalog = await listMayors(env);
+  return catalog.map((mayor) => ({
+    id: mayor.id,
+    origin: mayor.origin || "seed",
+    name_ar: mayor.name_ar,
+    name_en: mayor.name_en,
+    name_native: mayor.name_native,
+    city_ar: mayor.city_ar,
+    city_en: mayor.city_en,
+    country_ar: mayor.country_ar,
+    country_code: mayor.country_code,
+    title_ar: mayor.title_ar,
+    title_en: mayor.title_en,
+    official_host: mayor.official_host || "",
+    platforms: byMayor.get(mayor.id) || [],
+  }));
+}
+
+async function setSourceEnabled(env, sourceId, enabled, actor) {
+  if (!sourceById(sourceId)) {
+    return { error: "unknown_source", status: 404 };
+  }
+  const before = await env.DB.prepare(`SELECT enabled FROM sources WHERE id = ?`)
+    .bind(sourceId)
+    .first();
+  const next = enabled ? 1 : 0;
+  await env.DB.prepare(`UPDATE sources SET enabled = ? WHERE id = ?`)
+    .bind(next, sourceId)
+    .run();
+  await env.DB.prepare(
+    `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
+     VALUES (?, ?, 'source_enabled', ?, ?, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      actor || "unknown",
+      sourceId,
+      sourceById(sourceId).mayor_id,
+      JSON.stringify({ enabled: Number(before?.enabled) !== 0 }),
+      JSON.stringify({ enabled: Boolean(next) }),
+    )
+    .run();
+  return { ok: true, id: sourceId, enabled: Boolean(next) };
+}
+
 async function handleApi(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
 
   if (path === "/api/mayors" && method === "GET") {
-    const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
-    return json({ mayors: results });
+    return json({ mayors: await listMayors(env) });
   }
 
   if (path === "/api/diagnostics" && method === "GET") {
@@ -1294,7 +1921,8 @@ async function handleApi(request, env) {
     await env.DB.prepare(
       `UPDATE items
        SET brief_attempts = 0, brief_error = NULL, brief_attempted_at = NULL,
-           brief_claim_id = NULL, brief_claimed_at = NULL, trans_engine = 'brief-pending'
+           brief_claim_id = NULL, brief_claimed_at = NULL, brief_provider = NULL,
+           trans_engine = 'brief-pending'
        WHERE id = ?`,
     )
       .bind(retryMatch[1])
@@ -1311,6 +1939,71 @@ async function handleApi(request, env) {
        ORDER BY sources.mayor_id, sources.rank`,
     ).all();
     return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });
+  }
+
+  if (path === "/api/settings/offices" && method === "GET") {
+    return json({ offices: await settingsOffices(env) });
+  }
+
+  const toggleMatch = path.match(/^\/api\/settings\/sources\/([^/]+)$/i);
+  if (toggleMatch && method === "POST") {
+    const body = await readBody(request);
+    if (typeof body.enabled !== "boolean") {
+      return json({ error: "enabled_required" }, 400);
+    }
+    if (body.domain || body.url) {
+      return json({ error: "registry_closed", detail: "لا تُضاف النطاقات من الواجهة." }, 403);
+    }
+    const result = await setSourceEnabled(
+      env,
+      decodeURIComponent(toggleMatch[1]),
+      body.enabled,
+      reviewerOf(request, env),
+    );
+    if (result.error) return json(result, result.status || 400);
+    return json(result);
+  }
+
+  if (path === "/api/settings/mayors" && method === "POST") {
+    const body = await readBody(request);
+    if (body.domain || body.url || body.discovery || body.sources) {
+      return json(
+        {
+          error: "registry_closed",
+          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
+        },
+        403,
+      );
+    }
+    const parsed = parseMayorInput(body);
+    if (parsed.error) {
+      return json(
+        { error: parsed.error, detail: parsed.detail || null, message: mayorInputMessage(parsed) },
+        400,
+      );
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
+      .bind(parsed.mayor.id)
+      .first();
+    if (existing) {
+      return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
+    }
+    const mayor = await insertCustomMayor(env, parsed.mayor);
+    await env.DB.prepare(
+      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
+       VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
+    )
+      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
+      .run();
+    return json(
+      {
+        ok: true,
+        mayor,
+        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
+        offices: await settingsOffices(env),
+      },
+      201,
+    );
   }
 
   if (path === "/api/stats" && method === "GET") {
@@ -1423,10 +2116,11 @@ async function handleApi(request, env) {
   if (path === "/api/review" && method === "POST") {
     const body = await readBody(request);
     const mayorId = body.mayor_id || null;
-    const result = await reviewInbox(env, { mayorId, limit: 500 });
-    const summary = await summarizeBatch(env, mayorId);
-    if (shouldContinueBriefs(summary)) await enqueueBriefContinuation(env, mayorId, null);
-    return json({ ok: true, ...result, ai: summary });
+    const result = await reviewInbox(env, { mayorId, limit: 500, useAiMerge: false });
+    await assignPendingLanes(env, mayorId);
+    const backlog = await briefBacklog(env, mayorId);
+    if (backlog.pending > 0) await enqueueBriefPump(env);
+    return json({ ok: true, ...result, ai: backlog });
   }
 
   if (path === "/api/admin/reset" && method === "POST") {
@@ -1512,7 +2206,13 @@ export default {
         await ensureDb(env);
         await pruneAiBudget(env);
         await pruneOldItems(env);
+        const leftoverFetch = await pendingFetchIds(env, { limit: ARTICLE_FETCH_BATCH * 4 });
+        if (leftoverFetch.length && env.SCAN_QUEUE) {
+          await enqueueArticleFetches(env, { ids: leftoverFetch });
+        }
         await drainBriefs(env);
+        const leftover = await briefBacklog(env);
+        if (leftover.pending > 0) await enqueueBriefPump(env);
       })(),
     );
   },

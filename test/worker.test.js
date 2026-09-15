@@ -4,6 +4,7 @@ import {
   authorized,
   briefStage,
   continuationDelaySeconds,
+  registryChip,
   searchJobSnapshot,
   shouldContinueBriefs,
 } from "../src/worker.js";
@@ -139,4 +140,14 @@ test("continuation waits for the earliest eligible time instead of polling", () 
   const late = new Date(Date.now() + 4 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
   assert.equal(shouldContinueBriefs({ pending: 3, deferred: 1, nextAt: late }), false);
   assert.equal(shouldContinueBriefs({ pending: 3, deferred: 1, nextAt: soon }), true);
+});
+
+test("the source registry stays on when some hosts fail at fetch time", () => {
+  const healthy = registryChip({ total: 36, failing: 0, verified: 30, perOffice: 3 });
+  assert.equal(healthy.ok, true);
+  const degraded = registryChip({ total: 36, failing: 4, verified: 30, perOffice: 3 });
+  assert.equal(degraded.ok, "warn");
+  assert.match(degraded.detail, /لم يُوقف/);
+  assert.match(degraded.detail, /4 مصدر/);
+  assert.equal(registryChip({ total: 0, failing: 0 }).ok, false);
 });

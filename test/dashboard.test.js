@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-    `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings };`,
   )();
   return { ...exported, element };
 }
@@ -126,6 +126,67 @@ test("the dashboard renders every ordered section from real diagnostics", () => 
   assert.equal((html.match(/class="src /g) || []).length, data.sources.length);
   assert.ok(html.includes("meter"), "readouts must carry proportional meters");
   assert.match(page.element("diag-headline").textContent, /بانتظار التلخيص/);
+  assert.doesNotMatch(html, /٦ · نماذج القراءة/, "provider lanes stay off until diagnostics include them");
+});
+
+test("provider lanes are appended without replacing existing diagnostic sections", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.providers = {
+    queued: 3,
+    eligible: 2,
+    bound: 1,
+    lanes: [
+      {
+        id: "gemini",
+        nameAr: "جيميني",
+        model: "gemini-test",
+        bound: true,
+        enabled: true,
+        hasKey: true,
+        queued: 2,
+        inProgress: 1,
+        completed: 4,
+        failed: 0,
+        minIntervalMs: 4500,
+        vars: { key: "GEMINI_API_KEY", enabled: "GEMINI_ENABLED" },
+        budget: { remaining: 380, dailyLimit: 400, blocked: false, resumesInSeconds: 0 },
+      },
+      {
+        id: "deepseek",
+        nameAr: "ديبسيك",
+        model: "deepseek-flash",
+        bound: false,
+        enabled: true,
+        hasKey: false,
+        queued: 0,
+        inProgress: 0,
+        completed: 0,
+        failed: 0,
+        minIntervalMs: 800,
+        vars: { key: "DEEPSEEK_API_KEY", enabled: "DEEPSEEK_ENABLED" },
+        budget: { remaining: 2000, dailyLimit: 2000, blocked: false, resumesInSeconds: 0 },
+      },
+    ],
+  };
+  page.renderDiagnostics(data);
+  const html = page.element("diag-body").innerHTML;
+  for (const heading of [
+    "١ · القراءات الرئيسية",
+    "٢ · الأدوات",
+    "٣ · مسار التلخيص",
+    "٤ · آخر رصد",
+    "٥ · المصادر المعتمدة",
+    "٦ · نماذج القراءة",
+  ]) {
+    assert.ok(html.includes(heading), `missing section: ${heading}`);
+  }
+  assert.match(html, /جيميني/);
+  assert.match(html, /ديبسيك/);
+  assert.match(html, /جاري العمل/);
+  assert.match(html, /DEEPSEEK_API_KEY/);
+  assert.doesNotMatch(html, /الطابور مشترك/);
+  assert.match(html, /يُسند لفتحة واحدة/);
 });
 
 test("a blocked AI budget is reported as a pause with a resume time", () => {
@@ -145,6 +206,8 @@ test("failure codes are explained in Arabic instead of shown raw", () => {
   assert.match(briefErrorReason("ai_deferred:daily_limit"), /نفدت حصة/);
   assert.match(briefErrorReason("article_text_too_short"), /أقصر/);
   assert.match(briefErrorReason("The operation was aborted"), /المهلة/);
+  assert.match(briefErrorReason("Too many subrequests by single Worker invocation"), /مسار مستقل/);
+  assert.match(briefErrorReason("ai_http_402:invalid_request_error"), /غير مدفوع/);
   assert.equal(briefErrorReason(""), "");
 });
 
@@ -165,4 +228,90 @@ test("source tooltips separate curation from this deployment's runtime", () => {
   assert.match(kept, /غرفة أخبار رسمية/);
   assert.match(kept, /لم يستجب من شبكة الفحص/);
   assert.doesNotMatch(kept, /لم يُفحص بعد/, "the misleading wording must not return");
+});
+
+test("a registry with failing hosts is not labeled as stopped", () => {
+  const { toolChip, toolStateLabel } = loadPageScript();
+  assert.equal(toolStateLabel("warn"), "تعمل · بعضها متعثر");
+  assert.equal(toolStateLabel(true), "تعمل");
+  assert.equal(toolStateLabel(false), "متوقفة");
+  const html = toolChip({
+    id: "registry",
+    name: "سجل المصادر",
+    icon: "list",
+    ok: "warn",
+    detail: "السجل يعمل ولم يُوقف.",
+  });
+  assert.match(html, /تعمل · بعضها متعثر/);
+  assert.doesNotMatch(html, />متوقفة</);
+  assert.match(html, /class="tool warn"/);
+});
+
+test("settings render every mayor office and its platforms", () => {
+  const page = loadPageScript();
+  const html = page.renderSettings({
+    offices: [
+      {
+        id: "turin",
+        origin: "seed",
+        name_ar: "ستيفانو لو روسو",
+        name_en: "Stefano Lo Russo",
+        name_native: "Stefano Lo Russo",
+        city_ar: "تورينو",
+        city_en: "Turin",
+        country_ar: "إيطاليا",
+        title_ar: "عمدة تورينو",
+        title_en: "Mayor of Turin",
+        platforms: [
+          {
+            id: "turin:comune.torino.it",
+            name: "Comune di Torino",
+            kind: "feed",
+            enabled: true,
+            platform_ar: "موقع رسمي",
+            strategies: [{ type: "rss", type_ar: "RSS" }],
+            last_checked_at: null,
+            last_discovery_at: null,
+            operational: { label: "لم تُفحص بعد في هذه البيئة" },
+          },
+        ],
+      },
+      {
+        id: "riyadh-noura",
+        origin: "custom",
+        name_ar: "نورة العبدالله",
+        name_en: "Noura Alabdullah",
+        name_native: "نورة العبدالله",
+        city_ar: "الرياض",
+        city_en: "Riyadh",
+        country_ar: "السعودية",
+        title_ar: "عمدة الرياض",
+        title_en: "Mayor of Riyadh",
+        official_host: "alriyadh.gov.sa",
+        platforms: [],
+      },
+    ],
+  });
+  assert.match(html, /العمداء|ستيفانو لو روسو|عمدة تورينو|Mayor of Turin|موقع رسمي|RSS/);
+  assert.match(html, /data-source-toggle="turin:comune.torino.it"/);
+  assert.match(html, /data-origin="custom"/);
+  assert.match(html, /مضاف/);
+  assert.match(html, /لا منصات مسجّلة لهذا المكتب/);
+  assert.match(html, /alriyadh\.gov\.sa/);
+});
+
+test("the settings panel includes a form for the required mayor identity fields", () => {
+  const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="add-mayor-form"/);
+  for (const field of ["name_ar", "name_en", "city_ar", "city_en", "country_ar", "country_code", "native_lang"]) {
+    assert.match(html, new RegExp(`name="${field}"`));
+  }
+  assert.match(html, /حفظ العمدة/);
+});
+
+test("the settings overlay stays closed until the user opens it", () => {
+  const css = fs.readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.settings-layer:not\(\[hidden\]\)\s*\{\s*display:\s*flex;/);
+  assert.match(css, /\.settings-layer\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(css, /\.settings-office\.is-new/);
 });

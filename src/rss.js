@@ -29,20 +29,73 @@ function sourceMeta(block) {
   };
 }
 
+function attrLink(block) {
+  const href = block.match(/<link\b[^>]*href=["']([^"']+)["']/i);
+  return href ? decodeXml(href[1]) : "";
+}
+
 export function parseRssItems(xml) {
-  if (!xml || !xml.includes("<item")) return [];
+  if (!xml || !/<item[\s>]/i.test(xml)) return [];
   return xml
     .split(/<item[\s>]/i)
     .slice(1)
     .map((block) => {
       const title = tag(block, "title");
-      const link = tag(block, "link") || tag(block, "guid");
-      const published = tag(block, "pubDate");
+      const link = tag(block, "link") || attrLink(block) || tag(block, "guid");
+      const published = tag(block, "pubDate") || tag(block, "dc:date") || tag(block, "updated");
       const snippet = tag(block, "description").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
       const { publisher_name, publisher_url } = sourceMeta(block);
       return { title, url: link, published_at: published || null, snippet, publisher_name, publisher_url };
     })
     .filter((item) => item.title && item.url);
+}
+
+export function parseAtomItems(xml) {
+  if (!xml || !/<entry[\s>]/i.test(xml)) return [];
+  return xml
+    .split(/<entry[\s>]/i)
+    .slice(1)
+    .map((block) => {
+      const title = tag(block, "title");
+      const link = attrLink(block) || tag(block, "id");
+      const published = tag(block, "published") || tag(block, "updated");
+      const snippet = (tag(block, "summary") || tag(block, "content"))
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return {
+        title,
+        url: link,
+        published_at: published || null,
+        snippet,
+        publisher_name: "",
+        publisher_url: "",
+      };
+    })
+    .filter((item) => item.title && item.url);
+}
+
+export function looksLikeHtmlDocument(text) {
+  const head = String(text || "").slice(0, 400).toLowerCase();
+  return /<!doctype html|<html[\s>]/.test(head);
+}
+
+export function parseFeed(xml) {
+  const text = String(xml || "");
+  if (!text.trim()) {
+    return { items: [], kind: null, corrupt: true, reason: "empty" };
+  }
+  const hasFeed = /<rss[\s>]|<rdf:rdf|<feed[\s>]|<item[\s>]|<entry[\s>]/i.test(text);
+  if (looksLikeHtmlDocument(text) && !hasFeed) {
+    return { items: [], kind: null, corrupt: true, reason: "html_not_feed" };
+  }
+  if (/<rss[\s>]|<rdf:rdf/i.test(text) || /<item[\s>]/i.test(text)) {
+    return { items: parseRssItems(text), kind: "rss", corrupt: false, reason: "" };
+  }
+  if (/<feed[\s>]/i.test(text) || /<entry[\s>]/i.test(text)) {
+    return { items: parseAtomItems(text), kind: "atom", corrupt: false, reason: "" };
+  }
+  return { items: [], kind: null, corrupt: true, reason: "unrecognized_feed" };
 }
 
 export function googleNewsRssUrl(query, hl, gl) {

@@ -12,6 +12,19 @@ GEMINI_MODEL = "gemini-3.5-flash-lite"
 AI_DAILY_LIMIT = "400"
 AI_MIN_INTERVAL_MS = "4500"
 
+# فتحات احتياطية. المفاتيح أسرار Cloudflare، والطراز والحد يُغيَّران من المتغيرات.
+DEEPSEEK_MODEL = "deepseek-flash"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_DAILY_LIMIT = "2000"
+DEEPSEEK_MIN_INTERVAL_MS = "800"
+DEEPSEEK_ENABLED = "1"
+QWEN_MODEL = "qwen-flash"
+QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+QWEN_DAILY_LIMIT = "2000"
+QWEN_MIN_INTERVAL_MS = "800"
+QWEN_ENABLED = "1"
+GEMINI_ENABLED = "1"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
@@ -31,7 +44,7 @@ queue = "mayor-watch-scans"
 max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
-max_concurrency = 1
+max_concurrency = 2
 
 [[d1_databases]]
 binding = "DB"
