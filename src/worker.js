@@ -1,4 +1,11 @@
-import { MAYORS } from "./mayors.js";
+import {
+  MAYORS,
+  insertCustomMayor,
+  listMayors,
+  mayorInputMessage,
+  parseMayorInput,
+  resolveMayor,
+} from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import {
   enabledSources,
@@ -909,7 +916,21 @@ async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = nul
   const messages = [];
   for (const mayorId of mayorIds) {
     const sources = await enabledSources(env, mayorId);
-    if (!sources.length) continue;
+    if (!sources.length) {
+      if (jobId) {
+        await env.DB.prepare(
+          `UPDATE search_job_tasks
+           SET status = 'completed', finished_at = datetime('now'),
+               stage = 'completed', detail = 'لا منصات رصد مفعّلة لهذا المكتب',
+               result_json = ?, error = NULL
+           WHERE job_id = ? AND mayor_id = ?`,
+        )
+          .bind(JSON.stringify({ found: 0, pendingCandidates: 0 }), jobId, mayorId)
+          .run();
+        await refreshSearchJobStatus(env, jobId);
+      }
+      continue;
+    }
     const insert = env.DB.prepare(
       `INSERT OR REPLACE INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail)
        VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر')`,
@@ -1103,8 +1124,9 @@ async function processArticleFetchMessage(env, message) {
 async function finishAllOffices(env, type = "weekly") {
   const results = [];
   const errors = [];
-  for (let i = 0; i < MAYORS.length; i += 2) {
-    const chunk = MAYORS.slice(i, i + 2);
+  const offices = await listMayors(env);
+  for (let i = 0; i < offices.length; i += 2) {
+    const chunk = offices.slice(i, i + 2);
     const settled = await Promise.allSettled(
       chunk.map((mayor) =>
         finishDesk(env, { type, query: "", mayorId: mayor.id }),
@@ -1127,7 +1149,7 @@ async function finishAllOffices(env, type = "weekly") {
 async function enqueueAllOffices(env, type = "weekly") {
   if (!env.SCAN_QUEUE) return finishAllOffices(env, type);
   const queued = await enqueueSourcePolls(env, {
-    mayorIds: MAYORS.map((mayor) => mayor.id),
+    mayorIds: (await listMayors(env)).map((mayor) => mayor.id),
     type,
   });
   return { queued: queued.queued, type, scanId: queued.scanId };
@@ -1158,7 +1180,7 @@ function parseTaskResult(value) {
   }
 }
 
-export function searchJobSnapshot(job, tasks) {
+export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
   const totals = Object.fromEntries(SEARCH_TOTAL_KEYS.map((key) => [key, 0]));
   totals.duplicates = 0;
   totals.sourceErrors = 0;
@@ -1203,7 +1225,7 @@ export function searchJobSnapshot(job, tasks) {
     totals,
     tasks: tasks.map((task) => ({
       mayor_id: task.mayor_id,
-      mayor_name: MAYORS.find((mayor) => mayor.id === task.mayor_id)?.name_ar || task.mayor_id,
+      mayor_name: mayors.find((mayor) => mayor.id === task.mayor_id)?.name_ar || task.mayor_id,
       status: task.status,
       stage: task.stage || task.status,
       detail: task.detail || "",
@@ -1222,7 +1244,7 @@ async function readSearchJob(env, jobId) {
   )
     .bind(jobId)
     .all();
-  return searchJobSnapshot(job, results || []);
+  return searchJobSnapshot(job, results || [], await listMayors(env));
 }
 
 async function refreshSearchJobStatus(env, jobId) {
@@ -1240,7 +1262,8 @@ async function refreshSearchJobStatus(env, jobId) {
 
 async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   if (!env.SCAN_QUEUE) throw new Error("scan_queue_unavailable");
-  const targets = mayorId ? MAYORS.filter((mayor) => mayor.id === mayorId) : MAYORS;
+  const catalog = await listMayors(env);
+  const targets = mayorId ? catalog.filter((mayor) => mayor.id === mayorId) : catalog;
   if (!targets.length) throw new Error("mayor_not_found");
   const jobId = crypto.randomUUID();
   await env.DB.prepare(
@@ -1313,7 +1336,8 @@ async function processQueuedSearch(env, message) {
     return;
   }
   const mayorId = body.mayorId;
-  if (!mayorId || !MAYORS.some((mayor) => mayor.id === mayorId)) {
+  const mayor = await resolveMayor(env, mayorId);
+  if (!mayorId || !mayor) {
     message.ack();
     return;
   }
@@ -1834,16 +1858,20 @@ async function settingsOffices(env) {
       operational: operationalStatus(row),
     });
   }
-  return MAYORS.map((mayor) => ({
+  const catalog = await listMayors(env);
+  return catalog.map((mayor) => ({
     id: mayor.id,
+    origin: mayor.origin || "seed",
     name_ar: mayor.name_ar,
     name_en: mayor.name_en,
     name_native: mayor.name_native,
     city_ar: mayor.city_ar,
     city_en: mayor.city_en,
     country_ar: mayor.country_ar,
+    country_code: mayor.country_code,
     title_ar: mayor.title_ar,
     title_en: mayor.title_en,
+    official_host: mayor.official_host || "",
     platforms: byMayor.get(mayor.id) || [],
   }));
 }
@@ -1881,8 +1909,7 @@ async function handleApi(request, env) {
   const method = request.method;
 
   if (path === "/api/mayors" && method === "GET") {
-    const { results } = await env.DB.prepare(`SELECT * FROM mayors ORDER BY country_ar, city_ar`).all();
-    return json({ mayors: results });
+    return json({ mayors: await listMayors(env) });
   }
 
   if (path === "/api/diagnostics" && method === "GET") {
@@ -1935,6 +1962,48 @@ async function handleApi(request, env) {
     );
     if (result.error) return json(result, result.status || 400);
     return json(result);
+  }
+
+  if (path === "/api/settings/mayors" && method === "POST") {
+    const body = await readBody(request);
+    if (body.domain || body.url || body.discovery || body.sources) {
+      return json(
+        {
+          error: "registry_closed",
+          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
+        },
+        403,
+      );
+    }
+    const parsed = parseMayorInput(body);
+    if (parsed.error) {
+      return json(
+        { error: parsed.error, detail: parsed.detail || null, message: mayorInputMessage(parsed) },
+        400,
+      );
+    }
+    const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
+      .bind(parsed.mayor.id)
+      .first();
+    if (existing) {
+      return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
+    }
+    const mayor = await insertCustomMayor(env, parsed.mayor);
+    await env.DB.prepare(
+      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
+       VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
+    )
+      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
+      .run();
+    return json(
+      {
+        ok: true,
+        mayor,
+        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
+        offices: await settingsOffices(env),
+      },
+      201,
+    );
   }
 
   if (path === "/api/stats" && method === "GET") {

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui15" />
+    <link rel="stylesheet" href="/styles.css?v=ui17" />
   </head>
   <body>
     <div class="sheet">
@@ -84,13 +84,77 @@
           <div>
             <p class="gazette">الإعدادات</p>
             <h2 id="settings-title">العمداء ومنصات الرصد</h2>
-            <p class="sub">المصادر من السجل المعتمد فقط. لا تُضاف نطاقات من هنا.</p>
+            <p class="sub">أضف هوية عمدة جديد بالبيانات الأساسية. المنصات تبقى من السجل المعتمد ولا تُفتح نطاقات من هنا.</p>
           </div>
           <button type="button" class="settings-close" id="settings-close">إغلاق</button>
         </div>
+        <div class="settings-scroll">
+        <form id="add-mayor-form" class="settings-add" autocomplete="off">
+          <h3>إضافة عمدة</h3>
+          <p class="settings-add-note">الحقول المطلوبة تكفي لإنشاء المكتب. النطاق الرسمي للعرض والتصنيف فقط، ولا يصبح منصة رصد.</p>
+          <div class="settings-fields">
+            <label class="settings-field">
+              الاسم بالعربية *
+              <input name="name_ar" required maxlength="120" placeholder="نورة العبدالله">
+            </label>
+            <label class="settings-field">
+              الاسم بالإنجليزية *
+              <input name="name_en" required maxlength="120" placeholder="Noura Alabdullah" dir="ltr">
+            </label>
+            <label class="settings-field">
+              الاسم بلغة الأم
+              <input name="name_native" maxlength="120" placeholder="إن تُرك يُنسخ من الإنجليزية">
+            </label>
+            <label class="settings-field">
+              المدينة بالعربية *
+              <input name="city_ar" required maxlength="80" placeholder="الرياض">
+            </label>
+            <label class="settings-field">
+              المدينة بالإنجليزية *
+              <input name="city_en" required maxlength="80" placeholder="Riyadh" dir="ltr">
+            </label>
+            <label class="settings-field">
+              الدولة بالعربية *
+              <input name="country_ar" required maxlength="80" placeholder="السعودية">
+            </label>
+            <label class="settings-field">
+              رمز الدولة *
+              <input name="country_code" required maxlength="2" placeholder="SA" dir="ltr" pattern="[A-Za-z]{2}">
+            </label>
+            <label class="settings-field">
+              لغة الرصد *
+              <input name="native_lang" required maxlength="12" placeholder="ar" dir="ltr" pattern="[A-Za-z]{2,3}(-[A-Za-z]{2})?">
+            </label>
+            <label class="settings-field">
+              لغة الرصد بالعربية
+              <input name="native_lang_ar" maxlength="40" placeholder="تُستنتج من رمز اللغة إن عُرفت">
+            </label>
+            <label class="settings-field">
+              المنصب بالعربية
+              <input name="title_ar" maxlength="120" placeholder="عمدة الرياض">
+            </label>
+            <label class="settings-field">
+              المنصب بالإنجليزية
+              <input name="title_en" maxlength="120" placeholder="Mayor of Riyadh" dir="ltr">
+            </label>
+            <label class="settings-field">
+              النطاق الرسمي
+              <input name="official_host" maxlength="253" placeholder="alriyadh.gov.sa" dir="ltr">
+            </label>
+            <label class="settings-field">
+              معرّف المكتب
+              <input name="id" maxlength="40" placeholder="يُشتق تلقائياً من المدينة والاسم" dir="ltr" pattern="[A-Za-z][A-Za-z0-9-]{1,39}">
+            </label>
+          </div>
+          <div class="settings-add-actions">
+            <button type="submit" class="btn-add-mayor">حفظ العمدة</button>
+            <p class="settings-add-status" id="add-mayor-status" role="status"></p>
+          </div>
+        </form>
         <div id="settings-body" class="settings-body">جاري التحميل…</div>
+        </div>
       </div>
     </div>
-    <script src="/app.js?v=ui15"></script>
+    <script src="/app.js?v=ui17"></script>
   </body>
 </html>

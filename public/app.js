@@ -895,12 +895,17 @@ function renderSettings(payload) {
   box.innerHTML = offices
     .map((office) => {
       const platforms = office.platforms || [];
-      return `<article class="settings-office" data-mayor="${escapeHtml(office.id)}">
-        <h3>${escapeHtml(office.name_ar)}</h3>
+      const custom = office.origin === "custom";
+      const badge = custom ? ` <span class="settings-badge">مضاف</span>` : "";
+      const host = office.official_host
+        ? `<br>النطاق الرسمي: <span dir="ltr">${escapeHtml(office.official_host)}</span>`
+        : "";
+      return `<article class="settings-office" data-mayor="${escapeHtml(office.id)}" data-origin="${escapeHtml(office.origin || "seed")}">
+        <h3>${escapeHtml(office.name_ar)}${badge}</h3>
         <p class="settings-meta">
           ${escapeHtml(office.name_en)} · ${escapeHtml(office.name_native)}<br>
           ${escapeHtml(office.city_ar)}${office.city_en ? ` / ${escapeHtml(office.city_en)}` : ""} — ${escapeHtml(office.country_ar)}<br>
-          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}
+          ${escapeHtml(office.title_ar)}${office.title_en ? ` · ${escapeHtml(office.title_en)}` : ""}${host}
         </p>
         <div class="settings-platforms">
           ${
@@ -974,6 +979,42 @@ $("settings-body").addEventListener("change", async (e) => {
   } catch (error) {
     input.checked = !input.checked;
     renderSettings({ error: `تعذر حفظ الحالة: ${error.message}` });
+  }
+});
+
+$("add-mayor-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const submit = form.querySelector("[type=submit]");
+  const status = $("add-mayor-status");
+  const payload = Object.fromEntries(new FormData(form).entries());
+  for (const key of Object.keys(payload)) {
+    if (!String(payload[key] || "").trim()) delete payload[key];
+  }
+  submit.disabled = true;
+  status.textContent = "جاري الحفظ…";
+  status.classList.remove("is-error");
+  try {
+    const created = await api("/api/settings/mayors", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    form.reset();
+    status.textContent = "أُضيف المكتب. يمكنك إضافة عمدة آخر من النموذج نفسه.";
+    await loadSettings();
+    await loadMayors();
+    const card = document.querySelector(
+      `.settings-office[data-mayor="${CSS.escape(created.mayor.id)}"]`,
+    );
+    if (card) {
+      card.classList.add("is-new");
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  } catch (error) {
+    status.textContent = error.message;
+    status.classList.add("is-error");
+  } finally {
+    submit.disabled = false;
   }
 });
 

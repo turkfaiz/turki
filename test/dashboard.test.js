@@ -253,6 +253,7 @@ test("settings render every mayor office and its platforms", () => {
     offices: [
       {
         id: "turin",
+        origin: "seed",
         name_ar: "ستيفانو لو روسو",
         name_en: "Stefano Lo Russo",
         name_native: "Stefano Lo Russo",
@@ -275,14 +276,42 @@ test("settings render every mayor office and its platforms", () => {
           },
         ],
       },
+      {
+        id: "riyadh-noura",
+        origin: "custom",
+        name_ar: "نورة العبدالله",
+        name_en: "Noura Alabdullah",
+        name_native: "نورة العبدالله",
+        city_ar: "الرياض",
+        city_en: "Riyadh",
+        country_ar: "السعودية",
+        title_ar: "عمدة الرياض",
+        title_en: "Mayor of Riyadh",
+        official_host: "alriyadh.gov.sa",
+        platforms: [],
+      },
     ],
   });
   assert.match(html, /العمداء|ستيفانو لو روسو|عمدة تورينو|Mayor of Turin|موقع رسمي|RSS/);
   assert.match(html, /data-source-toggle="turin:comune.torino.it"/);
+  assert.match(html, /data-origin="custom"/);
+  assert.match(html, /مضاف/);
+  assert.match(html, /لا منصات مسجّلة لهذا المكتب/);
+  assert.match(html, /alriyadh\.gov\.sa/);
+});
+
+test("the settings panel includes a form for the required mayor identity fields", () => {
+  const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="add-mayor-form"/);
+  for (const field of ["name_ar", "name_en", "city_ar", "city_en", "country_ar", "country_code", "native_lang"]) {
+    assert.match(html, new RegExp(`name="${field}"`));
+  }
+  assert.match(html, /حفظ العمدة/);
 });
 
 test("the settings overlay stays closed until the user opens it", () => {
   const css = fs.readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
   assert.match(css, /\.settings-layer:not\(\[hidden\]\)\s*\{\s*display:\s*flex;/);
   assert.match(css, /\.settings-layer\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(css, /\.settings-office\.is-new/);
 });
