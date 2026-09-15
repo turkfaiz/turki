@@ -777,14 +777,16 @@ const STAGE_LABELS = {
   discovering: "فحص المصادر المعتمدة",
   source_poll: "فحص مصدر واحد",
   article_fetch: "فتح المقالات المكتشفة",
-  verifying: "فتح الروابط والتحقق",
+  verifying: "التدقيق الدلالي",
   saving: "حفظ الصفحات الموثوقة",
   merging: "دمج الحدث المتكرر",
   assigning: "توزيع الأخبار على نماذج القراءة",
   summarizing: "قراءة وتدقيق AI",
+  ai_reading: "قراءة النماذج",
   ai_pending: "بانتظار إكمال قراءة AI",
   ai_waiting_quota: "بانتظار حصة AI — يستأنف تلقائيًا",
   ai_failed: "تعذر تلخيص AI",
+  waiting: "بانتظار استئناف النماذج",
   completed: "اكتمل",
   retrying: "إعادة محاولة",
   failed: "تعذر",
@@ -796,7 +798,9 @@ function renderSearchProgress(job) {
   const tasks = job.tasks || [];
   const hasAiFailure = tasks.some((task) => task.stage === "ai_failed");
   const hasAiPending = tasks.some((task) =>
-    ["ai_pending", "ai_waiting_quota"].includes(task.stage),
+    ["ai_pending", "ai_waiting_quota", "ai_reading", "verifying", "waiting", "retrying"].includes(
+      task.stage,
+    ),
   );
   const visualStatus = hasAiFailure ? "failed" : hasAiPending ? "partial" : job.status;
   box.dataset.status = visualStatus;

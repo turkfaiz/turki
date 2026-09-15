@@ -41,6 +41,7 @@ export const LANE_LABELS_AR = {
 
 export const ATTENTION_REASONS = {
   VERIFY_FAILED: "verify_failed",
+  MISSING_VERSION: "missing_version",
   AI_UNCONFIGURED: "ai_unconfigured",
   BRIEF_EXHAUSTED: "brief_exhausted",
   BRIEF_ERROR: "brief_error",
@@ -50,6 +51,7 @@ export const ATTENTION_REASONS = {
 
 export const ATTENTION_REASON_AR = {
   [ATTENTION_REASONS.VERIFY_FAILED]: "رُفض الموجز في التدقيق الدلالي ويحتاج مراجعة أو إعادة إنتاج.",
+  [ATTENTION_REASONS.MISSING_VERSION]: "current_version_id يشير إلى نسخة غير موجودة، فلا يُعتمد الخبر.",
   [ATTENTION_REASONS.AI_UNCONFIGURED]: "مفتاح الذكاء الاصطناعي غير مربوط، فتوقفت القراءة.",
   [ATTENTION_REASONS.BRIEF_EXHAUSTED]: "استُنفدت محاولات التلخيص دون موجز صالح.",
   [ATTENTION_REASONS.BRIEF_ERROR]: "تعذر التلخيص بعد خطأ تشغيلي ويحتاج تدخلاً.",
@@ -99,6 +101,10 @@ export function decisionReadySql(alias = "items") {
     AND ${inDisplayWindowSql(alias)}`;
 }
 
+/**
+ * المسار اللحظي من الحالة الفعلية. لا تُقرأ items.desk_lane المخزّنة في واجهة
+ * البرمجة: القيمة المخزّنة تتقادم بعد انتقال الخبر.
+ */
 export function deskLaneCaseSql(alias = "items") {
   const verifyState = currentVerifyStateSql(alias);
   const verifyAttempts = currentVerifyAttemptsSql(alias);
@@ -113,6 +119,9 @@ export function deskLaneCaseSql(alias = "items") {
       THEN NULL
     WHEN ${alias}.current_version_id IS NOT NULL
          AND ${verifyState} = '${VERIFY_STATE.FAILED}'
+      THEN '${DESK_LANES.ATTENTION_REQUIRED}'
+    WHEN ${alias}.current_version_id IS NOT NULL
+         AND ${verifyState} IS NULL
       THEN '${DESK_LANES.ATTENTION_REQUIRED}'
     WHEN IFNULL(${alias}.trans_engine, '') = '${BRIEF_STATE.UNCONFIGURED}'
       THEN '${DESK_LANES.ATTENTION_REQUIRED}'
@@ -140,6 +149,9 @@ export function attentionReasonCaseSql(alias = "items") {
     WHEN ${alias}.current_version_id IS NOT NULL
          AND ${verifyState} = '${VERIFY_STATE.FAILED}'
       THEN '${ATTENTION_REASONS.VERIFY_FAILED}'
+    WHEN ${alias}.current_version_id IS NOT NULL
+         AND ${verifyState} IS NULL
+      THEN '${ATTENTION_REASONS.MISSING_VERSION}'
     WHEN IFNULL(${alias}.trans_engine, '') = '${BRIEF_STATE.UNCONFIGURED}'
       THEN '${ATTENTION_REASONS.AI_UNCONFIGURED}'
     WHEN IFNULL(${alias}.brief_attempts, 0) >= ${MAX_BRIEF_ATTEMPTS}
@@ -195,9 +207,11 @@ export async function ensureDeskLaneColumns(env) {
   if (!names.has("desk_attention_reason")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN desk_attention_reason TEXT`).run();
   }
-  await env.DB.prepare(
-    `CREATE INDEX IF NOT EXISTS idx_items_desk_lane ON items(desk_lane)`,
-  ).run();
+  /**
+   * العمود المخزّن ليس مصدر الحقيقة: المسار يُحسب من الحالة الفعلية.
+   * الإبقاء على العمود آمن إنتاجيًا، أما الفهرسة عليه فتوهم أن القيمة المخزّنة صالحة للقراءة.
+   */
+  await env.DB.prepare(`DROP INDEX IF EXISTS idx_items_desk_lane`).run();
   return names;
 }
 

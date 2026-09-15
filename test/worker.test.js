@@ -66,6 +66,23 @@ test("queued search snapshot aggregates office progress and results", () => {
   assert.equal(snapshot.tasks[1].stage, "verifying");
 });
 
+test("waiting and retrying search tasks keep the job running", () => {
+  const snapshot = searchJobSnapshot(
+    { id: "job-wait", query: "", mayor_id: "turin" },
+    [
+      {
+        mayor_id: "turin",
+        status: "waiting",
+        stage: "waiting",
+        detail: "توقفت النماذج",
+      },
+    ],
+  );
+  assert.equal(snapshot.status, "running");
+  assert.equal(snapshot.running, 1);
+  assert.equal(snapshot.completed, 0);
+});
+
 test("queued search reports partial completion without double counting", () => {
   const snapshot = searchJobSnapshot(
     { id: "job-2", query: "housing", mayor_id: null },

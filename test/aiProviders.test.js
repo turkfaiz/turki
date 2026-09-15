@@ -41,10 +41,23 @@ test("a slot is bound only with a secret and an enabled flag", () => {
   assert.equal(aiBriefEnabled({ GEMINI_API_KEY: "k", GEMINI_ENABLED: "0" }), false);
   assert.equal(aiBriefEnabled({ DEEPSEEK_API_KEY: "k" }), true);
   assert.equal(aiBriefEnabled({ QWEN_API_KEY: "k", QWEN_ENABLED: "false" }), false);
+  assert.equal(aiBriefEnabled({ QWEN_API_KEY: "k" }), false, "Qwen stays unbound unless explicitly enabled");
+  assert.equal(aiBriefEnabled({ QWEN_API_KEY: "k", QWEN_ENABLED: "1" }), true);
   assert.equal(
     boundSlots({ GEMINI_API_KEY: "g", DEEPSEEK_API_KEY: "d", DEEPSEEK_ENABLED: "0" }).map((s) => s.id).join(),
     "gemini",
   );
+});
+
+test("Qwen is absent from boundSlots when QWEN_ENABLED=0 even if the secret exists", () => {
+  const bound = boundSlots({
+    GEMINI_API_KEY: "g",
+    DEEPSEEK_API_KEY: "d",
+    QWEN_API_KEY: "q",
+    QWEN_ENABLED: "0",
+  });
+  assert.deepEqual(bound.map((slot) => slot.id), ["gemini", "deepseek"]);
+  assert.equal(slotBound({ QWEN_API_KEY: "q", QWEN_ENABLED: "0" }, slotById("qwen")), false);
 });
 
 test("the live model id comes from Cloudflare vars, not from the slot default", () => {
@@ -141,4 +154,9 @@ test("a DeepSeek-bound desk reads through the OpenAI-compatible endpoint", async
   assert.match(url, /chat\/completions/);
   assert.match(brief.engine, /brief-ai-deepseek-v2:deepseek-flash/);
   assert.match(brief.title_ar, /ستيفانو لو روسو/);
+});
+
+test("wrangler.toml leaves Qwen unbound by default", async () => {
+  const toml = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../wrangler.toml", import.meta.url), "utf8"));
+  assert.match(toml, /QWEN_ENABLED\s*=\s*"0"/);
 });

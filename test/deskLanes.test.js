@@ -155,6 +155,60 @@ test("bootstrap source never wipes the desk or zeroes AI budgets", () => {
   assert.doesNotMatch(ensure, /DELETE FROM items/);
   assert.doesNotMatch(ensure, /DELETE FROM scans/);
   assert.doesNotMatch(ensure, /DELETE FROM search_jobs/);
+  assert.doesNotMatch(ensure, /DROP TABLE items/);
+  assert.doesNotMatch(ensure, /DELETE FROM mayors/);
   assert.doesNotMatch(ensure, /DELETE FROM sources/);
   assert.doesNotMatch(ensure, /SET calls = 0/);
+});
+
+test("a missing current version is attention_required, not reading", async () => {
+  const db = createTestD1();
+  const env = envWith(db);
+  await ensureDb(env);
+  seedPopulatedDesk(db);
+  db.exec(`
+    INSERT INTO items (
+      id, mayor_id, source, title, title_normalized, url, published_at, snippet,
+      title_ar, snippet_ar, language, confidence, status, fingerprint, trans_engine,
+      publisher_domain, publisher_tier, article_text, source_count, brief_attempts,
+      current_version_id
+    ) VALUES (
+      'item-missing-version', 'turin', 'approved_feed',
+      'Lo Russo missing version', 'lo russo missing version',
+      'https://www.comune.torino.it/missing', datetime('now','-1 days'), 'snippet',
+      'موجز بلا نسخة', 'حقيقة.', 'it', 'raw', 'inbox',
+      'fp-missing-version', 'brief-ai-gemini-v2:gemini-test', 'comune.torino.it', 0,
+      'Stefano Lo Russo parla.', 1, 1, 'ver-does-not-exist'
+    );
+  `);
+
+  const attention = await worker
+    .fetch(request("/api/items?status=attention_required"), env)
+    .then((res) => res.json());
+  const reading = await worker.fetch(request("/api/items?status=reading"), env).then((res) => res.json());
+  const missing = attention.items.find((row) => row.id === "item-missing-version");
+  assert.ok(missing, "a dangling current_version_id must enter attention_required");
+  assert.equal(missing.attention_reason, "missing_version");
+  assert.equal(
+    reading.items.some((row) => row.id === "item-missing-version"),
+    false,
+  );
+});
+
+test("API desk_lane follows live state even when the stored column is stale", async () => {
+  const db = createTestD1();
+  const env = envWith(db);
+  await ensureDb(env);
+  seedPopulatedDesk(db);
+  db.exec(`UPDATE items SET desk_lane = 'reading' WHERE id = 'item-verifying'`);
+  const verifying = await worker
+    .fetch(request("/api/items?status=verifying"), env)
+    .then((res) => res.json());
+  const reading = await worker.fetch(request("/api/items?status=reading"), env).then((res) => res.json());
+  assert.deepEqual(verifying.items.map((row) => row.id), ["item-verifying"]);
+  assert.equal(
+    reading.items.some((row) => row.id === "item-verifying"),
+    false,
+    "stale items.desk_lane must not hide a verifying article",
+  );
 });
