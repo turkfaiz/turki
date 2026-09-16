@@ -73,7 +73,6 @@ import {
   DESK_RUN_LOCKS_TABLE,
   dueSourcePolls,
   groupCandidatesForEnqueue,
-  isDeskRunTerminal,
   isPermanentSourceFailure,
   isTerminalSourceStatus,
   MAX_SOURCE_POLL_ATTEMPTS,
@@ -1205,11 +1204,8 @@ export async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
     const job = await env.DB.prepare(`SELECT status FROM search_jobs WHERE id = ?`)
       .bind(jobId)
       .first();
-    const jobTerminal = ["completed", "partial", "failed"].includes(job?.status);
-    if (jobTerminal) {
+    if (["completed", "partial", "failed"].includes(job?.status)) {
       await releaseDeskRunForJob(env, jobId);
-    } else if (await isDeskRunTerminal(env, { jobId, mayorId })) {
-      await releaseDeskRun(env, { mayorId, jobId, scanId });
     } else {
       await renewDeskRunLease(env, { jobId, mayorId, scanId });
     }

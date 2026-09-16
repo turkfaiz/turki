@@ -386,24 +386,6 @@ export async function releaseDeskRun(env, { mayorId = null, jobId = null, scanId
   return Number(mayorRelease?.meta?.changes || 0) + Number(allRelease?.meta?.changes || 0) > 0;
 }
 
-const TERMINAL_JOB_STATUSES = new Set(["completed", "partial", "failed"]);
-const TERMINAL_TASK_STATUSES = new Set(["completed", "failed"]);
-
-export async function isDeskRunTerminal(env, { jobId, mayorId = null } = {}) {
-  if (!jobId) return false;
-  const job = await env.DB.prepare(`SELECT status FROM search_jobs WHERE id = ?`)
-    .bind(jobId)
-    .first();
-  if (TERMINAL_JOB_STATUSES.has(job?.status)) return true;
-  if (!mayorId) return false;
-  const task = await env.DB.prepare(
-    `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
-  )
-    .bind(jobId, mayorId)
-    .first();
-  return TERMINAL_TASK_STATUSES.has(task?.status);
-}
-
 export async function renewDeskRunLease(env, { jobId = null, mayorId = null, scanId = null } = {}) {
   if (!env?.DB) return false;
   if (jobId) {

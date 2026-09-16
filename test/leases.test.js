@@ -17,6 +17,7 @@ import {
   MAX_SOURCE_POLL_ATTEMPTS,
   SOURCE_POLL_LEASE_MINUTES,
   applyOfficialD1Migration,
+  ALL_OFFICES_LOCK,
   claimCandidateFetch,
   claimSourcePoll,
   completeCandidateFetch,
@@ -1040,6 +1041,90 @@ test("the desk lock is released after a manual task reaches a terminal state", a
   const second = await enqueueManualSearch(env, { mayorId: "turin" });
   assert.equal(second.reused, false);
   assert.notEqual(second.jobId, first.jobId);
+});
+
+test("an all-offices manual job keeps the __all__ lock until the whole job is terminal", async () => {
+  const db = createTestD1();
+  const queue = fakeQueue();
+  const env = leaseEnv(db, { SCAN_QUEUE: queue });
+  await ensureDb(env);
+  const first = await enqueueManualSearch(env, {});
+  assert.ok(first.jobId);
+  assert.equal(first.reused, false);
+  const lock = db.one(`SELECT lock_key, job_id FROM desk_run_locks WHERE job_id = ?`, first.jobId);
+  assert.equal(lock.lock_key, ALL_OFFICES_LOCK);
+  db.exec(
+    `UPDATE scan_sources
+        SET status = 'polled', claim_id = NULL, claimed_at = NULL
+      WHERE scan_id = '${first.scanId}'`,
+  );
+  db.exec(`UPDATE candidates SET fetch_status = 'fetched' WHERE scan_id = '${first.scanId}'`);
+  db.exec(
+    `UPDATE search_job_tasks
+        SET status = 'waiting', stage = 'waiting'
+      WHERE job_id = '${first.jobId}'`,
+  );
+  db.exec(
+    `UPDATE search_job_tasks
+        SET status = 'completed', stage = 'completed', finished_at = datetime('now')
+      WHERE job_id = '${first.jobId}' AND mayor_id = 'turin'`,
+  );
+  db.exec(`UPDATE search_jobs SET status = 'running' WHERE id = '${first.jobId}'`);
+  const finish = await maybeFinishMayor(env, {
+    mayorId: "turin",
+    jobId: first.jobId,
+    scanId: first.scanId,
+  });
+  assert.equal(finish.done, true);
+  const turin = db.one(
+    `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = 'turin'`,
+    first.jobId,
+  );
+  assert.ok(["completed", "failed"].includes(turin.status), turin.status);
+  const open = db.one(
+    `SELECT COUNT(*) AS n FROM search_job_tasks
+     WHERE job_id = ? AND status IN ('running', 'waiting', 'retrying')`,
+    first.jobId,
+  );
+  assert.ok(open.n > 0, "other offices must still be open");
+  const job = db.one(`SELECT status FROM search_jobs WHERE id = ?`, first.jobId);
+  assert.equal(["completed", "partial", "failed"].includes(job.status), false);
+  assert.equal(
+    db.one(
+      `SELECT lock_key FROM desk_run_locks WHERE job_id = ? AND lock_key = ?`,
+      first.jobId,
+      ALL_OFFICES_LOCK,
+    )?.lock_key,
+    ALL_OFFICES_LOCK,
+  );
+  const queued = queue.messages.length;
+  const jobs = db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n;
+  const scans = db.one(`SELECT COUNT(*) AS n FROM scans`).n;
+  const second = await enqueueManualSearch(env, {});
+  assert.equal(second.reused, true);
+  assert.equal(second.jobId, first.jobId);
+  assert.equal(second.queued, 0);
+  assert.equal(queue.messages.length, queued, "no extra poll or fetch messages");
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n, jobs);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM scans`).n, scans);
+
+  db.exec(
+    `UPDATE search_job_tasks
+        SET status = 'completed', stage = 'completed', finished_at = datetime('now')
+      WHERE job_id = '${first.jobId}'`,
+  );
+  db.exec(`UPDATE search_jobs SET status = 'completed' WHERE id = '${first.jobId}'`);
+  const closed = await maybeFinishMayor(env, {
+    mayorId: "turin",
+    jobId: first.jobId,
+    scanId: first.scanId,
+  });
+  assert.equal(closed.done, true);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM desk_run_locks WHERE job_id = ?`, first.jobId).n, 0);
+  assert.equal(
+    db.one(`SELECT COUNT(*) AS n FROM desk_run_locks WHERE lock_key = ?`, ALL_OFFICES_LOCK).n,
+    0,
+  );
 });
 
 test("a failed job or task insert after lock acquire leaves no orphans", async () => {
