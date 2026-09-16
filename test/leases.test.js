@@ -54,6 +54,10 @@ function response(status, body, headers = {}) {
   };
 }
 
+function rssEmpty() {
+  return response(200, `<?xml version="1.0"?><rss><channel></channel></rss>`);
+}
+
 function rssOk() {
   return response(
     200,
@@ -948,6 +952,141 @@ test("official 0020 upgrades a legacy schema via the wrangler ledger", async () 
   for (const statement of LEASE_MIGRATION_STATEMENTS.filter((item) => item.startsWith("ALTER") || item.startsWith("CREATE INDEX"))) {
     assert.ok(sql.includes(statement), statement);
   }
+});
+
+test("a manual run keeps the desk lock while briefs or verification are waiting", async () => {
+  const db = createTestD1();
+  const queue = fakeQueue();
+  const env = leaseEnv(db, { SCAN_QUEUE: queue });
+  await ensureDb(env);
+  const first = await enqueueManualSearch(env, { mayorId: "turin" });
+  db.exec(
+    `UPDATE scan_sources
+        SET status = 'polled', claim_id = NULL, claimed_at = NULL
+      WHERE scan_id = '${first.scanId}' AND source_id <> '${SOURCE_ID}'`,
+  );
+  const poll = queue.messages.find((item) => item.body?.sourceId === SOURCE_ID);
+  const wrapped = pollMessage(first.scanId, SOURCE_ID);
+  wrapped.message.body = poll.body;
+  await processSourcePollMessage(env, wrapped.message, { fetch: async () => rssOk() });
+  const fetches = queue.messages.filter((item) => item.body?.type === "article_fetch");
+  for (const item of fetches) {
+    await processArticleFetchMessage(
+      env,
+      { body: item.body, ack() {}, retry() {} },
+      { fetch: async () => response(200, ARTICLE_HTML) },
+    );
+  }
+  db.exec(
+    `UPDATE search_job_tasks
+        SET status = 'waiting', stage = 'waiting', detail = 'بانتظار الموجز أو التدقيق'
+      WHERE job_id = '${first.jobId}' AND mayor_id = 'turin'`,
+  );
+  db.exec(`UPDATE search_jobs SET status = 'running' WHERE id = '${first.jobId}'`);
+  const finish = await maybeFinishMayor(env, {
+    mayorId: "turin",
+    jobId: first.jobId,
+    scanId: first.scanId,
+  });
+  assert.equal(finish.done, true);
+  const task = db.one(
+    `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = 'turin'`,
+    first.jobId,
+  );
+  assert.ok(["running", "waiting", "retrying"].includes(task.status), task.status);
+  assert.ok(
+    db.one(`SELECT lock_key FROM desk_run_locks WHERE job_id = ?`, first.jobId),
+    "lock must remain while the manual job is not terminal",
+  );
+  const queued = queue.messages.length;
+  const jobs = db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n;
+  const scans = db.one(`SELECT COUNT(*) AS n FROM scans`).n;
+  const second = await enqueueManualSearch(env, { mayorId: "turin" });
+  assert.equal(second.reused, true);
+  assert.equal(second.jobId, first.jobId);
+  assert.equal(second.queued, 0);
+  assert.equal(queue.messages.length, queued, "no extra poll or fetch messages");
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n, jobs);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM scans`).n, scans);
+});
+
+test("the desk lock is released after a manual task reaches a terminal state", async () => {
+  const db = createTestD1();
+  const queue = fakeQueue();
+  const env = leaseEnv(db, { SCAN_QUEUE: queue });
+  await ensureDb(env);
+  const first = await enqueueManualSearch(env, { mayorId: "turin" });
+  db.exec(
+    `UPDATE scan_sources
+        SET status = 'polled', claim_id = NULL, claimed_at = NULL
+      WHERE scan_id = '${first.scanId}' AND source_id <> '${SOURCE_ID}'`,
+  );
+  const poll = queue.messages.find((item) => item.body?.sourceId === SOURCE_ID);
+  const wrapped = pollMessage(first.scanId, SOURCE_ID);
+  wrapped.message.body = poll.body;
+  await processSourcePollMessage(env, wrapped.message, { fetch: async () => rssEmpty() });
+  const finish = await maybeFinishMayor(env, {
+    mayorId: "turin",
+    jobId: first.jobId,
+    scanId: first.scanId,
+  });
+  assert.equal(finish.done, true);
+  const task = db.one(
+    `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = 'turin'`,
+    first.jobId,
+  );
+  assert.ok(["completed", "failed"].includes(task.status), task.status);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM desk_run_locks WHERE job_id = ?`, first.jobId).n, 0);
+  const second = await enqueueManualSearch(env, { mayorId: "turin" });
+  assert.equal(second.reused, false);
+  assert.notEqual(second.jobId, first.jobId);
+});
+
+test("a failed job or task insert after lock acquire leaves no orphans", async () => {
+  async function inject(failNeedle) {
+    const db = createTestD1();
+    const env = leaseEnv(db);
+    await ensureDb(env);
+    const orig = env.DB.prepare.bind(env.DB);
+    env.DB.prepare = (sql) => {
+      if (String(sql).includes(failNeedle)) throw new Error("injected_init_failure");
+      return orig(sql);
+    };
+    await assert.rejects(
+      () => enqueueManualSearch(env, { mayorId: "turin" }),
+      /injected_init_failure/,
+    );
+    assert.equal(db.one(`SELECT COUNT(*) AS n FROM desk_run_locks`).n, 0, failNeedle);
+    assert.equal(db.one(`SELECT COUNT(*) AS n FROM search_jobs`).n, 0, failNeedle);
+    assert.equal(db.one(`SELECT COUNT(*) AS n FROM search_job_tasks`).n, 0, failNeedle);
+    assert.equal(db.one(`SELECT COUNT(*) AS n FROM scans`).n, 0, failNeedle);
+  }
+  await inject("INSERT INTO search_jobs");
+  await inject("INSERT INTO search_job_tasks");
+});
+
+test("a poll that rediscovers an existing URL records new_count=0 and sends no article_fetch", async () => {
+  const db = createTestD1();
+  const env = leaseEnv(db);
+  await ensureDb(env);
+  const scanId = await seedQueuedSource(env);
+  await insertPendingCandidate(env, "cand-existing", "https://www.comune.torino.it/via-roma");
+  db.exec(
+    `UPDATE candidates
+        SET scan_id = '${scanId}', fetch_status = 'fetched', fetched_at = datetime('now')
+      WHERE id = 'cand-existing'`,
+  );
+  const before = db.one(`SELECT COUNT(*) AS n FROM candidates`).n;
+  const first = pollMessage(scanId);
+  const result = await processSourcePollMessage(env, first.message, { fetch: async () => rssOk() });
+  assert.equal(result.kind, "polled");
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM candidates`).n, before);
+  const health = db.one(`SELECT IFNULL(new_count, 0) AS new_count FROM sources WHERE id = ?`, SOURCE_ID);
+  assert.equal(health.new_count, 0);
+  assert.equal(
+    env.SCAN_QUEUE.messages.filter((item) => (item.body || item).type === "article_fetch").length,
+    0,
+  );
 });
 
 test("QWEN stays disabled in this change", async () => {

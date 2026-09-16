@@ -164,20 +164,23 @@ export async function persistDiscovered(env, { mayor, source, scanId, rows, clai
   return { discovered: filtered.length, inserted: newIds.length, newIds };
 }
 
-function claimConditionedSourceHealthStatement(env, row, claimed) {
+function claimConditionedSourceHealthStatement(env, row, claimed, plannedIds = []) {
   const ok = Boolean(row?.ok);
   const discovered = Number(row?.discovered ?? row?.items) || 0;
-  const fresh = Number(row?.new_count) || 0;
+  const idList = plannedIds.length ? plannedIds.map(() => "?").join(", ") : null;
+  const newCountExpr = idList
+    ? `(SELECT COUNT(*) FROM candidates WHERE id IN (${idList}) AND fetch_status = 'pending')`
+    : "0";
   return env.DB.prepare(
     `UPDATE sources
      SET last_checked_at = datetime('now'),
          last_ok_at = CASE WHEN ? THEN datetime('now') ELSE last_ok_at END,
          last_success_at = CASE WHEN ? THEN datetime('now') ELSE last_success_at END,
          last_discovery_at = CASE WHEN ? > 0 THEN datetime('now') ELSE last_discovery_at END,
-         last_fresh_at = CASE WHEN ? > 0 THEN datetime('now') ELSE last_fresh_at END,
+         last_fresh_at = CASE WHEN ${newCountExpr} > 0 THEN datetime('now') ELSE last_fresh_at END,
          last_status = ?, last_items = ?,
          connect_status = ?, http_status = ?, parse_status = ?,
-         discovered_count = ?, new_count = ?,
+         discovered_count = ?, new_count = ${newCountExpr},
          fail_reason = ?, last_strategy = ?, last_discovered_url = ?,
          etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
          consecutive_failures = CASE WHEN ? THEN 0 ELSE IFNULL(consecutive_failures, 0) + 1 END
@@ -190,14 +193,14 @@ function claimConditionedSourceHealthStatement(env, row, claimed) {
     ok ? 1 : 0,
     ok ? 1 : 0,
     discovered,
-    fresh,
+    ...(plannedIds.length ? plannedIds : []),
     String(row?.status || "").slice(0, 160),
     Number(row?.items) || 0,
     String(row?.connect_status || row?.status || "").slice(0, 80),
     row?.http_status ?? null,
     String(row?.parse_status || "").slice(0, 80),
     discovered,
-    fresh,
+    ...(plannedIds.length ? plannedIds : []),
     String(row?.fail_reason || "").slice(0, 160),
     String(row?.last_strategy || "").slice(0, 40),
     String(row?.last_discovered_url || "").slice(0, 500),
@@ -262,9 +265,9 @@ export async function persistSourcePollOutcome(env, claimed, { mayor, source, sc
     id: claimed.source_id || source?.id,
     items: filtered.length,
     discovered: filtered.length,
-    new_count: filtered.length,
   };
-  statements.push(claimConditionedSourceHealthStatement(env, healthRow, claimed));
+  const plannedIds = filtered.map((row) => row.id);
+  statements.push(claimConditionedSourceHealthStatement(env, healthRow, claimed, plannedIds));
   if (completion?.status === "retrying") {
     statements.push(
       deferSourcePollStatement(env, claimed, {

@@ -73,11 +73,14 @@ import {
   DESK_RUN_LOCKS_TABLE,
   dueSourcePolls,
   groupCandidatesForEnqueue,
+  isDeskRunTerminal,
   isPermanentSourceFailure,
   isTerminalSourceStatus,
   MAX_SOURCE_POLL_ATTEMPTS,
   readScanSource,
   releaseDeskRun,
+  releaseDeskRunForJob,
+  renewDeskRunLease,
   sourcePollBackoffSeconds,
   sourcePollRetryDelaySeconds,
 } from "./leases.js";
@@ -355,6 +358,7 @@ const REQUIRED_TABLES = [
   "candidates",
   "settings_audit",
   "scan_sources",
+  "desk_run_locks",
   "ai_budget",
   "ai_provider_budget",
   "brief_versions",
@@ -1197,7 +1201,21 @@ export async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
     return { done: false, pending: backlog.pending, nextAt: backlog.nextAt };
   }
   await completeMayorDesk(env, { mayorId, jobId, scanId });
-  await releaseDeskRun(env, { mayorId, jobId, scanId });
+  if (jobId) {
+    const job = await env.DB.prepare(`SELECT status FROM search_jobs WHERE id = ?`)
+      .bind(jobId)
+      .first();
+    const jobTerminal = ["completed", "partial", "failed"].includes(job?.status);
+    if (jobTerminal) {
+      await releaseDeskRunForJob(env, jobId);
+    } else if (await isDeskRunTerminal(env, { jobId, mayorId })) {
+      await releaseDeskRun(env, { mayorId, jobId, scanId });
+    } else {
+      await renewDeskRunLease(env, { jobId, mayorId, scanId });
+    }
+  } else {
+    await releaseDeskRun(env, { mayorId, jobId, scanId });
+  }
   return { done: true };
 }
 
@@ -1559,17 +1577,17 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
       reusedKind: claimed.lock?.kind || null,
     };
   }
-  await env.DB.prepare(
-    `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
-  )
-    .bind(jobId, query || null, mayorId)
-    .run();
-  const taskStmt = env.DB.prepare(
-    `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
-     VALUES (?, ?, 'queued', 'queued', 'بانتظار بدء الرصد')`,
-  );
-  await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
   try {
+    await env.DB.prepare(
+      `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
+    )
+      .bind(jobId, query || null, mayorId)
+      .run();
+    const taskStmt = env.DB.prepare(
+      `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
+       VALUES (?, ?, 'queued', 'queued', 'بانتظار بدء الرصد')`,
+    );
+    await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
     const queued = await enqueueSourcePolls(env, {
       mayorIds: targets.map((mayor) => mayor.id),
       type: "manual",
@@ -1583,12 +1601,11 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
     return { jobId, queued: queued.queued || 0, scanId: queued.scanId, reused: false };
   } catch (error) {
     await releaseDeskRun(env, { mayorId: mayorId || null, jobId, scanId });
-    await env.DB.prepare(
-      `UPDATE search_job_tasks SET status = 'failed', error = ? WHERE job_id = ?`,
-    )
-      .bind(String(error.message || error).slice(0, 300), jobId)
-      .run();
-    await refreshSearchJobStatus(env, jobId);
+    await releaseDeskRunForJob(env, jobId);
+    await env.DB.prepare(`DELETE FROM search_job_tasks WHERE job_id = ?`).bind(jobId).run();
+    await env.DB.prepare(`DELETE FROM search_jobs WHERE id = ?`).bind(jobId).run();
+    await env.DB.prepare(`DELETE FROM scan_sources WHERE scan_id = ?`).bind(scanId).run();
+    await env.DB.prepare(`DELETE FROM scans WHERE id = ?`).bind(scanId).run();
     throw error;
   }
 }

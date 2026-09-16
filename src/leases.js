@@ -386,6 +386,56 @@ export async function releaseDeskRun(env, { mayorId = null, jobId = null, scanId
   return Number(mayorRelease?.meta?.changes || 0) + Number(allRelease?.meta?.changes || 0) > 0;
 }
 
+const TERMINAL_JOB_STATUSES = new Set(["completed", "partial", "failed"]);
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed"]);
+
+export async function isDeskRunTerminal(env, { jobId, mayorId = null } = {}) {
+  if (!jobId) return false;
+  const job = await env.DB.prepare(`SELECT status FROM search_jobs WHERE id = ?`)
+    .bind(jobId)
+    .first();
+  if (TERMINAL_JOB_STATUSES.has(job?.status)) return true;
+  if (!mayorId) return false;
+  const task = await env.DB.prepare(
+    `SELECT status FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
+  )
+    .bind(jobId, mayorId)
+    .first();
+  return TERMINAL_TASK_STATUSES.has(task?.status);
+}
+
+export async function renewDeskRunLease(env, { jobId = null, mayorId = null, scanId = null } = {}) {
+  if (!env?.DB) return false;
+  if (jobId) {
+    const result = await env.DB.prepare(
+      `UPDATE desk_run_locks
+       SET lease_until = datetime('now', '+${DESK_RUN_LEASE_MINUTES} minutes')
+       WHERE job_id = ?`,
+    )
+      .bind(jobId)
+      .run();
+    return Number(result?.meta?.changes) > 0;
+  }
+  const lockKey = deskLockKey(mayorId);
+  const result = await env.DB.prepare(
+    `UPDATE desk_run_locks
+     SET lease_until = datetime('now', '+${DESK_RUN_LEASE_MINUTES} minutes')
+     WHERE lock_key = ?
+       AND (? IS NULL OR scan_id = ?)`,
+  )
+    .bind(lockKey, scanId, scanId)
+    .run();
+  return Number(result?.meta?.changes) > 0;
+}
+
+export async function releaseDeskRunForJob(env, jobId) {
+  if (!env?.DB || !jobId) return false;
+  const result = await env.DB.prepare(`DELETE FROM desk_run_locks WHERE job_id = ?`)
+    .bind(jobId)
+    .run();
+  return Number(result?.meta?.changes) > 0;
+}
+
 export async function dueSourcePolls(env, limit = 40) {
   const { results } = await env.DB.prepare(
     `SELECT scan_id, source_id, mayor_id, job_id, status, next_attempt_at, claim_id
