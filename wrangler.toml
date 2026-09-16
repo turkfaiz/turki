@@ -50,3 +50,4 @@ max_concurrency = 2
 binding = "DB"
 database_name = "mayor-watch"
 database_id = "c14c54d4-1f5e-4353-8de0-65da24d7127d"
+migrations_dir = "migrations"

@@ -10,8 +10,10 @@ import { runScan, sourceStatus } from "./collect.js";
 import {
   enabledSources,
   fetchCandidateBatch,
+  pendingCandidateBacklog,
   pendingCandidateCount,
   pendingFetchIds,
+  persistSourcePollOutcome,
   pollOneSource,
 } from "./pipeline.js";
 import {
@@ -64,6 +66,23 @@ import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
 import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
+import {
+  claimDeskRun,
+  claimSourcePoll,
+  DESK_RUN_LOCKS_INDEX,
+  DESK_RUN_LOCKS_TABLE,
+  dueSourcePolls,
+  groupCandidatesForEnqueue,
+  isPermanentSourceFailure,
+  isTerminalSourceStatus,
+  MAX_SOURCE_POLL_ATTEMPTS,
+  readScanSource,
+  releaseDeskRun,
+  releaseDeskRunForJob,
+  renewDeskRunLease,
+  sourcePollBackoffSeconds,
+  sourcePollRetryDelaySeconds,
+} from "./leases.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -223,7 +242,11 @@ const SCHEMA_STATEMENTS = [
     etag TEXT,
     last_modified TEXT,
     fetched_at TEXT,
-    attempts INTEGER DEFAULT 0
+    attempts INTEGER DEFAULT 0,
+    fetch_claim_id TEXT,
+    fetch_claimed_at TEXT,
+    fetch_after TEXT,
+    last_error TEXT
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_source_url ON candidates(source_id, url)`,
   `CREATE INDEX IF NOT EXISTS idx_candidates_fetch ON candidates(fetch_status, mayor_id)`,
@@ -244,8 +267,17 @@ const SCHEMA_STATEMENTS = [
     job_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     detail TEXT,
+    claim_id TEXT,
+    claimed_at TEXT,
+    attempts INTEGER DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
     PRIMARY KEY (scan_id, source_id)
   )`,
+  `CREATE INDEX IF NOT EXISTS idx_scan_sources_lease ON scan_sources(status, next_attempt_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_candidates_fetch_lease ON candidates(fetch_status, fetch_after, fetch_claimed_at)`,
+  DESK_RUN_LOCKS_TABLE,
+  DESK_RUN_LOCKS_INDEX,
   `CREATE TABLE IF NOT EXISTS ai_budget (
     day TEXT PRIMARY KEY,
     calls INTEGER NOT NULL DEFAULT 0,
@@ -269,7 +301,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v19";
+const BOOTSTRAP_VERSION = "bootstrap-v20";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -325,6 +357,7 @@ const REQUIRED_TABLES = [
   "candidates",
   "settings_audit",
   "scan_sources",
+  "desk_run_locks",
   "ai_budget",
   "ai_provider_budget",
   "brief_versions",
@@ -934,13 +967,13 @@ export async function drainBriefs(env, { maxBriefs = DRAIN_MAX_BRIEFS, maxMs = D
   return totals;
 }
 
-async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = null }) {
-  const scanId = crypto.randomUUID();
+async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = null, scanId = null }) {
+  const id = scanId || crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO scans (id, type, query, mayor_id, started_at, found_count, duplicate_count, excluded_count, error_count)
+    `INSERT OR IGNORE INTO scans (id, type, query, mayor_id, started_at, found_count, duplicate_count, excluded_count, error_count)
      VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)`,
   )
-    .bind(scanId, type, query || null, mayorIds.length === 1 ? mayorIds[0] : null, new Date().toISOString())
+    .bind(id, type, query || null, mayorIds.length === 1 ? mayorIds[0] : null, new Date().toISOString())
     .run();
 
   const messages = [];
@@ -962,15 +995,16 @@ async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = nul
       continue;
     }
     const insert = env.DB.prepare(
-      `INSERT OR REPLACE INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail)
-       VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر')`,
+      `INSERT INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail, attempts)
+       VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر', 0)
+       ON CONFLICT(scan_id, source_id) DO NOTHING`,
     );
     await env.DB.batch(
-      sources.map((source) => insert.bind(scanId, source.id, mayorId, jobId)),
+      sources.map((source) => insert.bind(id, source.id, mayorId, jobId)),
     );
     for (const source of sources) {
       messages.push({
-        body: { type: "source_poll", mayorId, sourceId: source.id, scanId, jobId, query },
+        body: { type: "source_poll", mayorId, sourceId: source.id, scanId: id, jobId, query },
         contentType: "json",
       });
     }
@@ -978,24 +1012,27 @@ async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = nul
   for (let i = 0; i < messages.length; i += 100) {
     await env.SCAN_QUEUE.sendBatch(messages.slice(i, i + 100));
   }
-  return { scanId, queued: messages.length };
+  return { scanId: id, queued: messages.length };
 }
 
-async function enqueueArticleFetches(env, { ids, mayorId, scanId, jobId }) {
+async function enqueueArticleFetches(env, { ids = [], mayorId, scanId, jobId, delaySeconds = 0 } = {}) {
   if (!env.SCAN_QUEUE) return 0;
-  const batches = [];
+  const delay = Math.max(0, Number(delaySeconds) || 0);
+  const chunks = ids.length ? [] : [[]];
   for (let i = 0; i < ids.length; i += ARTICLE_FETCH_BATCH) {
-    batches.push({
-      body: {
-        type: "article_fetch",
-        mayorId,
-        scanId,
-        jobId,
-        candidateIds: ids.slice(i, i + ARTICLE_FETCH_BATCH),
-      },
-      contentType: "json",
-    });
+    chunks.push(ids.slice(i, i + ARTICLE_FETCH_BATCH));
   }
+  const batches = chunks.map((candidateIds) => ({
+    body: {
+      type: "article_fetch",
+      mayorId,
+      scanId,
+      jobId,
+      candidateIds,
+    },
+    contentType: "json",
+    delaySeconds: delay,
+  }));
   for (let i = 0; i < batches.length; i += 100) {
     await env.SCAN_QUEUE.sendBatch(batches.slice(i, i + 100));
   }
@@ -1135,7 +1172,7 @@ export async function completeMayorDesk(env, { mayorId, jobId, scanId }) {
   };
 }
 
-async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
+export async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
   const polls = await env.DB.prepare(
     `SELECT COUNT(*) AS n,
             SUM(CASE WHEN status IN ('polled', 'failed') THEN 1 ELSE 0 END) AS done
@@ -1144,71 +1181,176 @@ async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
     .bind(scanId, mayorId)
     .first();
   if (!polls?.n || Number(polls.done) < Number(polls.n)) return { done: false };
-  const pending = await pendingCandidateCount(env, mayorId, scanId);
-  if (pending > 0) {
-    const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH * 8 });
-    if (env.SCAN_QUEUE) await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
-    else await fetchCandidateBatch(env, { ids, limit: INLINE_ARTICLE_FETCH_LIMIT });
-    return { done: false, pending };
+  const backlog = await pendingCandidateBacklog(env, mayorId, scanId, {
+    limit: ARTICLE_FETCH_BATCH * 8,
+  });
+  if (backlog.pending > 0) {
+    if (backlog.ids.length) {
+      if (env.SCAN_QUEUE) await enqueueArticleFetches(env, { ids: backlog.ids, mayorId, scanId, jobId });
+      else await fetchCandidateBatch(env, { ids: backlog.ids, mayorId, scanId, limit: INLINE_ARTICLE_FETCH_LIMIT });
+    } else if (backlog.nextAt && env.SCAN_QUEUE) {
+      await enqueueArticleFetches(env, {
+        ids: [],
+        mayorId,
+        scanId,
+        jobId,
+        delaySeconds: continuationDelaySeconds({ nextAt: backlog.nextAt }),
+      });
+    }
+    return { done: false, pending: backlog.pending, nextAt: backlog.nextAt };
   }
   await completeMayorDesk(env, { mayorId, jobId, scanId });
+  if (jobId) {
+    const job = await env.DB.prepare(`SELECT status FROM search_jobs WHERE id = ?`)
+      .bind(jobId)
+      .first();
+    if (["completed", "partial", "failed"].includes(job?.status)) {
+      await releaseDeskRunForJob(env, jobId);
+    } else {
+      await renewDeskRunLease(env, { jobId, mayorId, scanId });
+    }
+  } else {
+    await releaseDeskRun(env, { mayorId, jobId, scanId });
+  }
   return { done: true };
 }
 
-async function processSourcePollMessage(env, message) {
+export async function processSourcePollMessage(env, message, extra = {}) {
   const body = message.body || {};
   const { mayorId, sourceId, scanId, jobId, query } = body;
-  if (!mayorId || !sourceId) {
+  if (!mayorId || !sourceId || !scanId) {
     message.ack();
-    return;
+    return { kind: "ignored" };
   }
+
+  const claimed = await claimSourcePoll(env, { scanId, sourceId, mayorId });
+  if (!claimed) {
+    const row = await readScanSource(env, scanId, sourceId);
+    if (isTerminalSourceStatus(row?.status)) {
+      message.ack();
+      return { kind: "noop", status: row.status };
+    }
+    message.retry({ delaySeconds: sourcePollRetryDelaySeconds(row) });
+    return { kind: "retry_later", status: row?.status || "missing" };
+  }
+
+  if (typeof extra.afterClaim === "function") await extra.afterClaim(claimed);
+
   if (jobId) {
     await env.DB.prepare(
       `UPDATE search_job_tasks
        SET status = 'running', stage = 'source_poll',
            detail = ?, started_at = COALESCE(started_at, datetime('now'))
-       WHERE job_id = ? AND mayor_id = ?`,
+       WHERE job_id = ? AND mayor_id = ?
+         AND EXISTS (
+           SELECT 1 FROM scan_sources
+           WHERE scan_id = ? AND source_id = ? AND claim_id = ?
+         )`,
     )
-      .bind(`يفحص المصدر ${sourceId}`, jobId, mayorId)
+      .bind(`يفحص المصدر ${sourceId}`, jobId, mayorId, scanId, sourceId, claimed.claim_id)
       .run();
   }
-  await env.DB.prepare(
-    `UPDATE scan_sources SET status = 'polling', detail = 'جاري فحص المصدر' WHERE scan_id = ? AND source_id = ?`,
-  )
-    .bind(scanId, sourceId)
-    .run();
-  try {
-    const polled = await pollOneSource(env, { sourceId, mayorId, scanId, query });
-    await recordSourceHealth(env, [{ ...polled.health, id: sourceId }]);
-    await env.DB.prepare(
-      `UPDATE scan_sources SET status = 'polled', detail = ? WHERE scan_id = ? AND source_id = ?`,
-    )
-      .bind(String(polled.health.status || "ok").slice(0, 160), scanId, sourceId)
-      .run();
-    if (polled.newIds?.length && env.SCAN_QUEUE) {
-      await enqueueArticleFetches(env, {
-        ids: polled.newIds,
-        mayorId,
-        scanId,
-        jobId,
-      });
-    } else if (polled.newIds?.length) {
-      await fetchCandidateBatch(env, { ids: polled.newIds, limit: ARTICLE_FETCH_BATCH });
+
+  const finishOwned = async (completion) => {
+    const mayor = await resolveMayor(env, mayorId);
+    const source = sourceById(sourceId);
+    const outcome = await persistSourcePollOutcome(env, claimed, {
+      mayor,
+      source,
+      scanId,
+      rows: completion.rows || [],
+      health: completion.health || {},
+      completion: {
+        status: completion.status,
+        detail: completion.detail,
+        lastError: completion.lastError || null,
+        delaySeconds: completion.delaySeconds,
+      },
+    });
+    if (!outcome.wrote) {
+      message.ack();
+      return { kind: "stale_claim", wrote: false };
+    }
+    if (completion.status === "polled" && outcome.newIds.length) {
+      if (env.SCAN_QUEUE) {
+        await enqueueArticleFetches(env, { ids: outcome.newIds, mayorId, scanId, jobId });
+      } else {
+        await fetchCandidateBatch(env, {
+          ids: outcome.newIds,
+          mayorId,
+          scanId,
+          limit: ARTICLE_FETCH_BATCH,
+          fetch: extra.fetch,
+        });
+      }
+    }
+    if (completion.status === "retrying") {
+      message.retry({ delaySeconds: completion.delaySeconds || sourcePollRetryDelaySeconds({ attempts: claimed.attempts }) });
+      return { kind: "retrying", wrote: true, lastError: completion.lastError };
     }
     await maybeFinishMayor(env, { mayorId, jobId, scanId });
     message.ack();
+    return { kind: completion.status, wrote: true, lastError: completion.lastError };
+  };
+
+  try {
+    const polled = await pollOneSource(env, {
+      sourceId,
+      mayorId,
+      scanId,
+      query,
+      fetch: extra.fetch,
+      persist: false,
+    });
+    if (polled.health?.ok) {
+      return finishOwned({
+        status: "polled",
+        detail: String(polled.health.status || "ok").slice(0, 160),
+        health: { ...polled.health, id: sourceId },
+        rows: polled.rows || [],
+      });
+    }
+
+    const failReason = polled.health?.fail_reason || polled.health?.status || "poll_failed";
+    if (
+      isPermanentSourceFailure(polled.health) ||
+      Number(claimed.attempts) >= MAX_SOURCE_POLL_ATTEMPTS
+    ) {
+      return finishOwned({
+        status: "failed",
+        detail: String(failReason).slice(0, 160),
+        lastError: failReason,
+        health: { ...polled.health, id: sourceId },
+      });
+    }
+    return finishOwned({
+      status: "retrying",
+      detail: String(failReason).slice(0, 160),
+      lastError: failReason,
+      health: { ...polled.health, id: sourceId },
+      delaySeconds: sourcePollBackoffSeconds(claimed.attempts),
+    });
   } catch (error) {
-    await env.DB.prepare(
-      `UPDATE scan_sources SET status = 'failed', detail = ? WHERE scan_id = ? AND source_id = ?`,
-    )
-      .bind(String(error.message || error).slice(0, 160), scanId, sourceId)
-      .run();
-    await maybeFinishMayor(env, { mayorId, jobId, scanId });
-    message.ack();
+    const lastError = String(error?.message || error || claimed.last_error || "poll_failed").slice(0, 300);
+    if (Number(claimed.attempts) >= MAX_SOURCE_POLL_ATTEMPTS || isPermanentSourceFailure({ fail_reason: lastError })) {
+      return finishOwned({
+        status: "failed",
+        detail: lastError.slice(0, 160),
+        lastError,
+        health: { id: sourceId, ok: false, status: "exception", fail_reason: lastError },
+      });
+    }
+    return finishOwned({
+      status: "retrying",
+      detail: lastError.slice(0, 160),
+      lastError,
+      health: { id: sourceId, ok: false, status: "exception", fail_reason: lastError },
+      delaySeconds: sourcePollBackoffSeconds(claimed.attempts),
+    });
   }
 }
 
-async function processArticleFetchMessage(env, message) {
+export async function processArticleFetchMessage(env, message, extra = {}) {
   const body = message.body || {};
   const { mayorId, scanId, jobId, candidateIds } = body;
   if (jobId && mayorId) {
@@ -1224,13 +1366,25 @@ async function processArticleFetchMessage(env, message) {
     await fetchCandidateBatch(env, {
       ids: candidateIds || [],
       mayorId,
+      scanId,
       limit: ARTICLE_FETCH_BATCH,
+      fetch: extra.fetch,
+      afterClaim: extra.afterClaim,
     });
-    const pending = await pendingCandidateCount(env, mayorId, scanId);
-    if (pending > 0 && env.SCAN_QUEUE) {
-      const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH });
-      await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
-    } else {
+    const backlog = await pendingCandidateBacklog(env, mayorId, scanId, { limit: ARTICLE_FETCH_BATCH });
+    if (backlog.pending > 0 && env.SCAN_QUEUE) {
+      if (backlog.ids.length) {
+        await enqueueArticleFetches(env, { ids: backlog.ids, mayorId, scanId, jobId });
+      } else if (backlog.nextAt) {
+        await enqueueArticleFetches(env, {
+          ids: candidateIds || [],
+          mayorId,
+          scanId,
+          jobId,
+          delaySeconds: continuationDelaySeconds({ nextAt: backlog.nextAt }),
+        });
+      }
+    } else if (backlog.pending <= 0) {
       await maybeFinishMayor(env, { mayorId, jobId, scanId });
     }
     message.ack();
@@ -1266,11 +1420,26 @@ async function finishAllOffices(env, type = "weekly") {
 
 async function enqueueAllOffices(env, type = "weekly") {
   if (!env.SCAN_QUEUE) return finishAllOffices(env, type);
-  const queued = await enqueueSourcePolls(env, {
-    mayorIds: (await listMayors(env)).map((mayor) => mayor.id),
-    type,
-  });
-  return { queued: queued.queued, type, scanId: queued.scanId };
+  const mayorIds = (await listMayors(env)).map((mayor) => mayor.id);
+  const scanId = crypto.randomUUID();
+  const claimed = await claimDeskRun(env, { mayorId: null, kind: type, jobId: null, scanId });
+  if (!claimed.acquired) {
+    return {
+      queued: 0,
+      type,
+      scanId: claimed.lock?.scan_id || null,
+      jobId: claimed.lock?.job_id || null,
+      reused: true,
+      reusedKind: claimed.lock?.kind || null,
+    };
+  }
+  try {
+    const queued = await enqueueSourcePolls(env, { mayorIds, type, scanId });
+    return { queued: queued.queued, type, scanId: queued.scanId, reused: false };
+  } catch (error) {
+    await releaseDeskRun(env, { mayorId: null, scanId });
+    throw error;
+  }
 }
 
 const SEARCH_TOTAL_KEYS = [
@@ -1388,31 +1557,51 @@ async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   const targets = mayorId ? catalog.filter((mayor) => mayor.id === mayorId) : catalog;
   if (!targets.length) throw new Error("mayor_not_found");
   const jobId = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
-  )
-    .bind(jobId, query || null, mayorId)
-    .run();
-  const taskStmt = env.DB.prepare(
-    `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
-     VALUES (?, ?, 'queued', 'queued', 'بانتظار بدء الرصد')`,
-  );
-  await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
+  const scanId = crypto.randomUUID();
+  const claimed = await claimDeskRun(env, {
+    mayorId: mayorId || null,
+    kind: "manual",
+    jobId,
+    scanId,
+  });
+  if (!claimed.acquired) {
+    return {
+      jobId: claimed.lock?.job_id || null,
+      queued: 0,
+      scanId: claimed.lock?.scan_id || null,
+      reused: true,
+      reusedKind: claimed.lock?.kind || null,
+    };
+  }
   try {
+    await env.DB.prepare(
+      `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
+    )
+      .bind(jobId, query || null, mayorId)
+      .run();
+    const taskStmt = env.DB.prepare(
+      `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
+       VALUES (?, ?, 'queued', 'queued', 'بانتظار بدء الرصد')`,
+    );
+    await env.DB.batch(targets.map((mayor) => taskStmt.bind(jobId, mayor.id)));
     const queued = await enqueueSourcePolls(env, {
       mayorIds: targets.map((mayor) => mayor.id),
       type: "manual",
       query,
       jobId,
+      scanId,
     });
-    return { jobId, queued: queued.queued || targets.length, scanId: queued.scanId };
+    if (!queued.queued) {
+      await releaseDeskRun(env, { mayorId: mayorId || null, jobId, scanId });
+    }
+    return { jobId, queued: queued.queued || 0, scanId: queued.scanId, reused: false };
   } catch (error) {
-    await env.DB.prepare(
-      `UPDATE search_job_tasks SET status = 'failed', error = ? WHERE job_id = ?`,
-    )
-      .bind(String(error.message || error).slice(0, 300), jobId)
-      .run();
-    await refreshSearchJobStatus(env, jobId);
+    await releaseDeskRun(env, { mayorId: mayorId || null, jobId, scanId });
+    await releaseDeskRunForJob(env, jobId);
+    await env.DB.prepare(`DELETE FROM search_job_tasks WHERE job_id = ?`).bind(jobId).run();
+    await env.DB.prepare(`DELETE FROM search_jobs WHERE id = ?`).bind(jobId).run();
+    await env.DB.prepare(`DELETE FROM scan_sources WHERE scan_id = ?`).bind(scanId).run();
+    await env.DB.prepare(`DELETE FROM scans WHERE id = ?`).bind(scanId).run();
     throw error;
   }
 }
@@ -1450,6 +1639,33 @@ async function processBriefContinuation(env, message) {
   } catch {
     message.retry({ delaySeconds: 30 });
   }
+}
+
+async function requeueDueSourcePolls(env) {
+  if (!env.SCAN_QUEUE) return 0;
+  const due = await dueSourcePolls(env);
+  if (!due.length) return 0;
+  const messages = [];
+  for (const row of due) {
+    const scan = await env.DB.prepare(`SELECT query FROM scans WHERE id = ?`)
+      .bind(row.scan_id)
+      .first();
+    messages.push({
+      body: {
+        type: "source_poll",
+        mayorId: row.mayor_id,
+        sourceId: row.source_id,
+        scanId: row.scan_id,
+        jobId: row.job_id || null,
+        query: scan?.query || "",
+      },
+      contentType: "json",
+    });
+  }
+  for (let i = 0; i < messages.length; i += 100) {
+    await env.SCAN_QUEUE.sendBatch(messages.slice(i, i + 100));
+  }
+  return messages.length;
 }
 
 async function processQueuedSearch(env, message) {
@@ -2406,6 +2622,13 @@ async function handleApi(request, env) {
   return json({ error: "not_found" }, 404);
 }
 
+export {
+  enqueueAllOffices,
+  enqueueManualSearch,
+  enqueueSourcePolls,
+  requeueDueSourcePolls,
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -2441,8 +2664,12 @@ export default {
         await pruneOldItems(env);
         const leftoverFetch = await pendingFetchIds(env, { limit: ARTICLE_FETCH_BATCH * 4 });
         if (leftoverFetch.length && env.SCAN_QUEUE) {
-          await enqueueArticleFetches(env, { ids: leftoverFetch });
+          const groups = await groupCandidatesForEnqueue(env, leftoverFetch);
+          for (const group of groups) {
+            await enqueueArticleFetches(env, group);
+          }
         }
+        await requeueDueSourcePolls(env);
         await drainBriefs(env);
         const leftover = await briefBacklog(env);
         const verify = await verificationBacklog(env);

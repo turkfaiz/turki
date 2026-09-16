@@ -1,4 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * A D1-shaped adapter over real SQLite.
@@ -9,10 +12,7 @@ import { DatabaseSync } from "node:sqlite";
  * cannot catch those because it never parses the SQL. This runs the statements
  * the Worker actually issues against a real engine.
  */
-export function createTestD1() {
-  const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA foreign_keys = ON");
-
+function wrapSqlite(db) {
   const normalise = (value) => {
     if (value === undefined || value === null) return null;
     if (typeof value === "boolean") return value ? 1 : 0;
@@ -74,12 +74,54 @@ export function createTestD1() {
   return adapter;
 }
 
+export function createTestD1() {
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys = ON");
+  return wrapSqlite(db);
+}
+
+/**
+ * Two logically independent D1 adapters on one SQLite file.
+ * Concurrent UPDATE claims serialize at the engine, which is how D1 behaves.
+ */
+export function createPairedTestD1() {
+  const dir = mkdtempSync(join(tmpdir(), "mayor-d1-"));
+  const path = join(dir, "db.sqlite");
+  const open = () => {
+    const db = new DatabaseSync(path);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("PRAGMA foreign_keys = ON");
+    return wrapSqlite(db);
+  };
+  const dbA = open();
+  const dbB = open();
+  return {
+    dbA,
+    dbB,
+    path,
+    close() {
+      try {
+        dbA.close();
+      } catch {
+        /* already closed */
+      }
+      try {
+        dbB.close();
+      } catch {
+        /* already closed */
+      }
+    },
+  };
+}
+
 export function testEnv(overrides = {}) {
   return {
     DB: createTestD1(),
     GEMINI_MODEL: "gemini-test",
     AI_MIN_INTERVAL_MS: "0",
     AI_DAILY_LIMIT: "1000",
+    QWEN_ENABLED: "0",
     ...overrides,
   };
 }
