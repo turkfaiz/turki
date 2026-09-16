@@ -252,7 +252,7 @@ test("verify claim columns are added to existing brief_versions without deleting
   assert.equal(db.one(`SELECT COUNT(*) AS n FROM brief_versions WHERE id = 'ver-passed'`).n, 1);
 });
 
-test("source and candidate lease columns are added without deleting rows", async () => {
+test("reopening a populated desk keeps lease columns and protected rows", async () => {
   const db = createTestD1();
   await ensureDb(envWith(db));
   seedPopulatedDesk(db);

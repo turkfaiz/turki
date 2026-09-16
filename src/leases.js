@@ -1,36 +1,12 @@
 /**
- * حجز ذري لفحص المصادر وجلب المرشحين.
+ * حجز ذري لفحص المصادر وجلب المرشحين، وقفل تشغيلي ذري للمكتب.
  *
- * قبل الإصلاح — فحص المصدر:
- *   queued → polling (UPDATE بلا شرط وبلا claim_id)
- *   polling → polled حتى لو فشل الاتصال
- *   polling → failed عند الاستثناء ثم ack باعتباره نهاية
- *   رسالة مكررة بعد polled تعيد الفحص الخارجي
- *   لا retrying ولا lease ولا attempts ولا last_error
+ * الكتابات ذات الأثر (candidates / items / source counters / health /
+ * article_fetch) مشروطة بـ claim_id أو fetch_claim_id الحالي داخل عبارة SQL
+ * واحدة، وليست SELECT ثم كتابة غير مشروطة. الحالة النهائية تُفرّغ الحجز.
  *
- * بعد الإصلاح — فحص المصدر:
- *   queued | retrying(due) | polling(lease منتهٍ)
- *     → polling (UPDATE مشروط + RETURNING + claim_id)
- *   polling + نجاح يملك claim_id → polled
- *   polling + عطل مؤقت + attempts < الحد → retrying + next_attempt_at + last_error
- *   polling + استنفاد أو عطل نهائي → failed + last_error (نهائية، لا تعلق الإغلاق)
- *   polled/failed + رسالة مكررة → no-op بلا اتصال خارجي
- *   claim_id قديم لا يكتب polled/failed/retrying
- *
- * قبل الإصلاح — جلب المرشح:
- *   pending|retry → working مع fetched_at كوقت حجز
- *   working لا يُسترد بعد انتهاء المهلة
- *   استثناء بعد الحجز يترك working للأبد
- *   الكتابة النهائية غير مشروطة بـ claim
- *   pendingCandidateCount يشمل working بينما pendingFetchIds لا يشمله
- *     ⇒ count=1 و ids=[] بلا next_at
- *
- * بعد الإصلاح — جلب المرشح:
- *   pending|retry(due) | working(lease منتهٍ) → working + fetch_claim_id + fetch_claimed_at
- *   fetched_at وقت اكتمال الجلب فقط، لا وقت الحجز
- *   استثناء بعد الحجز → retry + fetch_after أو failed بعد الاستنفاد
- *   الكتابة النهائية مشروطة بـ fetch_claim_id الحالي
- *   كل عنصر في العدّ إما قابل للتنفيذ الآن أو مؤجَّل بـ next_at مستقبلي
+ * ترحيل الأعمدة: ملف migrations/0020 يُطبَّق ويُسجَّل عبر wrangler d1_migrations
+ * قبل نشر العامل الذي يعتمد عليها. العامل لا يضيف الأعمدة في وقت التشغيل.
  */
 
 import { STAGES } from "./discovery.js";
@@ -39,7 +15,22 @@ export const SOURCE_POLL_LEASE_MINUTES = 10;
 export const MAX_SOURCE_POLL_ATTEMPTS = 4;
 export const CANDIDATE_FETCH_LEASE_MINUTES = 10;
 export const MAX_CANDIDATE_FETCH_ATTEMPTS = 4;
+export const DESK_RUN_LEASE_MINUTES = 60;
+export const ALL_OFFICES_LOCK = "__all__";
 export const LEASE_MIGRATION_ID = "0020_source_and_candidate_leases";
+
+export const DESK_RUN_LOCKS_TABLE = `CREATE TABLE IF NOT EXISTS desk_run_locks (
+    lock_key TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    job_id TEXT,
+    scan_id TEXT,
+    kind TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    lease_until TEXT NOT NULL
+  )`;
+
+export const DESK_RUN_LOCKS_INDEX =
+  "CREATE INDEX IF NOT EXISTS idx_desk_run_locks_lease ON desk_run_locks(lease_until)";
 
 export const LEASE_MIGRATION_STATEMENTS = [
   "ALTER TABLE scan_sources ADD COLUMN claim_id TEXT",
@@ -53,6 +44,8 @@ export const LEASE_MIGRATION_STATEMENTS = [
   "ALTER TABLE candidates ADD COLUMN last_error TEXT",
   "CREATE INDEX IF NOT EXISTS idx_scan_sources_lease ON scan_sources(status, next_attempt_at)",
   "CREATE INDEX IF NOT EXISTS idx_candidates_fetch_lease ON candidates(fetch_status, fetch_after, fetch_claimed_at)",
+  DESK_RUN_LOCKS_TABLE,
+  DESK_RUN_LOCKS_INDEX,
 ];
 
 const PERMANENT_SOURCE_FAILURES = new Set([
@@ -83,39 +76,54 @@ export function isTerminalSourceStatus(status) {
   return status === "polled" || status === "failed";
 }
 
-async function tableColumns(env, table) {
-  const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
-  return new Set((info.results || []).map((column) => column.name));
+export function isTerminalCandidateStatus(status) {
+  return status === "fetched" || status === "skipped" || status === "failed";
 }
 
-async function addColumnIfMissing(env, table, column, type) {
-  const names = await tableColumns(env, table);
-  if (!names.size || names.has(column)) return false;
-  await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
-  return true;
+export function deskLockKey(mayorId) {
+  return mayorId ? `mayor:${mayorId}` : ALL_OFFICES_LOCK;
+}
+
+export function sqlStatementsFrom(sql) {
+  return String(sql || "")
+    .split(";")
+    .map((chunk) =>
+      chunk
+        .split("\n")
+        .map((line) => {
+          const trimmed = line.trim();
+          return trimmed.startsWith("--") ? "" : line;
+        })
+        .join("\n")
+        .trim(),
+    )
+    .filter(Boolean);
 }
 
 /**
- * ترحيل أمامي قابل لإعادة التشغيل: لا DELETE/DROP، وALTER يُتخطى إن وُجد العمود.
- * ملف migrations/0020_*.sql هو النص الحرفي الذي يطبّقه wrangler مرة واحدة.
+ * يحاكي wrangler d1 migrations apply: العبارة تُنفَّذ مرة واحدة لأن السجل
+ * في d1_migrations يمنع إعادة التشغيل. ملف ALTER نفسه غير قابل لإعادة التنفيذ.
  */
-export async function applyLeaseMigration(env) {
-  if (!env?.DB) return;
-  await addColumnIfMissing(env, "scan_sources", "claim_id", "TEXT");
-  await addColumnIfMissing(env, "scan_sources", "claimed_at", "TEXT");
-  await addColumnIfMissing(env, "scan_sources", "attempts", "INTEGER DEFAULT 0");
-  await addColumnIfMissing(env, "scan_sources", "next_attempt_at", "TEXT");
-  await addColumnIfMissing(env, "scan_sources", "last_error", "TEXT");
-  await addColumnIfMissing(env, "candidates", "fetch_claim_id", "TEXT");
-  await addColumnIfMissing(env, "candidates", "fetch_claimed_at", "TEXT");
-  await addColumnIfMissing(env, "candidates", "fetch_after", "TEXT");
-  await addColumnIfMissing(env, "candidates", "last_error", "TEXT");
+export async function applyOfficialD1Migration(env, { id, sql }) {
+  if (!env?.DB || !id || !sql) return { applied: false, skipped: false };
   await env.DB.prepare(
-    `CREATE INDEX IF NOT EXISTS idx_scan_sources_lease ON scan_sources(status, next_attempt_at)`,
+    `CREATE TABLE IF NOT EXISTS d1_migrations (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       name TEXT NOT NULL UNIQUE,
+       applied_at TEXT
+     )`,
   ).run();
-  await env.DB.prepare(
-    `CREATE INDEX IF NOT EXISTS idx_candidates_fetch_lease ON candidates(fetch_status, fetch_after, fetch_claimed_at)`,
-  ).run();
+  const existing = await env.DB.prepare(`SELECT name FROM d1_migrations WHERE name = ?`)
+    .bind(id)
+    .first();
+  if (existing) return { applied: false, skipped: true };
+  const statements = sqlStatementsFrom(sql);
+  if (!statements.length) return { applied: false, skipped: false };
+  await env.DB.batch(statements.map((statement) => env.DB.prepare(statement)));
+  await env.DB.prepare(`INSERT INTO d1_migrations (name, applied_at) VALUES (?, datetime('now'))`)
+    .bind(id)
+    .run();
+  return { applied: true, skipped: false, statements: statements.length };
 }
 
 export async function readScanSource(env, scanId, sourceId) {
@@ -127,8 +135,6 @@ export async function readScanSource(env, scanId, sourceId) {
 
 /**
  * حجز مصدر داخل مسح واحد بـ UPDATE مشروط. لا SELECT ثم UPDATE.
- * يمنع مستهلكين من فحص source_id نفسه داخل scan_id نفسه، ويمنع تداخل
- * فحص حي لنفس المصدر عبر المسوح أثناء سريان الـ lease.
  */
 export async function claimSourcePoll(env, { scanId, sourceId, mayorId }) {
   if (!scanId || !sourceId) return null;
@@ -173,30 +179,30 @@ export async function claimSourcePoll(env, { scanId, sourceId, mayorId }) {
   return null;
 }
 
-async function writeSourcePoll(env, claimed, fields) {
-  if (!claimed?.claim_id || !claimed.scan_id || !claimed.source_id) return false;
-  const result = await env.DB.prepare(
+export function completeSourcePollStatement(env, claimed, fields) {
+  return env.DB.prepare(
     `UPDATE scan_sources
      SET status = ?,
          detail = ?,
          last_error = ?,
          next_attempt_at = ?,
-         claim_id = CASE WHEN ? IN ('polled', 'failed') THEN claim_id ELSE NULL END,
-         claimed_at = CASE WHEN ? IN ('polled', 'failed') THEN claimed_at ELSE NULL END
+         claim_id = NULL,
+         claimed_at = NULL
      WHERE scan_id = ? AND source_id = ? AND claim_id = ?`,
-  )
-    .bind(
-      fields.status,
-      String(fields.detail || "").slice(0, 160),
-      fields.lastError ? String(fields.lastError).slice(0, 300) : null,
-      fields.nextAttemptAt || null,
-      fields.status,
-      fields.status,
-      claimed.scan_id,
-      claimed.source_id,
-      claimed.claim_id,
-    )
-    .run();
+  ).bind(
+    fields.status,
+    String(fields.detail || "").slice(0, 160),
+    fields.lastError ? String(fields.lastError).slice(0, 300) : null,
+    fields.nextAttemptAt || null,
+    claimed.scan_id,
+    claimed.source_id,
+    claimed.claim_id,
+  );
+}
+
+async function writeSourcePoll(env, claimed, fields) {
+  if (!claimed?.claim_id || !claimed.scan_id || !claimed.source_id) return false;
+  const result = await completeSourcePollStatement(env, claimed, fields).run();
   return Number(result?.meta?.changes) > 0;
 }
 
@@ -247,28 +253,137 @@ export function sourcePollRetryDelaySeconds(row) {
 
 export async function findActiveMayorRun(env, mayorId) {
   if (!mayorId) return null;
-  const task = await env.DB.prepare(
-    `SELECT job_id FROM search_job_tasks
-     WHERE mayor_id = ? AND status IN ('queued', 'running', 'waiting', 'retrying')
+  const lock = await env.DB.prepare(
+    `SELECT job_id, scan_id, kind, lock_key FROM desk_run_locks
+     WHERE lease_until > datetime('now')
+       AND (lock_key = ? OR lock_key = ?)
+     ORDER BY CASE WHEN lock_key = ? THEN 0 ELSE 1 END
      LIMIT 1`,
   )
-    .bind(mayorId)
+    .bind(deskLockKey(mayorId), ALL_OFFICES_LOCK, deskLockKey(mayorId))
     .first();
-  const poll = await env.DB.prepare(
-    `SELECT scan_id, job_id, source_id, status FROM scan_sources
-     WHERE mayor_id = ?
-       AND status IN ('queued', 'polling', 'retrying')
+  if (lock) {
+    return {
+      jobId: lock.job_id || null,
+      scanId: lock.scan_id || null,
+      sourceId: null,
+      status: lock.kind || "running",
+      lockKey: lock.lock_key,
+    };
+  }
+  return null;
+}
+
+export async function readLiveDeskLock(env, mayorId = null) {
+  const lockKey = deskLockKey(mayorId);
+  const isAll = lockKey === ALL_OFFICES_LOCK ? 1 : 0;
+  return env.DB.prepare(
+    `SELECT * FROM desk_run_locks
+     WHERE lease_until > datetime('now')
+       AND (
+         lock_key = ?
+         OR lock_key = '${ALL_OFFICES_LOCK}'
+         OR (? = 1)
+       )
+     ORDER BY CASE WHEN lock_key = ? THEN 0 ELSE 1 END, claimed_at
      LIMIT 1`,
   )
-    .bind(mayorId)
+    .bind(lockKey, isAll, lockKey)
     .first();
-  if (!task && !poll) return null;
-  return {
-    jobId: task?.job_id || poll?.job_id || null,
-    scanId: poll?.scan_id || null,
-    sourceId: poll?.source_id || null,
-    status: poll?.status || task?.status || null,
-  };
+}
+
+/**
+ * حارس تشغيل ذري على مستوى صف القفل. لا SELECT ثم INSERT.
+ * تعارض weekly وmanual لنفس المكتب: reuse للتشغيل الحي.
+ */
+export async function claimDeskRun(env, { mayorId = null, kind, jobId = null, scanId = null } = {}) {
+  const lockKey = deskLockKey(mayorId);
+  const ownerId = crypto.randomUUID();
+  const isAll = lockKey === ALL_OFFICES_LOCK ? 1 : 0;
+  const row = await env.DB.prepare(
+    `INSERT INTO desk_run_locks (lock_key, owner_id, job_id, scan_id, kind, claimed_at, lease_until)
+     SELECT ?, ?, ?, ?, ?, datetime('now'), datetime('now', '+${DESK_RUN_LEASE_MINUTES} minutes')
+     WHERE NOT EXISTS (
+       SELECT 1 FROM desk_run_locks AS live
+       WHERE live.lease_until > datetime('now')
+         AND (
+           live.lock_key = ?
+           OR live.lock_key = '${ALL_OFFICES_LOCK}'
+           OR (? = 1 AND live.lock_key <> '${ALL_OFFICES_LOCK}')
+         )
+     )
+     ON CONFLICT(lock_key) DO UPDATE SET
+       owner_id = excluded.owner_id,
+       job_id = excluded.job_id,
+       scan_id = excluded.scan_id,
+       kind = excluded.kind,
+       claimed_at = excluded.claimed_at,
+       lease_until = excluded.lease_until
+     WHERE desk_run_locks.lease_until <= datetime('now')
+     RETURNING *`,
+  )
+    .bind(lockKey, ownerId, jobId, scanId, kind || "manual", lockKey, isAll)
+    .first();
+  if (row) return { acquired: true, reused: false, lock: row };
+  const existing = await readLiveDeskLock(env, mayorId);
+  if (existing) return { acquired: false, reused: true, lock: existing };
+  const retry = await env.DB.prepare(
+    `INSERT INTO desk_run_locks (lock_key, owner_id, job_id, scan_id, kind, claimed_at, lease_until)
+     SELECT ?, ?, ?, ?, ?, datetime('now'), datetime('now', '+${DESK_RUN_LEASE_MINUTES} minutes')
+     WHERE NOT EXISTS (
+       SELECT 1 FROM desk_run_locks AS live
+       WHERE live.lease_until > datetime('now')
+         AND (
+           live.lock_key = ?
+           OR live.lock_key = '${ALL_OFFICES_LOCK}'
+           OR (? = 1 AND live.lock_key <> '${ALL_OFFICES_LOCK}')
+         )
+     )
+     ON CONFLICT(lock_key) DO UPDATE SET
+       owner_id = excluded.owner_id,
+       job_id = excluded.job_id,
+       scan_id = excluded.scan_id,
+       kind = excluded.kind,
+       claimed_at = excluded.claimed_at,
+       lease_until = excluded.lease_until
+     WHERE desk_run_locks.lease_until <= datetime('now')
+     RETURNING *`,
+  )
+    .bind(lockKey, ownerId, jobId, scanId, kind || "manual", lockKey, isAll)
+    .first();
+  if (retry) return { acquired: true, reused: false, lock: retry };
+  const again = await readLiveDeskLock(env, mayorId);
+  return { acquired: false, reused: Boolean(again), lock: again || null };
+}
+
+export async function releaseDeskRun(env, { mayorId = null, jobId = null, scanId = null } = {}) {
+  if (!env?.DB) return false;
+  const lockKey = deskLockKey(mayorId);
+  const mayorRelease = await env.DB.prepare(
+    `DELETE FROM desk_run_locks
+     WHERE lock_key = ?
+       AND (? IS NULL OR job_id = ? OR scan_id = ?)`,
+  )
+    .bind(lockKey, jobId || scanId, jobId, scanId)
+    .run();
+  const allRelease = scanId
+    ? await env.DB.prepare(
+        `DELETE FROM desk_run_locks
+         WHERE lock_key = '${ALL_OFFICES_LOCK}'
+           AND scan_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM scan_sources
+             WHERE scan_id = ? AND status NOT IN ('polled', 'failed')
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM candidates
+             WHERE scan_id = ? AND fetch_status IN ('pending', 'retry', 'working')
+           )`,
+      )
+        .bind(scanId, scanId, scanId)
+        .run()
+    : { meta: { changes: 0 } };
+  return Number(mayorRelease?.meta?.changes || 0) + Number(allRelease?.meta?.changes || 0) > 0;
 }
 
 export async function dueSourcePolls(env, limit = 40) {
@@ -358,10 +473,8 @@ export async function claimCandidateFetch(env, candidateId) {
   return row || null;
 }
 
-export async function completeCandidateFetch(env, claimed, fields) {
-  const claimId = claimed?.fetch_claim_id;
-  if (!claimId || !claimed?.id) return false;
-  const result = await env.DB.prepare(
+export function completeCandidateFetchStatement(env, claimed, fields) {
+  return env.DB.prepare(
     `UPDATE candidates
      SET fetch_status = ?,
          skip_reason = ?,
@@ -372,22 +485,28 @@ export async function completeCandidateFetch(env, claimed, fields) {
          canonical_url = COALESCE(?, canonical_url),
          last_error = ?,
          fetch_after = NULL,
-         fetched_at = datetime('now')
+         fetched_at = datetime('now'),
+         fetch_claim_id = NULL,
+         fetch_claimed_at = NULL
      WHERE id = ? AND fetch_claim_id = ?`,
-  )
-    .bind(
-      fields.fetch_status,
-      fields.skip_reason || null,
-      fields.stage || STAGES.ARTICLE_FETCH,
-      fields.http_status ?? null,
-      fields.etag || null,
-      fields.last_modified || null,
-      fields.canonical_url || null,
-      fields.last_error || null,
-      claimed.id,
-      claimId,
-    )
-    .run();
+  ).bind(
+    fields.fetch_status,
+    fields.skip_reason || null,
+    fields.stage || STAGES.ARTICLE_FETCH,
+    fields.http_status ?? null,
+    fields.etag || null,
+    fields.last_modified || null,
+    fields.canonical_url || null,
+    fields.last_error || null,
+    claimed.id,
+    claimed.fetch_claim_id,
+  );
+}
+
+export async function completeCandidateFetch(env, claimed, fields) {
+  const claimId = claimed?.fetch_claim_id;
+  if (!claimId || !claimed?.id) return false;
+  const result = await completeCandidateFetchStatement(env, claimed, fields).run();
   return Number(result?.meta?.changes) > 0;
 }
 
@@ -403,7 +522,9 @@ export async function recoverCandidateAfterException(env, claimed, error) {
            skip_reason = 'exception',
            last_error = ?,
            fetch_after = NULL,
-           fetched_at = datetime('now')
+           fetched_at = datetime('now'),
+           fetch_claim_id = NULL,
+           fetch_claimed_at = NULL
        WHERE id = ? AND fetch_claim_id = ?`,
     )
       .bind(message, claimed.id, claimId)
@@ -457,4 +578,35 @@ export async function pendingCandidateBacklog(env, mayorId = null, scanId = null
     nextAt: row?.next_at || null,
     ids: (results || []).map((item) => item.id),
   };
+}
+
+export async function groupCandidatesForEnqueue(env, ids) {
+  if (!ids?.length) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const { results } = await env.DB.prepare(
+    `SELECT c.id, c.mayor_id, c.scan_id,
+            (
+              SELECT ss.job_id FROM scan_sources AS ss
+              WHERE ss.scan_id = c.scan_id AND ss.source_id = c.source_id
+              LIMIT 1
+            ) AS job_id
+     FROM candidates AS c
+     WHERE c.id IN (${placeholders})`,
+  )
+    .bind(...ids)
+    .all();
+  const groups = new Map();
+  for (const row of results || []) {
+    const key = `${row.mayor_id || ""}|${row.scan_id || ""}|${row.job_id || ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        mayorId: row.mayor_id || null,
+        scanId: row.scan_id || null,
+        jobId: row.job_id || null,
+        ids: [],
+      });
+    }
+    groups.get(key).ids.push(row.id);
+  }
+  return [...groups.values()];
 }
