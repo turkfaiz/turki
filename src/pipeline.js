@@ -20,8 +20,16 @@ import {
 } from "./sourceDocuments.js";
 import { discoverSource } from "./discovery.js";
 import { STAGES } from "./discovery.js";
+import {
+  CANDIDATE_FETCH_LEASE_MINUTES,
+  claimCandidateFetch,
+  completeCandidateFetch,
+  pendingCandidateBacklog,
+  recoverCandidateAfterException,
+} from "./leases.js";
 
 export { STAGES };
+export { pendingCandidateBacklog };
 
 export function stampBrief(mayor, _row, status) {
   if (status !== "inbox") {
@@ -212,95 +220,99 @@ async function ingestRow(env, mayor, scanId, row, seen) {
 }
 
 export async function fetchCandidate(env, candidate, extra = {}) {
-  const mayor = await resolveMayor(env, candidate.mayor_id);
-  if (!mayor) {
-    await markCandidate(env, candidate.id, {
-      fetch_status: "failed",
-      skip_reason: "mayor_not_found",
-      stage: STAGES.ARTICLE_FETCH,
-    });
-    return { opened: false, kind: "failed" };
-  }
-  const claimed = await env.DB.prepare(
-    `UPDATE candidates
-     SET fetch_status = 'working', attempts = IFNULL(attempts, 0) + 1, fetched_at = datetime('now')
-     WHERE id = ? AND fetch_status IN ('pending', 'retry')`,
-  )
-    .bind(candidate.id)
-    .run();
-  if (!Number(claimed?.meta?.changes)) return { opened: false, kind: "skipped_claimed" };
+  const claimed = await claimCandidateFetch(env, candidate.id);
+  if (!claimed) return { opened: false, kind: "skipped_claimed" };
 
-  const article = await readArticle(candidate.url, {
-    mayorId: mayor.id,
-    fetch: extra.fetch,
-    etag: candidate.etag,
-    lastModified: candidate.last_modified,
-  });
-  if (article?.notModified) {
-    await markCandidate(env, candidate.id, {
-      fetch_status: "skipped",
-      skip_reason: "not_modified",
-      stage: STAGES.ARTICLE_FETCH,
-      http_status: 304,
-    });
-    return { opened: false, kind: "not_modified" };
-  }
-  if (!article || article.error) {
-    const reason = article?.error || "unverified";
-    await markCandidate(env, candidate.id, {
-      fetch_status: reason === "canonical_outside_registry" ? "skipped" : "failed",
-      skip_reason: reason,
-      stage: STAGES.ARTICLE_FETCH,
-      http_status: article?.httpStatus || null,
-    });
-    return { opened: false, kind: reason === "canonical_outside_registry" ? "untrusted" : "unverified" };
-  }
+  try {
+    if (typeof extra.afterClaim === "function") await extra.afterClaim(claimed);
+    const mayor = await resolveMayor(env, claimed.mayor_id || candidate.mayor_id);
+    if (!mayor) {
+      await completeCandidateFetch(env, claimed, {
+        fetch_status: "failed",
+        skip_reason: "mayor_not_found",
+        stage: STAGES.ARTICLE_FETCH,
+        last_error: "mayor_not_found",
+      });
+      return { opened: false, kind: "failed" };
+    }
 
-  const preview = classifyItem({ ...candidate, url: article.url }, mayor);
-  if (preview.exclude_reason && preview.publisher_tier == null && candidate.source !== "official") {
-    await markCandidate(env, candidate.id, {
-      fetch_status: "skipped",
-      skip_reason: "untrusted",
-      stage: STAGES.RELEVANCE_CHECK,
-      http_status: article.httpStatus || 200,
+    const article = await readArticle(claimed.url || candidate.url, {
+      mayorId: mayor.id,
+      fetch: extra.fetch,
+      etag: claimed.etag || candidate.etag,
+      lastModified: claimed.last_modified || candidate.last_modified,
     });
-    return { opened: true, kind: "untrusted" };
-  }
+    if (article?.notModified) {
+      await completeCandidateFetch(env, claimed, {
+        fetch_status: "skipped",
+        skip_reason: "not_modified",
+        stage: STAGES.ARTICLE_FETCH,
+        http_status: 304,
+      });
+      return { opened: false, kind: "not_modified" };
+    }
+    if (!article || article.error) {
+      const reason = article?.error || "unverified";
+      await completeCandidateFetch(env, claimed, {
+        fetch_status: reason === "canonical_outside_registry" ? "skipped" : "failed",
+        skip_reason: reason,
+        stage: STAGES.ARTICLE_FETCH,
+        http_status: article?.httpStatus || null,
+        last_error: reason,
+      });
+      return { opened: false, kind: reason === "canonical_outside_registry" ? "untrusted" : "unverified" };
+    }
 
-  const judged = judgeArticle(article, mayor, {
-    ...candidate,
-    source: sourceById(candidate.source_id)?.tier === 0 ? "official" : "approved_page",
-    language: mayor.native_lang,
-    publisher_url: article.url,
-  });
-  if (!judged.ok) {
-    await markCandidate(env, candidate.id, {
-      fetch_status: "skipped",
-      skip_reason: judged.reason,
-      stage: STAGES.RELEVANCE_CHECK,
+    const preview = classifyItem({ ...candidate, ...claimed, url: article.url }, mayor);
+    if (preview.exclude_reason && preview.publisher_tier == null && candidate.source !== "official") {
+      await completeCandidateFetch(env, claimed, {
+        fetch_status: "skipped",
+        skip_reason: "untrusted",
+        stage: STAGES.RELEVANCE_CHECK,
+        http_status: article.httpStatus || 200,
+      });
+      return { opened: true, kind: "untrusted" };
+    }
+
+    const judged = judgeArticle(article, mayor, {
+      ...candidate,
+      ...claimed,
+      source: sourceById(claimed.source_id || candidate.source_id)?.tier === 0 ? "official" : "approved_page",
+      language: mayor.native_lang,
+      publisher_url: article.url,
+    });
+    if (!judged.ok) {
+      await completeCandidateFetch(env, claimed, {
+        fetch_status: "skipped",
+        skip_reason: judged.reason,
+        stage: STAGES.RELEVANCE_CHECK,
+        http_status: article.httpStatus || 200,
+        etag: article.etag,
+        last_modified: article.lastModified,
+      });
+      await bumpSourceReads(env, claimed.source_id || candidate.source_id, { relevant: false });
+      return { opened: true, kind: judged.reason };
+    }
+
+    const seen = extra.seen || new Set();
+    const ingested = await ingestRow(env, mayor, claimed.scan_id || candidate.scan_id, judged.row, seen);
+    await completeCandidateFetch(env, claimed, {
+      fetch_status: "fetched",
+      skip_reason: ingested.kind === "duplicate" ? "duplicate" : null,
+      stage: ingested.kind === "found" ? STAGES.AI_BRIEF : STAGES.DEDUPLICATION,
       http_status: article.httpStatus || 200,
       etag: article.etag,
       last_modified: article.lastModified,
+      canonical_url: judged.row.url,
     });
-    await bumpSourceReads(env, candidate.source_id, { relevant: false });
-    return { opened: true, kind: judged.reason };
+    await bumpSourceReads(env, claimed.source_id || candidate.source_id, {
+      relevant: ingested.kind === "found" && !ingested.excluded,
+    });
+    return { opened: true, kind: ingested.kind, excluded: ingested.excluded, changed: ingested.changed };
+  } catch (error) {
+    const recovered = await recoverCandidateAfterException(env, claimed, error);
+    return { opened: false, kind: recovered.kind };
   }
-
-  const seen = extra.seen || new Set();
-  const ingested = await ingestRow(env, mayor, candidate.scan_id, judged.row, seen);
-  await markCandidate(env, candidate.id, {
-    fetch_status: "fetched",
-    skip_reason: ingested.kind === "duplicate" ? "duplicate" : null,
-    stage: ingested.kind === "found" ? STAGES.AI_BRIEF : STAGES.DEDUPLICATION,
-    http_status: article.httpStatus || 200,
-    etag: article.etag,
-    last_modified: article.lastModified,
-    canonical_url: judged.row.url,
-  });
-  await bumpSourceReads(env, candidate.source_id, {
-    relevant: ingested.kind === "found" && !ingested.excluded,
-  });
-  return { opened: true, kind: ingested.kind, excluded: ingested.excluded, changed: ingested.changed };
 }
 
 async function bumpSourceReads(env, sourceId, { relevant }) {
@@ -315,36 +327,25 @@ async function bumpSourceReads(env, sourceId, { relevant }) {
     .run();
 }
 
-async function markCandidate(env, id, fields) {
-  await env.DB.prepare(
-    `UPDATE candidates
-     SET fetch_status = ?, skip_reason = ?, stage = ?,
-         http_status = COALESCE(?, http_status),
-         etag = COALESCE(?, etag),
-         last_modified = COALESCE(?, last_modified),
-         canonical_url = COALESCE(?, canonical_url),
-         fetched_at = datetime('now')
-     WHERE id = ?`,
+const CANDIDATE_CLAIMABLE_SQL = `(
+  (
+    fetch_status IN ('pending', 'retry')
+    AND (fetch_after IS NULL OR fetch_after <= datetime('now'))
+  ) OR (
+    fetch_status = 'working'
+    AND (fetch_claimed_at IS NULL OR fetch_claimed_at <= datetime('now', '-${CANDIDATE_FETCH_LEASE_MINUTES} minutes'))
+    AND (fetch_after IS NULL OR fetch_after <= datetime('now'))
   )
-    .bind(
-      fields.fetch_status,
-      fields.skip_reason || null,
-      fields.stage || STAGES.ARTICLE_FETCH,
-      fields.http_status ?? null,
-      fields.etag || null,
-      fields.last_modified || null,
-      fields.canonical_url || null,
-      id,
-    )
-    .run();
-}
+)`;
 
 export async function fetchCandidateBatch(env, { ids = [], mayorId = null, limit = ARTICLE_FETCH_BATCH, fetch } = {}) {
   let rows = [];
   if (ids.length) {
     const placeholders = ids.map(() => "?").join(", ");
     const result = await env.DB.prepare(
-      `SELECT * FROM candidates WHERE id IN (${placeholders}) AND fetch_status IN ('pending', 'retry')`,
+      `SELECT * FROM candidates
+       WHERE id IN (${placeholders})
+         AND ${CANDIDATE_CLAIMABLE_SQL}`,
     )
       .bind(...ids)
       .all();
@@ -352,7 +353,7 @@ export async function fetchCandidateBatch(env, { ids = [], mayorId = null, limit
   } else {
     const result = await env.DB.prepare(
       `SELECT * FROM candidates
-       WHERE fetch_status IN ('pending', 'retry')
+       WHERE ${CANDIDATE_CLAIMABLE_SQL}
          AND (? IS NULL OR mayor_id = ?)
        ORDER BY discovered_at
        LIMIT ?`,
@@ -393,15 +394,8 @@ export async function fetchCandidateBatch(env, { ids = [], mayorId = null, limit
 }
 
 export async function pendingCandidateCount(env, mayorId = null, scanId = null) {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM candidates
-     WHERE fetch_status IN ('pending', 'retry', 'working')
-       AND (? IS NULL OR mayor_id = ?)
-       AND (? IS NULL OR scan_id = ?)`,
-  )
-    .bind(mayorId, mayorId, scanId, scanId)
-    .first();
-  return Number(row?.n) || 0;
+  const backlog = await pendingCandidateBacklog(env, mayorId, scanId);
+  return backlog.pending;
 }
 
 export async function pollOneSource(env, { sourceId, mayorId, scanId = null, query = "", fetch } = {}) {
@@ -589,15 +583,6 @@ function emptyScanResult(scanId, errors) {
 }
 
 export async function pendingFetchIds(env, { mayorId, scanId, limit = ARTICLE_FETCH_BATCH } = {}) {
-  const { results } = await env.DB.prepare(
-    `SELECT id FROM candidates
-     WHERE fetch_status IN ('pending', 'retry')
-       AND (? IS NULL OR mayor_id = ?)
-       AND (? IS NULL OR scan_id = ?)
-     ORDER BY discovered_at
-     LIMIT ?`,
-  )
-    .bind(mayorId || null, mayorId || null, scanId || null, scanId || null, limit)
-    .all();
-  return (results || []).map((row) => row.id);
+  const backlog = await pendingCandidateBacklog(env, mayorId || null, scanId || null, { limit });
+  return backlog.ids;
 }

@@ -251,3 +251,20 @@ test("verify claim columns are added to existing brief_versions without deleting
   assert.deepEqual(snapshotProtected(db), before);
   assert.equal(db.one(`SELECT COUNT(*) AS n FROM brief_versions WHERE id = 'ver-passed'`).n, 1);
 });
+
+test("source and candidate lease columns are added without deleting rows", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  seedPopulatedDesk(db);
+  const before = snapshotProtected(db);
+  db.exec(`UPDATE meta SET v = 'bootstrap-v19' WHERE k = 'bootstrap_version'`);
+  await ensureDb(envWith(db.reopen()));
+  const scanCols = new Set(db.query(`PRAGMA table_info(scan_sources)`).map((c) => c.name));
+  const candCols = new Set(db.query(`PRAGMA table_info(candidates)`).map((c) => c.name));
+  assert.ok(scanCols.has("claim_id"));
+  assert.ok(scanCols.has("next_attempt_at"));
+  assert.ok(candCols.has("fetch_claim_id"));
+  assert.ok(candCols.has("fetch_after"));
+  assert.deepEqual(snapshotProtected(db), before);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM candidates WHERE id = 'cand-1'`).n, 1);
+});

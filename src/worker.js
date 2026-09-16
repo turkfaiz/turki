@@ -10,6 +10,7 @@ import { runScan, sourceStatus } from "./collect.js";
 import {
   enabledSources,
   fetchCandidateBatch,
+  pendingCandidateBacklog,
   pendingCandidateCount,
   pendingFetchIds,
   pollOneSource,
@@ -64,6 +65,19 @@ import { PUBLISHERS } from "./publishers.js";
 import { reviewInbox } from "./reviewAgent.js";
 import { REASON } from "./reasons.js";
 import { anyAiKey, aiBriefEnabled } from "./aiProviders.js";
+import {
+  applyLeaseMigration,
+  claimSourcePoll,
+  completeSourcePoll,
+  deferSourcePoll,
+  dueSourcePolls,
+  findActiveMayorRun,
+  isPermanentSourceFailure,
+  isTerminalSourceStatus,
+  MAX_SOURCE_POLL_ATTEMPTS,
+  readScanSource,
+  sourcePollRetryDelaySeconds,
+} from "./leases.js";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS mayors (
@@ -223,7 +237,11 @@ const SCHEMA_STATEMENTS = [
     etag TEXT,
     last_modified TEXT,
     fetched_at TEXT,
-    attempts INTEGER DEFAULT 0
+    attempts INTEGER DEFAULT 0,
+    fetch_claim_id TEXT,
+    fetch_claimed_at TEXT,
+    fetch_after TEXT,
+    last_error TEXT
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_source_url ON candidates(source_id, url)`,
   `CREATE INDEX IF NOT EXISTS idx_candidates_fetch ON candidates(fetch_status, mayor_id)`,
@@ -244,6 +262,11 @@ const SCHEMA_STATEMENTS = [
     job_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     detail TEXT,
+    claim_id TEXT,
+    claimed_at TEXT,
+    attempts INTEGER DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
     PRIMARY KEY (scan_id, source_id)
   )`,
   `CREATE TABLE IF NOT EXISTS ai_budget (
@@ -269,7 +292,7 @@ const SCHEMA_STATEMENTS = [
 ];
 
 const bootstrapped = new WeakSet();
-const BOOTSTRAP_VERSION = "bootstrap-v19";
+const BOOTSTRAP_VERSION = "bootstrap-v20";
 
 async function upsertRows(env, prefix, rows, width, chunkSize, conflictClause = "") {
   const tuple = `(${Array.from({ length: width }, () => "?").join(", ")})`;
@@ -352,6 +375,7 @@ export async function ensureDb(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
   const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
   if (stamp?.v === BOOTSTRAP_VERSION && (await schemaComplete(env))) {
+    await applyLeaseMigration(env);
     bootstrapped.add(env.DB);
     return;
   }
@@ -403,6 +427,7 @@ export async function ensureDb(env) {
   await migrateItems(env);
   await migrateAiProviderBudget(env);
   await migrateVersions(env);
+  await applyLeaseMigration(env);
   await applyDeskLaneMigration(env, { dryRun: false });
   await env.DB.prepare(`INSERT OR REPLACE INTO meta (k, v) VALUES ('bootstrap_version', ?)`)
     .bind(BOOTSTRAP_VERSION)
@@ -962,8 +987,9 @@ async function enqueueSourcePolls(env, { mayorIds, type, query = "", jobId = nul
       continue;
     }
     const insert = env.DB.prepare(
-      `INSERT OR REPLACE INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail)
-       VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر')`,
+      `INSERT INTO scan_sources (scan_id, source_id, mayor_id, job_id, status, detail, attempts)
+       VALUES (?, ?, ?, ?, 'queued', 'بانتظار فحص المصدر', 0)
+       ON CONFLICT(scan_id, source_id) DO NOTHING`,
     );
     await env.DB.batch(
       sources.map((source) => insert.bind(scanId, source.id, mayorId, jobId)),
@@ -1135,7 +1161,7 @@ export async function completeMayorDesk(env, { mayorId, jobId, scanId }) {
   };
 }
 
-async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
+export async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
   const polls = await env.DB.prepare(
     `SELECT COUNT(*) AS n,
             SUM(CASE WHEN status IN ('polled', 'failed') THEN 1 ELSE 0 END) AS done
@@ -1144,24 +1170,39 @@ async function maybeFinishMayor(env, { mayorId, jobId, scanId }) {
     .bind(scanId, mayorId)
     .first();
   if (!polls?.n || Number(polls.done) < Number(polls.n)) return { done: false };
-  const pending = await pendingCandidateCount(env, mayorId, scanId);
-  if (pending > 0) {
-    const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH * 8 });
-    if (env.SCAN_QUEUE) await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
-    else await fetchCandidateBatch(env, { ids, limit: INLINE_ARTICLE_FETCH_LIMIT });
-    return { done: false, pending };
+  const backlog = await pendingCandidateBacklog(env, mayorId, scanId, {
+    limit: ARTICLE_FETCH_BATCH * 8,
+  });
+  if (backlog.pending > 0) {
+    if (backlog.ids.length) {
+      if (env.SCAN_QUEUE) await enqueueArticleFetches(env, { ids: backlog.ids, mayorId, scanId, jobId });
+      else await fetchCandidateBatch(env, { ids: backlog.ids, limit: INLINE_ARTICLE_FETCH_LIMIT });
+    }
+    return { done: false, pending: backlog.pending, nextAt: backlog.nextAt };
   }
   await completeMayorDesk(env, { mayorId, jobId, scanId });
   return { done: true };
 }
 
-async function processSourcePollMessage(env, message) {
+export async function processSourcePollMessage(env, message, extra = {}) {
   const body = message.body || {};
   const { mayorId, sourceId, scanId, jobId, query } = body;
-  if (!mayorId || !sourceId) {
+  if (!mayorId || !sourceId || !scanId) {
     message.ack();
-    return;
+    return { kind: "ignored" };
   }
+
+  const claimed = await claimSourcePoll(env, { scanId, sourceId, mayorId });
+  if (!claimed) {
+    const row = await readScanSource(env, scanId, sourceId);
+    if (isTerminalSourceStatus(row?.status)) {
+      message.ack();
+      return { kind: "noop", status: row.status };
+    }
+    message.retry({ delaySeconds: sourcePollRetryDelaySeconds(row) });
+    return { kind: "retry_later", status: row?.status || "missing" };
+  }
+
   if (jobId) {
     await env.DB.prepare(
       `UPDATE search_job_tasks
@@ -1172,19 +1213,32 @@ async function processSourcePollMessage(env, message) {
       .bind(`يفحص المصدر ${sourceId}`, jobId, mayorId)
       .run();
   }
-  await env.DB.prepare(
-    `UPDATE scan_sources SET status = 'polling', detail = 'جاري فحص المصدر' WHERE scan_id = ? AND source_id = ?`,
-  )
-    .bind(scanId, sourceId)
-    .run();
+
+  const finishTemp = async (error) => {
+    const lastError = String(error?.message || error || claimed.last_error || "poll_failed").slice(0, 300);
+    if (Number(claimed.attempts) >= MAX_SOURCE_POLL_ATTEMPTS || isPermanentSourceFailure({ fail_reason: lastError })) {
+      await completeSourcePoll(env, claimed, {
+        status: "failed",
+        detail: lastError.slice(0, 160),
+        lastError,
+      });
+      await maybeFinishMayor(env, { mayorId, jobId, scanId });
+      message.ack();
+      return { kind: "failed", lastError };
+    }
+    await deferSourcePoll(env, claimed, { lastError });
+    message.retry({ delaySeconds: sourcePollRetryDelaySeconds({ attempts: claimed.attempts }) });
+    return { kind: "retrying", lastError };
+  };
+
   try {
-    const polled = await pollOneSource(env, { sourceId, mayorId, scanId, query });
-    await recordSourceHealth(env, [{ ...polled.health, id: sourceId }]);
-    await env.DB.prepare(
-      `UPDATE scan_sources SET status = 'polled', detail = ? WHERE scan_id = ? AND source_id = ?`,
-    )
-      .bind(String(polled.health.status || "ok").slice(0, 160), scanId, sourceId)
-      .run();
+    const polled = await pollOneSource(env, {
+      sourceId,
+      mayorId,
+      scanId,
+      query,
+      fetch: extra.fetch,
+    });
     if (polled.newIds?.length && env.SCAN_QUEUE) {
       await enqueueArticleFetches(env, {
         ids: polled.newIds,
@@ -1193,22 +1247,44 @@ async function processSourcePollMessage(env, message) {
         jobId,
       });
     } else if (polled.newIds?.length) {
-      await fetchCandidateBatch(env, { ids: polled.newIds, limit: ARTICLE_FETCH_BATCH });
+      await fetchCandidateBatch(env, { ids: polled.newIds, limit: ARTICLE_FETCH_BATCH, fetch: extra.fetch });
     }
-    await maybeFinishMayor(env, { mayorId, jobId, scanId });
-    message.ack();
+
+    if (polled.health?.ok) {
+      const wrote = await completeSourcePoll(env, claimed, {
+        status: "polled",
+        detail: String(polled.health.status || "ok").slice(0, 160),
+      });
+      if (wrote) await recordSourceHealth(env, [{ ...polled.health, id: sourceId }]);
+      await maybeFinishMayor(env, { mayorId, jobId, scanId });
+      message.ack();
+      return { kind: "polled", wrote };
+    }
+
+    const failReason = polled.health?.fail_reason || polled.health?.status || "poll_failed";
+    if (
+      isPermanentSourceFailure(polled.health) ||
+      Number(claimed.attempts) >= MAX_SOURCE_POLL_ATTEMPTS
+    ) {
+      await completeSourcePoll(env, claimed, {
+        status: "failed",
+        detail: String(failReason).slice(0, 160),
+        lastError: failReason,
+      });
+      await recordSourceHealth(env, [{ ...polled.health, id: sourceId }]);
+      await maybeFinishMayor(env, { mayorId, jobId, scanId });
+      message.ack();
+      return { kind: "failed", lastError: failReason };
+    }
+    await deferSourcePoll(env, claimed, { lastError: failReason });
+    message.retry({ delaySeconds: sourcePollRetryDelaySeconds({ attempts: claimed.attempts }) });
+    return { kind: "retrying", lastError: failReason };
   } catch (error) {
-    await env.DB.prepare(
-      `UPDATE scan_sources SET status = 'failed', detail = ? WHERE scan_id = ? AND source_id = ?`,
-    )
-      .bind(String(error.message || error).slice(0, 160), scanId, sourceId)
-      .run();
-    await maybeFinishMayor(env, { mayorId, jobId, scanId });
-    message.ack();
+    return finishTemp(error);
   }
 }
 
-async function processArticleFetchMessage(env, message) {
+export async function processArticleFetchMessage(env, message) {
   const body = message.body || {};
   const { mayorId, scanId, jobId, candidateIds } = body;
   if (jobId && mayorId) {
@@ -1226,11 +1302,12 @@ async function processArticleFetchMessage(env, message) {
       mayorId,
       limit: ARTICLE_FETCH_BATCH,
     });
-    const pending = await pendingCandidateCount(env, mayorId, scanId);
-    if (pending > 0 && env.SCAN_QUEUE) {
-      const ids = await pendingFetchIds(env, { mayorId, scanId, limit: ARTICLE_FETCH_BATCH });
-      await enqueueArticleFetches(env, { ids, mayorId, scanId, jobId });
-    } else {
+    const backlog = await pendingCandidateBacklog(env, mayorId, scanId, { limit: ARTICLE_FETCH_BATCH });
+    if (backlog.pending > 0 && env.SCAN_QUEUE) {
+      if (backlog.ids.length) {
+        await enqueueArticleFetches(env, { ids: backlog.ids, mayorId, scanId, jobId });
+      }
+    } else if (backlog.pending <= 0) {
       await maybeFinishMayor(env, { mayorId, jobId, scanId });
     }
     message.ack();
@@ -1384,6 +1461,17 @@ async function refreshSearchJobStatus(env, jobId) {
 
 async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
   if (!env.SCAN_QUEUE) throw new Error("scan_queue_unavailable");
+  if (mayorId) {
+    const active = await findActiveMayorRun(env, mayorId);
+    if (active) {
+      return {
+        jobId: active.jobId,
+        queued: 0,
+        scanId: active.scanId,
+        reused: true,
+      };
+    }
+  }
   const catalog = await listMayors(env);
   const targets = mayorId ? catalog.filter((mayor) => mayor.id === mayorId) : catalog;
   if (!targets.length) throw new Error("mayor_not_found");
@@ -1450,6 +1538,33 @@ async function processBriefContinuation(env, message) {
   } catch {
     message.retry({ delaySeconds: 30 });
   }
+}
+
+async function requeueDueSourcePolls(env) {
+  if (!env.SCAN_QUEUE) return 0;
+  const due = await dueSourcePolls(env);
+  if (!due.length) return 0;
+  const messages = [];
+  for (const row of due) {
+    const scan = await env.DB.prepare(`SELECT query FROM scans WHERE id = ?`)
+      .bind(row.scan_id)
+      .first();
+    messages.push({
+      body: {
+        type: "source_poll",
+        mayorId: row.mayor_id,
+        sourceId: row.source_id,
+        scanId: row.scan_id,
+        jobId: row.job_id || null,
+        query: scan?.query || "",
+      },
+      contentType: "json",
+    });
+  }
+  for (let i = 0; i < messages.length; i += 100) {
+    await env.SCAN_QUEUE.sendBatch(messages.slice(i, i + 100));
+  }
+  return messages.length;
 }
 
 async function processQueuedSearch(env, message) {
@@ -2406,6 +2521,12 @@ async function handleApi(request, env) {
   return json({ error: "not_found" }, 404);
 }
 
+export {
+  enqueueManualSearch,
+  enqueueSourcePolls,
+  requeueDueSourcePolls,
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -2443,6 +2564,7 @@ export default {
         if (leftoverFetch.length && env.SCAN_QUEUE) {
           await enqueueArticleFetches(env, { ids: leftoverFetch });
         }
+        await requeueDueSourcePolls(env);
         await drainBriefs(env);
         const leftover = await briefBacklog(env);
         const verify = await verificationBacklog(env);
