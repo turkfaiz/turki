@@ -40,7 +40,7 @@ function loadPageScript() {
   const bootstrap = code.indexOf("loadMayors().then");
   if (bootstrap !== -1) code = code.slice(0, bootstrap);
   const exported = new Function(
-        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, deskHeading };`,
+        `${code}\nreturn { renderDiagnostics, briefErrorReason, briefErrorBox, sourceTitle, renderProviderLanes, toolChip, toolStateLabel, renderSettings, displayBudget, deskHeading, sourceLabel, laneAfterSearch };`,
   )();
   return { ...exported, element };
 }
@@ -477,4 +477,17 @@ test("the desk splits reading, verifying, decision, and attention into separate 
     "خبر قيد القراءة",
   );
   assert.equal(deskHeading({ status: "inbox", desk_lane: "attention_required" }), "يحتاج تدخلاً");
+});
+
+test("the shell does not hardcode twelve offices or advertise search engines", () => {
+  const html = fs.readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /كل المكاتب \(12\)/);
+  assert.doesNotMatch(html, /12 selected offices/);
+  assert.match(html, /id="mast-offices"/);
+  const { sourceLabel, laneAfterSearch } = loadPageScript();
+  assert.equal(sourceLabel("google_news"), "مصدر قديم خارج السجل");
+  assert.equal(sourceLabel("official"), "رسمي");
+  assert.equal(laneAfterSearch({ reading: 3, decision_ready: 2 }), "reading");
+  assert.equal(laneAfterSearch({ reading: 0, verifying: 0, attention_required: 4, decision_ready: 1 }), "attention_required");
+  assert.equal(laneAfterSearch({ reading: 0, verifying: 0, attention_required: 0, decision_ready: 2 }), "decision_ready");
 });
