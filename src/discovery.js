@@ -2,7 +2,7 @@
  * اكتشاف مصدر واحد: RSS ثم الغرفة ثم Sitemap/API ثم بحث داخلي مختبر ثم المتصفح.
  * عدم وجود خبر جديد ليس عطلًا. فشل الاتصال أو فساد التغذية أو توقفها ينقل للاستراتيجية التالية.
  */
-import { parseDate } from "./time.js";
+import { isWithinWeek, parseDate } from "./time.js";
 import { parseFeed } from "./rss.js";
 import { extractArticleLinks, inspectListingPage, parseWpJson, materializeHashParams } from "./newsroom.js";
 import { childSitemaps, isSitemapIndex, parseSitemap } from "./sitemap.js";
@@ -96,8 +96,15 @@ async function fetchListing(url, mayorId, state, extra = {}) {
   });
 }
 
+function isDatedThisWeek(row) {
+  const dated = parseDate(row.published_at);
+  return Boolean(dated) && isWithinWeek(dated) === true;
+}
+
 function filterApproved(rows, mayorId) {
-  return rows.filter((row) => row.url && isApprovedUrl(row.url, mayorId));
+  return rows.filter(
+    (row) => row.url && isApprovedUrl(row.url, mayorId) && isDatedThisWeek(row),
+  );
 }
 
 async function runRss(strategy, source, mayor, state, extra) {
@@ -479,7 +486,12 @@ export async function discoverSource(source, mayor, extra = {}) {
   health.items = leftover.length;
   health.discovered = leftover.length;
   health.last_discovered_url = leftover[0]?.url || "";
-  if (leftover.length && retainedStatus) health.status = retainedStatus;
+  /**
+   * تغذية متوقفة تبقى عطل مصدر حتى لو أسقطنا روابطها لأنها خارج الأسبوع.
+   * إسقاط الصفوف يمنع الكتابة، لا يحوّل العطل إلى empty_parse.
+   */
+  if (retainedStatus) health.status = retainedStatus;
+
   health.ms = Date.now() - started;
   health.requests = state.requests;
   return { source, rows: leftover, health };

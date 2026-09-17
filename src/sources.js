@@ -384,6 +384,9 @@ export const SOURCE_POLL_MAX_REQUESTS = 6;
 export const ARTICLE_FETCH_BATCH = 3;
 export const INLINE_ARTICLE_FETCH_LIMIT = 12;
 export const FEED_STALE_DAYS = 21;
+/** سقف كتابة لكل فحص مصدر: الأرشيف بلا تاريخ كان يفرّغ Sitemap في D1. */
+export const MAX_CANDIDATES_PER_SOURCE_POLL = 25;
+export const MAX_PENDING_CANDIDATES_PER_SOURCE = 40;
 
 const VERIFIED_AT_CURATION = new Set([
   "turin:comune.torino.it",
