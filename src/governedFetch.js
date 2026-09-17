@@ -113,14 +113,16 @@ function header(headers, name) {
 export async function governedFetch(url, opts = {}) {
   const fetchImpl = opts.fetch || globalThis.fetch;
   const mayorId = opts.mayorId || null;
+  const extraSources = [opts.source, ...(opts.extraSources || [])].filter(Boolean);
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const maxRedirects = opts.maxRedirects ?? MAX_REDIRECTS;
+  const allowed = (href) => !mayorId || isApprovedUrl(href, mayorId, extraSources);
   if (!isPublicHttpUrl(url)) {
     const error = new Error("blocked_host");
     error.code = "blocked_host";
     throw error;
   }
-  if (mayorId && !isApprovedUrl(url, mayorId)) {
+  if (!allowed(url)) {
     const error = new Error("redirect_outside_registry");
     error.code = "redirect_outside_registry";
     throw error;
@@ -134,7 +136,7 @@ export async function governedFetch(url, opts = {}) {
       error.code = "blocked_host";
       throw error;
     }
-    if (mayorId && !isApprovedUrl(current, mayorId)) {
+    if (!allowed(current)) {
       const error = new Error("redirect_outside_registry");
       error.code = "redirect_outside_registry";
       error.url = current;
@@ -196,7 +198,7 @@ export async function governedFetch(url, opts = {}) {
         error.url = next;
         throw error;
       }
-      if (mayorId && !isApprovedUrl(next, mayorId)) {
+      if (mayorId && !isApprovedUrl(next, mayorId, extraSources)) {
         const error = new Error("redirect_outside_registry");
         error.code = "redirect_outside_registry";
         error.url = next;
@@ -228,11 +230,11 @@ export async function governedFetch(url, opts = {}) {
   throw error;
 }
 
-export function assertCanonicalApproved(canonical, mayorId, fallbackUrl) {
+export function assertCanonicalApproved(canonical, mayorId, fallbackUrl, extraSources = []) {
   const url = canonical || fallbackUrl;
   if (!url) return { ok: false, reason: "missing_canonical" };
   if (!isPublicHttpUrl(url)) return { ok: false, reason: "blocked_host" };
-  if (mayorId && !isApprovedUrl(url, mayorId)) {
+  if (mayorId && !isApprovedUrl(url, mayorId, extraSources)) {
     return { ok: false, reason: "canonical_outside_registry", url };
   }
   return { ok: true, url };

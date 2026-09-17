@@ -10,6 +10,7 @@
  *   2. أقوى تغطية محلية.
  *   3. وكالة أو صحيفة وطنية.
  */
+import { isAggregatorHost, publisherDomain } from "./domain.js";
 
 const STRATEGY_KIND = {
   rss: "feed",
@@ -506,13 +507,158 @@ function domainMatches(host, domain) {
   return host === approved || host.endsWith(`.${approved}`);
 }
 
-/** البوابة الوحيدة: لا يُفتح رابط إلا إن كان نطاقه معتمدًا لهذا المكتب. */
-export function approvedSourceFor(url, mayorId) {
+export function sourceAllowsUrl(source, url) {
   const host = hostOf(url);
-  if (!host) return null;
-  return sourcesFor(mayorId).find((source) => domainMatches(host, source.domain)) || null;
+  if (!host || !source?.domain) return false;
+  return domainMatches(host, source.domain);
 }
 
-export function isApprovedUrl(url, mayorId) {
-  return Boolean(approvedSourceFor(url, mayorId));
+export function discoveryFromStored(row) {
+  const url = String(row?.url || "");
+  const kind = String(row?.kind || "");
+  if (kind === "feed" || kind === "rss" || /\/rss|\/feed|\.xml(?:$|\?)/i.test(url)) {
+    return [step("rss", { url })];
+  }
+  if (kind === "sitemap") return [step("sitemap", { url })];
+  if (kind === "api") return [step("api", { url, format: row.format || "wp-json" })];
+  return [step("newsroom", { url, adapter: "generic" })];
+}
+
+/** صف D1 يصبح مصدر فحص. السجل في الشيفرة يُفضَّل إن وُجد. */
+export function sourceFromRow(row, coded = null) {
+  if (!row) return coded;
+  if (coded) {
+    return {
+      ...coded,
+      enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
+    };
+  }
+  const discovery = discoveryFromStored(row);
+  const primary = discovery.find((entry) => entry.url) || discovery[0] || {};
+  const platform = row.platform || (Number(row.tier) === 0 ? "official" : "newspaper");
+  return {
+    id: row.id,
+    mayor_id: row.mayor_id,
+    domain: row.domain,
+    name: row.name,
+    tier: Number(row.tier) || 1,
+    rank: Number(row.rank) || 1,
+    platform,
+    discovery,
+    kind: row.kind || strategyKind(primary.type),
+    url: row.url || primary.url || "",
+    adapter: "generic",
+    verified: Number(row.verified) || 0,
+    curated_at: row.curated_at || null,
+    enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
+  };
+}
+
+function publicPlatformHref(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+    if (!host.includes(".")) return "";
+    if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return "";
+    if (/^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)) return "";
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * منصات المكتب المضاف: حتى ثلاث نطاقات عامة، بلا محركات بحث.
+ * هذا سجل ذلك المكتب فقط، لا فتح Google/Bing.
+ */
+export function parseOfficePlatforms(raw) {
+  if (raw == null) {
+    return { error: "missing_platforms" };
+  }
+  if (!Array.isArray(raw)) {
+    return { error: "bad_platforms" };
+  }
+  if (!raw.length) {
+    return { error: "missing_platforms" };
+  }
+  if (raw.length > MAX_SOURCES_PER_OFFICE) {
+    return { error: "too_many_platforms" };
+  }
+  const seen = new Set();
+  const platforms = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const row = raw[index] || {};
+    const href = publicPlatformHref(row.url);
+    if (!href) {
+      return { error: "bad_platform_url", detail: index };
+    }
+    const host = hostOf(href);
+    const org = publisherDomain(href);
+    if (!host || isAggregatorHost(host) || isAggregatorHost(org)) {
+      return { error: "registry_closed", detail: host || href };
+    }
+    if (seen.has(host)) {
+      return { error: "duplicate_platform", detail: host };
+    }
+    seen.add(host);
+    const allowedPlatform = ["official", "newspaper", "agency"];
+    const platform = allowedPlatform.includes(row.platform)
+      ? row.platform
+      : index === 0
+        ? "official"
+        : "newspaper";
+    const kindHint = String(row.kind || "");
+    const kind = ["feed", "page", "sitemap", "api"].includes(kindHint)
+      ? kindHint
+      : /\/rss|\/feed|\.xml(?:$|\?)/i.test(href)
+        ? "feed"
+        : "page";
+    platforms.push({
+      domain: host,
+      name: String(row.name || host).trim().slice(0, 120) || host,
+      url: href,
+      kind,
+      platform,
+      tier: platform === "official" ? 0 : 1,
+      rank: index + 1,
+    });
+  }
+  return { platforms };
+}
+
+export function platformInputMessage(parsed) {
+  if (!parsed?.error) return "";
+  if (parsed.error === "missing_platforms") {
+    return "أضف منصة رصد واحدة على الأقل، وثلاثًا كحد أقصى كالمكاتب البذرة.";
+  }
+  if (parsed.error === "too_many_platforms") {
+    return `لا يُسمح بأكثر من ${MAX_SOURCES_PER_OFFICE} منصات لكل مكتب.`;
+  }
+  if (parsed.error === "duplicate_platform") {
+    return "لا تكرر النطاق نفسه في منصات المكتب.";
+  }
+  if (parsed.error === "registry_closed") {
+    return "محركات البحث والمجمّعات ليست منصات رصد. ضع موقع المدينة أو صحيفة أو وكالة.";
+  }
+  if (parsed.error === "bad_platform_url") {
+    return "رابط المنصة غير صالح أو يشير إلى عنوان داخلي.";
+  }
+  return parsed.error;
+}
+
+/** البوابة الوحيدة: لا يُفتح رابط إلا إن كان نطاقه معتمدًا لهذا المكتب. */
+export function approvedSourceFor(url, mayorId, extraSources = []) {
+  const host = hostOf(url);
+  if (!host) return null;
+  const coded = sourcesFor(mayorId).find((source) => domainMatches(host, source.domain));
+  if (coded) return coded;
+  return (extraSources || []).find((source) => sourceAllowsUrl(source, url)) || null;
+}
+
+export function isApprovedUrl(url, mayorId, extraSources = []) {
+  return Boolean(approvedSourceFor(url, mayorId, extraSources));
 }

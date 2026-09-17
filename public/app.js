@@ -1083,8 +1083,17 @@ $("add-mayor-form").addEventListener("submit", async (e) => {
   const submit = form.querySelector("[type=submit]");
   const status = $("add-mayor-status");
   const payload = Object.fromEntries(new FormData(form).entries());
+  const roles = ["official", "newspaper", "agency"];
+  payload.platforms = [1, 2, 3]
+    .map((n, index) => ({
+      name: String(payload[`platform_${n}_name`] || "").trim(),
+      url: String(payload[`platform_${n}_url`] || "").trim(),
+      platform: roles[index],
+    }))
+    .filter((row) => row.url);
   for (const key of Object.keys(payload)) {
-    if (!String(payload[key] || "").trim()) delete payload[key];
+    if (key.startsWith("platform_")) delete payload[key];
+    else if (!String(payload[key] || "").trim() && key !== "platforms") delete payload[key];
   }
   submit.disabled = true;
   status.textContent = "جاري الحفظ…";

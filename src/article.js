@@ -133,6 +133,7 @@ export async function readArticle(startUrl, opts = {}) {
   try {
     const fetched = await governedFetch(url, {
       mayorId: opts.mayorId || null,
+      source: opts.source || null,
       fetch: opts.fetch,
       timeoutMs: 12000,
       etag: opts.etag,
@@ -141,7 +142,12 @@ export async function readArticle(startUrl, opts = {}) {
     if (fetched.notModified) return { notModified: true, url: fetched.url };
     if (!fetched.ok) return { error: `http_${fetched.status}`, httpStatus: fetched.status };
     const extracted = extractArticle(fetched.body, fetched.url);
-    const canonical = assertCanonicalApproved(extracted.url, opts.mayorId, fetched.url);
+    const canonical = assertCanonicalApproved(
+      extracted.url,
+      opts.mayorId,
+      fetched.url,
+      opts.source ? [opts.source] : [],
+    );
     if (!canonical.ok) {
       return { error: canonical.reason, url: canonical.url || extracted.url };
     }

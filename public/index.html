@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui21" />
+    <link rel="stylesheet" href="/styles.css?v=ui22" />
   </head>
   <body>
     <div class="sheet">
@@ -94,7 +94,7 @@
         <div class="settings-scroll">
         <form id="add-mayor-form" class="settings-add" autocomplete="off">
           <h3>إضافة عمدة</h3>
-          <p class="settings-add-note">الحقول المطلوبة تكفي لإنشاء المكتب. النطاق الرسمي للعرض والتصنيف فقط، ولا يصبح منصة رصد.</p>
+          <p class="settings-add-note">الهوية للعرض والرصد. المنصات تُحفظ في القاعدة لهذا المكتب فقط، حتى ثلاث، بلا محركات بحث.</p>
           <div class="settings-fields">
             <label class="settings-field">
               الاسم بالعربية *
@@ -149,6 +149,34 @@
               <input name="id" maxlength="40" placeholder="يُشتق تلقائياً من المدينة والاسم" dir="ltr" pattern="[A-Za-z][A-Za-z0-9-]{1,39}">
             </label>
           </div>
+          <h3>منصات الرصد (حتى 3)</h3>
+          <p class="settings-add-note">كالمكاتب البذرة: غرفة أخبار رسمية، تغطية محلية، ثم وكالة أو صحيفة. بلا Google أو Bing.</p>
+          <div class="settings-fields">
+            <label class="settings-field">
+              1. الموقع الرسمي *
+              <input name="platform_1_name" maxlength="120" placeholder="بلدية الرياض">
+            </label>
+            <label class="settings-field">
+              رابط الرصد الرسمي *
+              <input name="platform_1_url" required maxlength="500" placeholder="https://alriyadh.gov.sa/news" dir="ltr">
+            </label>
+            <label class="settings-field">
+              2. تغطية محلية
+              <input name="platform_2_name" maxlength="120" placeholder="صحيفة محلية">
+            </label>
+            <label class="settings-field">
+              رابط التغطية المحلية
+              <input name="platform_2_url" maxlength="500" placeholder="https://example.com/feed" dir="ltr">
+            </label>
+            <label class="settings-field">
+              3. وكالة أو صحيفة وطنية
+              <input name="platform_3_name" maxlength="120" placeholder="وكالة">
+            </label>
+            <label class="settings-field">
+              رابط الوكالة أو الصحيفة
+              <input name="platform_3_url" maxlength="500" placeholder="https://agency.example/rss.xml" dir="ltr">
+            </label>
+          </div>
           <div class="settings-add-actions">
             <button type="submit" class="btn-add-mayor">حفظ العمدة</button>
             <p class="settings-add-status" id="add-mayor-status" role="status"></p>
@@ -158,6 +186,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=ui21"></script>
+    <script src="/app.js?v=ui22"></script>
   </body>
 </html>
