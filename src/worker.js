@@ -8,6 +8,7 @@ import {
 } from "./mayors.js";
 import { runScan, sourceStatus } from "./collect.js";
 import {
+  candidateWritePressure,
   enabledSources,
   fetchCandidateBatch,
   pendingCandidateCount,
@@ -1689,11 +1690,14 @@ async function publicHealth(env) {
      LIMIT 5`,
   ).all();
   const overview = await slotOverview(env);
+  const writes = await candidateWritePressure(env);
   return {
     ok: true,
+    ready: writes.ok,
     cron: "Sunday 06:00 Asia/Riyadh",
     briefDrainCron: "every 10 minutes",
     queue: Boolean(env.SCAN_QUEUE),
+    writes,
     ai: {
       configured: overview.configured,
       model: overview.model,
@@ -1832,6 +1836,7 @@ async function diagnostics(env) {
   ).first();
   const registry = await registrySummary(env);
   const overview = await slotOverview(env);
+  const writes = await candidateWritePressure(env);
   const budget = overview.budget;
   const mergeSlot =
     overview.slots.find((slot) => slot.id === "gemini" && slot.bound) ||
@@ -1885,8 +1890,10 @@ async function diagnostics(env) {
         id: "database",
         name: "قاعدة البيانات",
         icon: "db",
-        ok: true,
-        detail: `تحفظ نافذة ${ITEM_WINDOW_DAYS} أيام وتحذف ما بعدها بعد ${ITEM_RETENTION_DAYS} أيام`,
+        ok: writes.ok ? true : false,
+        detail: writes.ok
+          ? `تحفظ نافذة ${ITEM_WINDOW_DAYS} أيام · مرشحون جدد ${writes.pendingFresh} · أرشيف معلّق ${writes.pendingArchive}`
+          : `أرشيف معلّق ${writes.pendingArchive} صفًا في candidates — طابور الموجزات لا يظهر هذا الضغط`,
       },
       {
         id: "engines",
@@ -1932,6 +1939,7 @@ async function diagnostics(env) {
     sources: (sources || []).map((row) => ({ ...row, operational: operationalStatus(row) })),
     lastScan: lastScan || null,
     queue: Boolean(env.SCAN_QUEUE),
+    writes,
     providers: await providerLanes(env),
   };
 }

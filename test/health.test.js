@@ -48,6 +48,9 @@ test("public health lists every AI slot without leaking secrets", async () => {
     .filter((slot) => slot.bound && !slot.blocked)
     .reduce((sum, slot) => sum + slot.budget.remaining, 0);
   assert.equal(payload.ai.budget.remaining, usable);
+  assert.equal(payload.ready, true);
+  assert.equal(payload.writes.pressure, "idle");
+  assert.equal(payload.writes.pendingArchive, 0);
   const raw = JSON.stringify(payload);
   assert.doesNotMatch(raw, /gem-secret-value|deep-secret-value|qwen-secret-value/);
   assert.doesNotMatch(raw, /GEMINI_API_KEY|DEEPSEEK_API_KEY|QWEN_API_KEY/);
@@ -68,6 +71,57 @@ test("a disabled or unbound slot stays visible as not bound", async () => {
   assert.equal(byId.qwen.bound, false);
   assert.equal(byId.qwen.enabled, false);
   assert.equal(payload.ai.configured, true);
+});
+
+test("health stays live but not ready when archive candidates sit behind an idle AI queue", async () => {
+  const env = envWith();
+  await ensureDb(env);
+  const sourceId = "turin:comune.torino.it";
+  const rows = Array.from({ length: 40 }, (_, n) =>
+    `('arch-h-${n}', 'turin', '${sourceId}', 'scan-arch', 'https://www.comune.torino.it/arch-${n}', 'Arch',
+      NULL, datetime('now'), 'sitemap', 'candidate_discovered', 'pending', 0)`,
+  ).join(",\n");
+  env.DB.exec(`
+    INSERT INTO candidates (
+      id, mayor_id, source_id, scan_id, url, title, published_at, discovered_at,
+      discovery_type, stage, fetch_status, attempts
+    ) VALUES ${rows}
+  `);
+  const payload = await worker.fetch(request("/api/health"), env).then((res) => res.json());
+  assert.equal(payload.ok, true, "liveness must not go down because of a backlog");
+  assert.equal(payload.ready, false);
+  assert.equal(payload.writes.ok, false);
+  assert.equal(payload.writes.pressure, "archive_backlog");
+  assert.equal(payload.writes.pendingArchive, 40);
+  assert.equal(payload.writes.pendingFresh, 0);
+  assert.equal(payload.ai.pending, 0);
+  assert.match(payload.writes.detail, /أرشيف/);
+});
+
+test("diagnostics marks the database tool down when the archive pile is hidden from AI pending", async () => {
+  const env = envWith({ DASHBOARD_PASSWORD: "desk-pass" });
+  await ensureDb(env);
+  env.DB.exec(`
+    INSERT INTO candidates (
+      id, mayor_id, source_id, scan_id, url, title, published_at, discovered_at,
+      discovery_type, stage, fetch_status, attempts
+    ) VALUES
+    ('fresh-h', 'turin', 'turin:comune.torino.it', 'scan-new',
+      'https://www.comune.torino.it/fresh-h', 'Fresh',
+      datetime('now', '-1 days'), datetime('now'), 'rss', 'candidate_discovered', 'pending', 0),
+    ('old-h', 'turin', 'turin:comune.torino.it', 'scan-old',
+      'https://www.comune.torino.it/old-h', 'Old',
+      NULL, datetime('now'), 'sitemap', 'candidate_discovered', 'pending', 0)
+  `);
+  const payload = await worker
+    .fetch(request("/api/diagnostics", { password: "desk-pass" }), env)
+    .then((res) => res.json());
+  const database = payload.tools.find((tool) => tool.id === "database");
+  assert.equal(payload.writes.pendingArchive, 1);
+  assert.equal(payload.writes.pendingFresh, 1);
+  assert.equal(payload.writes.pressure, "archive_backlog");
+  assert.equal(database.ok, false);
+  assert.match(database.detail, /أرشيف معلّق/);
 });
 
 test("diagnostics exposes one tool chip per AI slot and requires auth when keys exist", async () => {
