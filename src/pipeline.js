@@ -70,6 +70,70 @@ export function freshCandidateSql(alias = "candidates") {
     AND date(substr(${alias}.published_at, 1, 10)) <= date('now', '+1 day')`;
 }
 
+export const WRITE_PRESSURE = {
+  IDLE: "idle",
+  FRESH_WORK: "fresh_work",
+  ARCHIVE_BACKLOG: "archive_backlog",
+};
+
+export const WRITE_PRESSURE_AR = {
+  [WRITE_PRESSURE.IDLE]: "لا مرشحين معلّقين",
+  [WRITE_PRESSURE.FRESH_WORK]: "مرشحون جدد لهذا الأسبوع بانتظار الجلب",
+  [WRITE_PRESSURE.ARCHIVE_BACKLOG]:
+    "أرشيف بلا تاريخ معلّق — ضغط كتابة لا يظهر في طابور الموجزات",
+};
+
+/** الأرشيف المعلّق يسبق عمل الأسبوع: هذا توقيع حادثة D1، لا طابور الذكاء. */
+export function classifyWritePressure({ pendingFresh = 0, pendingArchive = 0 } = {}) {
+  if (Number(pendingArchive) > 0) return WRITE_PRESSURE.ARCHIVE_BACKLOG;
+  if (Number(pendingFresh) > 0) return WRITE_PRESSURE.FRESH_WORK;
+  return WRITE_PRESSURE.IDLE;
+}
+
+function emptyWritePressure() {
+  return {
+    ok: true,
+    pressure: WRITE_PRESSURE.IDLE,
+    detail: WRITE_PRESSURE_AR[WRITE_PRESSURE.IDLE],
+    total: 0,
+    pending: 0,
+    pendingFresh: 0,
+    pendingArchive: 0,
+    fetched: 0,
+  };
+}
+
+export async function candidateWritePressure(env) {
+  if (!env?.DB) return emptyWritePressure();
+  const fresh = freshCandidateSql("candidates");
+  const row = await env.DB.prepare(
+    `SELECT
+       COUNT(*) AS total,
+       IFNULL(SUM(CASE WHEN fetch_status IN ('pending', 'retry', 'working') THEN 1 ELSE 0 END), 0) AS pending,
+       IFNULL(SUM(CASE WHEN fetch_status IN ('pending', 'retry', 'working') AND (${fresh}) THEN 1 ELSE 0 END), 0) AS pending_fresh,
+       IFNULL(SUM(CASE WHEN fetch_status = 'fetched' THEN 1 ELSE 0 END), 0) AS fetched
+     FROM candidates`,
+  ).first();
+  const pending = Number(row?.pending) || 0;
+  const pendingFresh = Number(row?.pending_fresh) || 0;
+  /**
+   * `NOT (fresh)` is NULL when published_at is NULL, so SQLite would drop
+   * undated archive rows from the sum. Pending minus fresh is the pile.
+   */
+  const pendingArchive = Math.max(0, pending - pendingFresh);
+  const pressure = classifyWritePressure({ pendingFresh, pendingArchive });
+  return {
+    ok: pressure !== WRITE_PRESSURE.ARCHIVE_BACKLOG,
+    pressure,
+    detail: WRITE_PRESSURE_AR[pressure],
+    total: Number(row?.total) || 0,
+    pending,
+    pendingFresh,
+    pendingArchive,
+    fetched: Number(row?.fetched) || 0,
+  };
+}
+
 export async function persistDiscovered(env, { mayor, source, scanId, rows }) {
   let discovered = 0;
   let inserted = 0;

@@ -320,6 +320,27 @@ test("a blocked AI budget is reported as a pause with a resume time", () => {
   assert.match(page.element("diag-body").innerHTML, /نفدت حصة/);
 });
 
+test("an archive candidate pile is reported even when AI pending is zero", () => {
+  const page = loadPageScript();
+  const data = diagnosticsFixture();
+  data.brief.pending = 0;
+  data.brief.waitingQuota = 0;
+  data.writes = {
+    ok: false,
+    pressure: "archive_backlog",
+    detail: "أرشيف بلا تاريخ معلّق — ضغط كتابة لا يظهر في طابور الموجزات",
+    pendingArchive: 172700,
+    pendingFresh: 0,
+    pending: 172700,
+    total: 172700,
+  };
+  page.renderDiagnostics(data);
+  assert.match(page.element("diag-headline").textContent, /أرشيف/);
+  assert.doesNotMatch(page.element("diag-headline").textContent, /لا شيء معلّق/);
+  assert.match(page.element("diag-body").innerHTML, /ضغط الكتابة/);
+  assert.match(page.element("diag-body").innerHTML, /172,700/);
+});
+
 test("failure codes are explained in Arabic instead of shown raw", () => {
   const { briefErrorReason } = loadPageScript();
   assert.match(briefErrorReason("ai_ungrounded_headline"), /جملة حرفية/);

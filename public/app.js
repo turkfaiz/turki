@@ -440,15 +440,19 @@ function renderDiagnostics(d) {
   const b = d.brief || {};
   const budget = displayBudget(d);
   const reg = d.registry || {};
+  const writes = d.writes || {};
   const waiting = (b.pending || 0) + (b.waitingQuota || 0);
   const briefTotal = (b.completed || 0) + waiting + (b.failed || 0);
   const aiNote = boundSlotNote(d, budget);
+  const archive = Number(writes.pendingArchive) || 0;
 
-  $("diag-headline").textContent = budget.blocked
-    ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
-    : waiting
-      ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
-      : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
+  $("diag-headline").textContent = archive
+    ? `${num(archive)} مرشحاً أرشيفياً معلّقاً · لا يُحسب طابور AI`
+    : budget.blocked
+      ? `متوقف مؤقتًا · يستأنف بعد ${humanWait(budget.resumesInSeconds)}`
+      : waiting
+        ? `${num(waiting)} بانتظار التلخيص · ${num(b.completed || 0)} مكتمل`
+        : `${num(b.completed || 0)} موجزًا مكتملًا · لا شيء معلّق`;
 
   const grouped = new Map();
   for (const source of d.sources || []) {
@@ -488,6 +492,13 @@ function renderDiagnostics(d) {
         `${num(d.windowDays)} أيام`,
         `${num(d.window?.total)} خبرًا داخل النافذة · يُحذف ما بعدها بعد ${num(d.retentionDays)} أيام`,
         null,
+      )}
+      ${readout(
+        "ضغط الكتابة",
+        archive ? num(archive) : num(writes.pendingFresh || 0),
+        writes.detail || (archive ? "أرشيف معلّق في المرشحين" : "مرشحون جدد لهذا الأسبوع"),
+        null,
+        writes.ok === false || archive ? "is-bad" : "",
       )}
       </div>
     </section>
