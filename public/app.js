@@ -28,13 +28,13 @@ function fmtDate(value) {
 }
 
 function sourceLabel(source) {
-  return {
-    google_news: "Google News",
-    bing_news: "Bing News",
-    official: "Official",
-    inoreader: "Inoreader",
-    gdelt: "GDELT",
-  }[source] || source;
+  const raw = String(source || "");
+  if (raw === "official") return "رسمي";
+  if (raw.startsWith("approved_")) return "منصة معتمدة";
+  if (raw === "google_news" || raw === "bing_news" || raw === "gdelt" || raw === "inoreader") {
+    return "مصدر قديم خارج السجل";
+  }
+  return raw || "مصدر";
 }
 
 function confidenceLabel(c) {
@@ -207,7 +207,7 @@ function setDeskStatus(text) {
   if (el) el.textContent = text;
 }
 
-async function api(path, options) {
+async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
@@ -223,6 +223,10 @@ async function loadMayors() {
   $("mayor_id").innerHTML =
     `<option value="">كل المكاتب (${mayors.length})</option>` +
     mayors.map((m) => `<option value="${m.id}">${m.name_ar} — ${m.city_ar}</option>`).join("");
+  const mast = $("mast-offices");
+  if (mast) {
+    mast.textContent = `International Mayoral Briefing · ${mayors.length} ${mayors.length === 1 ? "office" : "offices"}`;
+  }
   syncSearchEnabled();
 }
 
@@ -779,6 +783,22 @@ $("mayor_id").addEventListener("change", () => {
   refreshAll();
 });
 
+function laneAfterSearch(stats) {
+  if (Number(stats?.reading) > 0) return "reading";
+  if (Number(stats?.verifying) > 0) return "verifying";
+  if (Number(stats?.attention_required) > 0) return "attention_required";
+  if (Number(stats?.decision_ready) > 0) return "decision_ready";
+  return null;
+}
+
+function applyDeskLane(lane) {
+  if (!lane) return;
+  state.status = lane;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.classList.toggle("on", tab.dataset.status === lane);
+  });
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -867,29 +887,40 @@ function renderSearchProgress(job) {
     .join("");
 }
 
+const searchPoll = { controller: null };
+
 async function waitForSearchJob(jobId) {
+  searchPoll.controller?.abort();
+  const controller = new AbortController();
+  searchPoll.controller = controller;
   localStorage.setItem("mayorWatchSearchJob", jobId);
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    const { job } = await api(`/api/search-jobs/${jobId}`);
-    renderSearchProgress(job);
-    setDeskStatus(
-      `الرصد يعمل في الخلفية: اكتمل ${num(job.completed)} من ${num(job.total)} مكتب` +
-        `${job.running ? ` · يعمل الآن ${num(job.running)}` : ""}` +
-        `${job.failed ? ` · تعذر ${num(job.failed)}` : ""}.`,
-    );
-    if (attempt % 2 === 0) await refreshAll();
-    if (["completed", "partial", "failed"].includes(job.status)) {
-      localStorage.removeItem("mayorWatchSearchJob");
-      if (job.status === "failed") throw new Error("تعذر الرصد في جميع المكاتب.");
-      return {
-        ...job.totals,
-        failedOffices: job.failed,
-        jobStatus: job.status,
-      };
+  try {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (controller.signal.aborted) return null;
+      const { job } = await api(`/api/search-jobs/${jobId}`, { signal: controller.signal });
+      renderSearchProgress(job);
+      setDeskStatus(
+        `الرصد يعمل في الخلفية: اكتمل ${num(job.completed)} من ${num(job.total)} مكتب` +
+          `${job.running ? ` · يعمل الآن ${num(job.running)}` : ""}` +
+          `${job.failed ? ` · تعذر ${num(job.failed)}` : ""}.`,
+      );
+      if (attempt % 2 === 0) await refreshAll();
+      if (["completed", "partial", "failed"].includes(job.status)) {
+        localStorage.removeItem("mayorWatchSearchJob");
+        if (job.status === "failed") throw new Error("تعذر الرصد في جميع المكاتب.");
+        return {
+          ...job.totals,
+          failedOffices: job.failed,
+          jobStatus: job.status,
+        };
+      }
+      await delay(3000);
     }
-    await delay(3000);
+    throw new Error("استمر الرصد في الخلفية أكثر من المتوقع. حدّث الصفحة لاحقًا.");
+  } catch (error) {
+    if (error?.name === "AbortError") return null;
+    throw error;
   }
-  throw new Error("استمر الرصد في الخلفية أكثر من المتوقع. حدّث الصفحة لاحقًا.");
 }
 
 async function runDeskSearch(query, mayorId) {
@@ -917,11 +948,12 @@ $("search-form").addEventListener("submit", async (e) => {
   setDeskStatus(mayorId ? "النظام يفتح المصدر ويدمج الحدث ويكتب النشرة…" : "بدء البحث في كل المكاتب…");
   try {
     const result = await runDeskSearch($("q").value.trim(), mayorId);
-    state.status = "decision_ready";
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.status === "decision_ready"));
+    if (!result) return;
     state.selectedId = null;
     const stats = await refreshAll();
-    const ready = Number(stats?.decision_ready) || (state.items || []).length;
+    applyDeskLane(laneAfterSearch(stats) || state.status);
+    await loadItems();
+    const ready = Number(stats?.decision_ready) || 0;
     const failed = Number(result.failedOffices)
       ? ` · تعذر ${num(result.failedOffices)} مكتب`
       : "";
