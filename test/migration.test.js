@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { ensureDb } from "../src/worker.js";
 import { createTestD1 } from "./helpers/d1.js";
 import { seedPopulatedDesk, snapshotProtected } from "./helpers/populatedDesk.js";
@@ -250,4 +251,47 @@ test("verify claim columns are added to existing brief_versions without deleting
   assert.ok(columns.has("verify_claimed_at"));
   assert.deepEqual(snapshotProtected(db), before);
   assert.equal(db.one(`SELECT COUNT(*) AS n FROM brief_versions WHERE id = 'ver-passed'`).n, 1);
+});
+
+test("bootstrap never replaces existing mayor rows or deletes desk tables", () => {
+  const source = fs.readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+  const start = source.indexOf("export async function ensureDb");
+  const end = source.indexOf("async function migrateSources");
+  assert.ok(start >= 0 && end > start);
+  const ensure = source.slice(start, end);
+  assert.doesNotMatch(ensure, /INSERT OR REPLACE INTO mayors/);
+  assert.match(ensure, /ON CONFLICT\(id\) DO NOTHING/);
+  assert.doesNotMatch(
+    ensure,
+    /DELETE FROM (items|approvals|brief_versions|candidates|mayors|scans|search_jobs)\b/,
+  );
+});
+
+test("an edited seed mayor and pending candidates survive a bootstrap replay", async () => {
+  const db = createTestD1();
+  await ensureDb(envWith(db));
+  db.exec(`UPDATE mayors SET name_ar = 'اسم معدل في القاعدة' WHERE id = 'turin'`);
+  db.exec(`
+    INSERT INTO candidates (
+      id, mayor_id, source_id, scan_id, url, title, published_at, discovered_at,
+      discovery_type, stage, fetch_status, attempts
+    ) VALUES (
+      'arch-boot', 'turin', 'turin:comune.torino.it', 'scan-arch',
+      'https://www.comune.torino.it/arch-boot', 'Arch',
+      NULL, datetime('now'), 'sitemap', 'candidate_discovered', 'pending', 0
+    )
+  `);
+  const before = {
+    mayors: db.one(`SELECT COUNT(*) AS n FROM mayors`).n,
+    candidates: db.one(`SELECT COUNT(*) AS n FROM candidates`).n,
+    name_ar: db.one(`SELECT name_ar FROM mayors WHERE id = 'turin'`).name_ar,
+  };
+
+  db.exec(`UPDATE meta SET v = 'bootstrap-v1' WHERE k = 'bootstrap_version'`);
+  await ensureDb(envWith(db.reopen()));
+
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM mayors`).n, before.mayors);
+  assert.equal(db.one(`SELECT COUNT(*) AS n FROM candidates`).n, before.candidates);
+  assert.equal(db.one(`SELECT name_ar FROM mayors WHERE id = 'turin'`).name_ar, "اسم معدل في القاعدة");
+  assert.ok(db.one(`SELECT id FROM candidates WHERE id = 'arch-boot'`));
 });

@@ -360,9 +360,13 @@ export async function ensureDb(env) {
     await env.DB.prepare(sql).run();
   }
   await migrateSearchJobs(env);
+  /**
+   * REPLACE يحذف الصف ويعيد إدخاله. صف عمدة مضاف أو هوية عُدّلت في D1
+   * تُطمس. البذرة تملأ المكاتب الناقصة فقط.
+   */
   await upsertRows(
     env,
-    `INSERT OR REPLACE INTO mayors (
+    `INSERT INTO mayors (
       id, country_ar, city_ar, city_en, title_ar, title_en, name_en, name_native, name_ar,
       native_lang, native_lang_ar, country_code, gn_hl, gn_gl, official_host
     )`,
@@ -385,6 +389,7 @@ export async function ensureDb(env) {
     ]),
     15,
     6,
+    `ON CONFLICT(id) DO NOTHING`,
   );
   await upsertRows(
     env,
