@@ -5,8 +5,10 @@ import {
   INLINE_ARTICLE_FETCH_LIMIT,
   MAX_CANDIDATES_PER_SOURCE_POLL,
   MAX_PENDING_CANDIDATES_PER_SOURCE,
+  MAX_SOURCES_PER_OFFICE,
   isApprovedUrl,
   sourceById,
+  sourceFromRow,
   sourcesFor,
 } from "./sources.js";
 import { fingerprint, normalizeTitle } from "./dedup.js";
@@ -41,12 +43,16 @@ export async function enabledSources(env, mayorId) {
   const registered = sourcesFor(mayorId);
   if (!env?.DB) return registered;
   const { results } = await env.DB.prepare(
-    `SELECT id, enabled FROM sources WHERE mayor_id = ?`,
+    `SELECT * FROM sources WHERE mayor_id = ? ORDER BY rank`,
   )
     .bind(mayorId)
     .all();
-  const map = new Map((results || []).map((row) => [row.id, Number(row.enabled) !== 0]));
-  return registered.filter((source) => map.get(source.id) !== false);
+  const rows = results || [];
+  if (!rows.length) return registered;
+  return rows
+    .filter((row) => Number(row.enabled) !== 0)
+    .slice(0, MAX_SOURCES_PER_OFFICE)
+    .map((row) => sourceFromRow(row, sourceById(row.id)));
 }
 
 function topicText(row) {
@@ -165,7 +171,7 @@ export async function persistDiscovered(env, { mayor, source, scanId, rows }) {
 
   for (const row of rows || []) {
     const url = String(row.url || "").slice(0, 1000);
-    if (!url || !isApprovedUrl(url, mayor.id)) continue;
+    if (!url || !isApprovedUrl(url, mayor.id, [source])) continue;
     const dated = parseDate(row.published_at);
     if (!dated) {
       skippedUndated += 1;
@@ -355,8 +361,10 @@ export async function fetchCandidate(env, candidate, extra = {}) {
     .run();
   if (!Number(claimed?.meta?.changes)) return { opened: false, kind: "skipped_claimed" };
 
+  const source = extra.source || (await resolveSource(env, candidate.source_id));
   const article = await readArticle(candidate.url, {
     mayorId: mayor.id,
+    source,
     fetch: extra.fetch,
     etag: candidate.etag,
     lastModified: candidate.last_modified,
@@ -394,7 +402,7 @@ export async function fetchCandidate(env, candidate, extra = {}) {
 
   const judged = judgeArticle(article, mayor, {
     ...candidate,
-    source: sourceById(candidate.source_id)?.tier === 0 ? "official" : "approved_page",
+    source: source?.tier === 0 ? "official" : "approved_page",
     language: mayor.native_lang,
     publisher_url: article.url,
   });
@@ -531,9 +539,19 @@ export async function pendingCandidateCount(env, mayorId = null, scanId = null) 
   return Number(row?.n) || 0;
 }
 
+export async function resolveSource(env, sourceId) {
+  const coded = sourceById(sourceId);
+  if (coded) return coded;
+  if (!env?.DB || !sourceId) return null;
+  const row = await env.DB.prepare(`SELECT * FROM sources WHERE id = ?`)
+    .bind(sourceId)
+    .first();
+  return row ? sourceFromRow(row) : null;
+}
+
 export async function pollOneSource(env, { sourceId, mayorId, scanId = null, query = "", fetch } = {}) {
   const mayor = await resolveMayor(env, mayorId);
-  const source = sourceById(sourceId);
+  const source = await resolveSource(env, sourceId);
   if (!mayor || !source) {
     return {
       health: { id: sourceId, ok: false, status: "bad_url", fail_reason: "unknown_source" },

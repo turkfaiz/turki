@@ -89,6 +89,7 @@ async function fetchListing(url, mayorId, state, extra = {}) {
   const cond = extra.cond && (!extra.condUrl || extra.condUrl === url) ? extra.cond : {};
   return governedFetch(url, {
     mayorId,
+    source: extra.source,
     timeoutMs: extra.timeoutMs || 15000,
     fetch: extra.fetch,
     etag: cond.etag,
@@ -101,9 +102,10 @@ function isDatedThisWeek(row) {
   return Boolean(dated) && isWithinWeek(dated) === true;
 }
 
-function filterApproved(rows, mayorId) {
+function filterApproved(rows, mayorId, source) {
   return rows.filter(
-    (row) => row.url && isApprovedUrl(row.url, mayorId) && isDatedThisWeek(row),
+    (row) =>
+      row.url && isApprovedUrl(row.url, mayorId, source ? [source] : []) && isDatedThisWeek(row),
   );
 }
 
@@ -426,6 +428,7 @@ export async function discoverSource(source, mayor, extra = {}) {
   const health = emptyHealth(source);
   const state = { requests: 0 };
   const steps = (source.discovery || []).filter((entry) => entry && entry.enabled !== false);
+  extra = { ...extra, source };
   if (!steps.length) {
     health.status = "bad_url";
     health.fail_reason = "no_discovery_strategy";
@@ -465,7 +468,7 @@ export async function discoverSource(source, mayor, extra = {}) {
       retainedStatus = last.status;
     }
     if (last.ok) {
-      const rows = filterApproved(last.rows || [], mayor.id);
+      const rows = filterApproved(last.rows || [], mayor.id, source);
       health.ok = true;
       health.status = rows.length ? last.status || "ok" : "ok_no_new";
       health.fail_reason = "";
@@ -481,7 +484,7 @@ export async function discoverSource(source, mayor, extra = {}) {
     if (!last.fallback) break;
   }
 
-  const leftover = filterApproved(retained, mayor.id);
+  const leftover = filterApproved(retained, mayor.id, source);
   health.ok = false;
   health.items = leftover.length;
   health.discovered = leftover.length;

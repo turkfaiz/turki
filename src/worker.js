@@ -18,8 +18,13 @@ import {
 import {
   ARTICLE_FETCH_BATCH,
   INLINE_ARTICLE_FETCH_LIMIT,
+  APPROVED_SOURCES,
+  MAX_SOURCES_PER_OFFICE,
+  parseOfficePlatforms,
+  platformInputMessage,
   platformLabelAr,
   sourceById,
+  sourceFromRow,
   strategyLabelAr,
 } from "./sources.js";
 import {
@@ -38,7 +43,6 @@ import {
   slotRuntimeStatuses,
 } from "./aiDispatch.js";
 import { pruneAiBudget } from "./aiBudget.js";
-import { APPROVED_SOURCES, MAX_SOURCES_PER_OFFICE } from "./sources.js";
 import {
   currentVersion,
   decisionsFor,
@@ -2041,6 +2045,7 @@ async function settingsOffices(env) {
   for (const row of results || []) {
     if (!byMayor.has(row.mayor_id)) byMayor.set(row.mayor_id, []);
     const registered = sourceById(row.id);
+    const hydrated = sourceFromRow(row, registered);
     byMayor.get(row.mayor_id).push({
       id: row.id,
       domain: row.domain,
@@ -2050,9 +2055,9 @@ async function settingsOffices(env) {
       url: row.url,
       rank: row.rank,
       enabled: Number(row.enabled) !== 0,
-      platform: registered?.platform || (row.tier === 0 ? "official" : "newspaper"),
-      platform_ar: platformLabelAr(registered || row),
-      strategies: (registered?.discovery || []).map((step) => ({
+      platform: hydrated.platform,
+      platform_ar: platformLabelAr(hydrated),
+      strategies: (hydrated.discovery || []).map((step) => ({
         type: step.type,
         type_ar: strategyLabelAr(step.type),
         url: step.url || null,
@@ -2085,12 +2090,12 @@ async function settingsOffices(env) {
 }
 
 async function setSourceEnabled(env, sourceId, enabled, actor) {
-  if (!sourceById(sourceId)) {
-    return { error: "unknown_source", status: 404 };
-  }
-  const before = await env.DB.prepare(`SELECT enabled FROM sources WHERE id = ?`)
+  const before = await env.DB.prepare(`SELECT * FROM sources WHERE id = ?`)
     .bind(sourceId)
     .first();
+  if (!before) {
+    return { error: "unknown_source", status: 404 };
+  }
   const next = enabled ? 1 : 0;
   await env.DB.prepare(`UPDATE sources SET enabled = ? WHERE id = ?`)
     .bind(next, sourceId)
@@ -2103,8 +2108,8 @@ async function setSourceEnabled(env, sourceId, enabled, actor) {
       crypto.randomUUID(),
       actor || "unknown",
       sourceId,
-      sourceById(sourceId).mayor_id,
-      JSON.stringify({ enabled: Number(before?.enabled) !== 0 }),
+      before.mayor_id,
+      JSON.stringify({ enabled: Number(before.enabled) !== 0 }),
       JSON.stringify({ enabled: Boolean(next) }),
     )
     .run();
@@ -2178,7 +2183,7 @@ async function handleApi(request, env) {
       return json(
         {
           error: "registry_closed",
-          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
+          message: "لا تُضاف نطاقات حرّة من حقل domain/sources. استخدم platforms: حتى ثلاث مواقع للمدينة.",
         },
         403,
       );
@@ -2190,6 +2195,17 @@ async function handleApi(request, env) {
         400,
       );
     }
+    const platforms = parseOfficePlatforms(body.platforms);
+    if (platforms.error) {
+      return json(
+        {
+          error: platforms.error,
+          detail: platforms.detail ?? null,
+          message: platformInputMessage(platforms),
+        },
+        400,
+      );
+    }
     const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
       .bind(parsed.mayor.id)
       .first();
@@ -2197,17 +2213,41 @@ async function handleApi(request, env) {
       return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
     }
     const mayor = await insertCustomMayor(env, parsed.mayor);
+    for (const platform of platforms.platforms) {
+      await env.DB.prepare(
+        `INSERT INTO sources (
+           id, mayor_id, domain, name, tier, kind, url, rank, verified, curated_at, enabled
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), 1)`,
+      )
+        .bind(
+          `${mayor.id}:${platform.domain}`,
+          mayor.id,
+          platform.domain,
+          platform.name,
+          platform.tier,
+          platform.kind,
+          platform.url,
+          platform.rank,
+        )
+        .run();
+    }
     await env.DB.prepare(
       `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
        VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
     )
-      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
+      .bind(
+        crypto.randomUUID(),
+        reviewerOf(request, env),
+        mayor.id,
+        JSON.stringify({ mayor, platforms: platforms.platforms }),
+      )
       .run();
     return json(
       {
         ok: true,
         mayor,
-        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
+        platforms: platforms.platforms,
+        note: "أُضيف المكتب مع منصات رصده في D1. محركات البحث ما زالت مغلقة.",
         offices: await settingsOffices(env),
       },
       201,

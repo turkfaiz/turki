@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker, { authorized, ensureDb } from "../src/worker.js";
 import { createTestD1 } from "./helpers/d1.js";
 import { MAYORS, parseMayorInput, slugifyMayorId } from "../src/mayors.js";
-import { APPROVED_SOURCES } from "../src/sources.js";
+import { APPROVED_SOURCES, parseOfficePlatforms } from "../src/sources.js";
 import { runScan } from "../src/collect.js";
 
 function envWith(overrides = {}) {
@@ -22,6 +22,21 @@ function request(path, { method = "GET", body, user = "mayorwatch", password } =
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+}
+
+function samplePlatforms() {
+  return [
+    {
+      name: "بلدية الرياض",
+      url: "https://www.alriyadh.gov.sa/news",
+      platform: "official",
+    },
+    {
+      name: "وكالة محلية",
+      url: "https://www.spa.gov.sa/rss.xml",
+      platform: "agency",
+    },
+  ];
 }
 
 function sampleMayor(overrides = {}) {
@@ -157,7 +172,7 @@ test("an authorized user can add a custom mayor from settings", async () => {
   const created = await worker.fetch(
     request("/api/settings/mayors", {
       method: "POST",
-      body: sampleMayor({ official_host: "https://alriyadh.gov.sa/news" }),
+      body: sampleMayor({ official_host: "https://alriyadh.gov.sa/news", platforms: samplePlatforms() }),
       ...auth,
     }),
     env,
@@ -169,14 +184,16 @@ test("an authorized user can add a custom mayor from settings", async () => {
   assert.equal(payload.offices.length, MAYORS.length + 1);
   const office = payload.offices.find((row) => row.id === payload.mayor.id);
   assert.equal(office.origin, "custom");
-  assert.equal(office.platforms.length, 0);
+  assert.equal(office.platforms.length, 2);
+  assert.equal(office.platforms[0].domain, "alriyadh.gov.sa");
+  assert.ok(office.platforms[0].strategies.length >= 1);
 
   const listed = await worker.fetch(request("/api/settings/offices", auth), env).then((r) => r.json());
   assert.ok(listed.offices.some((row) => row.id === payload.mayor.id && row.origin === "custom"));
   const mayors = await worker.fetch(request("/api/mayors", auth), env).then((r) => r.json());
   assert.ok(mayors.mayors.some((row) => row.id === payload.mayor.id && row.name_ar === "نورة العبدالله"));
   const sources = env.DB.one(`SELECT COUNT(*) AS n FROM sources WHERE mayor_id = ?`, payload.mayor.id);
-  assert.equal(Number(sources.n), 0);
+  assert.equal(Number(sources.n), 2);
   const audit = env.DB.one(`SELECT actor, action, mayor_id FROM settings_audit WHERE action = 'mayor_created'`);
   assert.equal(audit.actor, "mayorwatch");
   assert.equal(audit.mayor_id, payload.mayor.id);
@@ -235,39 +252,71 @@ test("an unauthenticated caller cannot add a mayor", async () => {
   assert.equal(res.status, 401);
 });
 
-test("a custom mayor without platforms completes a scan and a queued job", async () => {
-  const queue = fakeQueue();
-  const env = envWith({ SCAN_QUEUE: queue });
+test("a custom mayor without platforms is refused so the office is not empty", async () => {
+  const env = envWith({ DASHBOARD_PASSWORD: "secret" });
+  await ensureDb(env);
+  const res = await worker.fetch(
+    request("/api/settings/mayors", {
+      method: "POST",
+      body: sampleMayor(),
+      password: "secret",
+    }),
+    env,
+  );
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "missing_platforms");
+});
+
+test("office platforms reject search engines and accept a dated rss poll", async () => {
+  assert.equal(parseOfficePlatforms([{ url: "https://news.google.com/rss" }]).error, "registry_closed");
+  assert.equal(parseOfficePlatforms([{ url: "https://www.bing.com/news" }]).error, "registry_closed");
+  const parsed = parseOfficePlatforms(samplePlatforms());
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.platforms.length, 2);
+
+  const env = envWith();
   await ensureDb(env);
   const created = await worker
     .fetch(
       request("/api/settings/mayors", {
         method: "POST",
-        body: sampleMayor({ id: "riyadh-noura" }),
+        body: sampleMayor({
+          id: "riyadh-noura",
+          platforms: [
+            {
+              name: "بلدية",
+              url: "https://www.alriyadh.gov.sa/rss.xml",
+              platform: "official",
+            },
+          ],
+        }),
       }),
       env,
     )
     .then((res) => res.json());
-  const scan = await runScan(env, { type: "manual", mayorId: created.mayor.id });
-  assert.equal(scan.found, 0);
-  assert.equal(scan.errors.length, 0);
-  assert.ok(scan.finished_at || scan.scanId);
-
-  const queued = await worker.fetch(
-    request("/api/search", {
-      method: "POST",
-      body: { mayor_id: created.mayor.id },
-    }),
-    env,
-  );
-  assert.equal(queued.status, 202);
-  const job = await queued.json();
-  const task = env.DB.one(
-    `SELECT status, detail FROM search_job_tasks WHERE job_id = ? AND mayor_id = ?`,
-    job.jobId,
-    created.mayor.id,
-  );
-  assert.equal(task.status, "completed");
-  assert.match(task.detail, /لا منصات/);
-  assert.equal(queue.messages.length, 0);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("alriyadh.gov.sa")) {
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+        text: async () => `<?xml version="1.0"?><rss><channel><item>
+          <title>نورة العبدالله تفتتح حديقة</title>
+          <link>https://www.alriyadh.gov.sa/news/park</link>
+          <pubDate>${new Date(Date.now() - 36 * 60 * 60 * 1000).toUTCString()}</pubDate>
+        </item></channel></rss>`,
+      };
+    }
+    return { status: 404, ok: false, headers: { get: () => null }, text: async () => "missing" };
+  };
+  try {
+    const scan = await runScan(env, { type: "manual", mayorId: created.mayor.id });
+    const health = scan.sourceHealth.find((row) => row.id === "riyadh-noura:alriyadh.gov.sa");
+    assert.equal(health.ok, true);
+    assert.ok(Number(health.new_count || health.discovered) >= 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

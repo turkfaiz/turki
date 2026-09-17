@@ -40,6 +40,10 @@ const AGGREGATORS = new Set([
   "www.msn.com",
   "t.co",
   "news.yahoo.com",
+  "x.com",
+  "twitter.com",
+  "gdeltproject.org",
+  "facebook.com",
 ]);
 
 export function publisherDomain(urlOrHost) {
