@@ -187,10 +187,11 @@ test("corrupt rss falls back to the newsroom strategy", async () => {
   const result = await discoverSource(source, mayor, { fetch: fetchImpl });
   assert.equal(result.used, "newsroom");
   assert.equal(result.health.ok, true);
-  assert.ok(result.rows.some((row) => /NID=2704/.test(row.url)));
+  assert.equal(result.health.status, "ok_no_new");
+  assert.equal(result.rows.length, 0, "undated newsroom links must not enter the persist path");
 });
 
-test("stalled rss keeps its article urls if the newsroom is empty", async () => {
+test("stalled rss is a source fault and does not queue its old article urls", async () => {
   const source = {
     ...sourcesFor("muscat")[0],
     discovery: [
@@ -211,7 +212,11 @@ test("stalled rss keeps its article urls if the newsroom is empty", async () => 
   const result = await discoverSource(source, mayor, { fetch: fetchImpl });
   assert.equal(result.health.ok, false);
   assert.equal(result.health.status, "feed_stalled");
-  assert.ok(result.rows.some((row) => /NID=1/.test(row.url)));
+  assert.equal(
+    result.rows.length,
+    0,
+    "stale dated feed items must not be queued as candidates",
+  );
 });
 
 test("one source failure does not prevent discovering another office source", async () => {

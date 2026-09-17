@@ -2443,10 +2443,15 @@ export default {
         if (leftoverFetch.length && env.SCAN_QUEUE) {
           await enqueueArticleFetches(env, { ids: leftoverFetch });
         }
-        await drainBriefs(env);
         const leftover = await briefBacklog(env);
         const verify = await verificationBacklog(env);
-        if (leftover.pending > 0 || verify.pending > 0) await enqueueBriefPump(env);
+        const hasDeskWork =
+          leftoverFetch.length > 0 || (leftover.pending || 0) > 0 || (verify.pending || 0) > 0;
+        if (!hasDeskWork) return;
+        await drainBriefs(env);
+        const after = await briefBacklog(env);
+        const verifyAfter = await verificationBacklog(env);
+        if (after.pending > 0 || verifyAfter.pending > 0) await enqueueBriefPump(env);
       })(),
     );
   },

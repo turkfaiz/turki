@@ -3,13 +3,15 @@ import {
   APPROVED_SOURCES,
   ARTICLE_FETCH_BATCH,
   INLINE_ARTICLE_FETCH_LIMIT,
+  MAX_CANDIDATES_PER_SOURCE_POLL,
+  MAX_PENDING_CANDIDATES_PER_SOURCE,
   isApprovedUrl,
   sourceById,
   sourcesFor,
 } from "./sources.js";
 import { fingerprint, normalizeTitle } from "./dedup.js";
 import { classifyItem } from "./publishers.js";
-import { isWithinWeek, parseDate, toIso } from "./time.js";
+import { WEEK_DAYS, isWithinWeek, parseDate, toIso } from "./time.js";
 import { judgeArticle, readArticle } from "./article.js";
 import { pendingAiBrief } from "./aiBrief.js";
 import {
@@ -51,16 +53,69 @@ function topicText(row) {
   return [row.title, row.snippet, row.article_text].filter(Boolean).join(" ");
 }
 
+/** لا يُحفظ مرشح إلا بتاريخ قابل للتحليل وداخل نافذة الأسبوع. بلا تاريخ = أرشيف. */
+export function isFreshDiscoveryRow(row, now = Date.now()) {
+  const dated = parseDate(row?.published_at);
+  if (!dated) return false;
+  return isWithinWeek(dated, now) === true;
+}
+
+/**
+ * نفس بوابة الأسبوع في SQL حتى لا يسحب الطابور أقدم 172 ألف صف بلا تاريخ
+ * قبل أن يصل إلى خبر هذا الأسبوع.
+ */
+export function freshCandidateSql(alias = "candidates") {
+  return `${alias}.published_at GLOB '????-??-??*'
+    AND date(substr(${alias}.published_at, 1, 10)) >= date('now', '-${WEEK_DAYS} days')
+    AND date(substr(${alias}.published_at, 1, 10)) <= date('now', '+1 day')`;
+}
+
 export async function persistDiscovered(env, { mayor, source, scanId, rows }) {
   let discovered = 0;
   let inserted = 0;
+  let skippedUndated = 0;
+  let skippedStale = 0;
+  let skippedCap = 0;
   const newIds = [];
-  for (const row of rows) {
+  const pendingRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM candidates
+     WHERE source_id = ?
+       AND fetch_status IN ('pending', 'retry', 'working')
+       AND ${freshCandidateSql("candidates")}`,
+  )
+    .bind(source.id)
+    .first();
+  const pending = Number(pendingRow?.n) || 0;
+  const remaining = Math.max(0, MAX_PENDING_CANDIDATES_PER_SOURCE - pending);
+  const budget = Math.min(MAX_CANDIDATES_PER_SOURCE_POLL, remaining);
+  if (budget <= 0) {
+    return {
+      discovered: 0,
+      inserted: 0,
+      newIds,
+      skippedUndated: 0,
+      skippedStale: 0,
+      skippedCap: (rows || []).length,
+    };
+  }
+
+  for (const row of rows || []) {
     const url = String(row.url || "").slice(0, 1000);
     if (!url || !isApprovedUrl(url, mayor.id)) continue;
     const dated = parseDate(row.published_at);
-    if (dated && isWithinWeek(dated) === false) continue;
+    if (!dated) {
+      skippedUndated += 1;
+      continue;
+    }
+    if (!isFreshDiscoveryRow(row)) {
+      skippedStale += 1;
+      continue;
+    }
     discovered += 1;
+    if (inserted >= budget) {
+      skippedCap += 1;
+      continue;
+    }
     const existing = await env.DB.prepare(
       `SELECT id, fetch_status FROM candidates WHERE source_id = ? AND url = ?`,
     )
@@ -72,6 +127,7 @@ export async function persistDiscovered(env, { mayor, source, scanId, rows }) {
     )
       .bind(mayor.id, url)
       .first();
+    if (alreadyItem) continue;
     const id = crypto.randomUUID();
     await env.DB.prepare(
       `INSERT INTO candidates (
@@ -87,19 +143,17 @@ export async function persistDiscovered(env, { mayor, source, scanId, rows }) {
         url,
         String(row.title || url).slice(0, 500),
         String(row.snippet || "").slice(0, 1600),
-        row.published_at || null,
+        toIso(dated) || row.published_at || null,
         row.discovery_type || "newsroom",
-        alreadyItem ? STAGES.ARTICLE_FETCH : STAGES.CANDIDATE_DISCOVERED,
-        alreadyItem ? "skipped" : "pending",
-        alreadyItem ? "already_item" : null,
+        STAGES.CANDIDATE_DISCOVERED,
+        "pending",
+        null,
       )
       .run();
-    if (!alreadyItem) {
-      inserted += 1;
-      newIds.push(id);
-    }
+    inserted += 1;
+    newIds.push(id);
   }
-  return { discovered, inserted, newIds };
+  return { discovered, inserted, newIds, skippedUndated, skippedStale, skippedCap };
 }
 
 async function ingestRow(env, mayor, scanId, row, seen) {
@@ -220,6 +274,13 @@ export async function fetchCandidate(env, candidate, extra = {}) {
       stage: STAGES.ARTICLE_FETCH,
     });
     return { opened: false, kind: "failed" };
+  }
+  /**
+   * أرشيف بلا تاريخ أو خارج الأسبوع لا يُفتح ولا يُحدَّث صفّه.
+   * تعليم 172 ألف مرشح بـ UPDATE يستهلك سقف الكتابة كما فعل الإدخال.
+   */
+  if (!isFreshDiscoveryRow(candidate)) {
+    return { opened: false, kind: "stale" };
   }
   const claimed = await env.DB.prepare(
     `UPDATE candidates
@@ -354,6 +415,7 @@ export async function fetchCandidateBatch(env, { ids = [], mayorId = null, limit
       `SELECT * FROM candidates
        WHERE fetch_status IN ('pending', 'retry')
          AND (? IS NULL OR mayor_id = ?)
+         AND ${freshCandidateSql("candidates")}
        ORDER BY discovered_at
        LIMIT ?`,
     )
@@ -397,7 +459,8 @@ export async function pendingCandidateCount(env, mayorId = null, scanId = null) 
     `SELECT COUNT(*) AS n FROM candidates
      WHERE fetch_status IN ('pending', 'retry', 'working')
        AND (? IS NULL OR mayor_id = ?)
-       AND (? IS NULL OR scan_id = ?)`,
+       AND (? IS NULL OR scan_id = ?)
+       AND ${freshCandidateSql("candidates")}`,
   )
     .bind(mayorId, mayorId, scanId, scanId)
     .first();
@@ -594,6 +657,7 @@ export async function pendingFetchIds(env, { mayorId, scanId, limit = ARTICLE_FE
      WHERE fetch_status IN ('pending', 'retry')
        AND (? IS NULL OR mayor_id = ?)
        AND (? IS NULL OR scan_id = ?)
+       AND ${freshCandidateSql("candidates")}
      ORDER BY discovered_at
      LIMIT ?`,
   )

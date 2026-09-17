@@ -28,10 +28,8 @@ export function parseSitemap(xml, { includePatterns = [], now = Date.now() } = {
   const fallback = rows.length ? rows : locsFromXml(xml).map((url) => ({ url, lastmod: "" }));
   const filtered = fallback.filter((row) => {
     if (patterns.length && !patterns.some((re) => re.test(row.url))) return false;
-    if (row.lastmod) {
-      const parsed = parseDate(row.lastmod);
-      if (parsed && isWithinWeek(parsed, now) === false) return false;
-    }
+    const parsed = parseDate(row.lastmod);
+    if (!parsed || isWithinWeek(parsed, now) !== true) return false;
     return true;
   });
   return filtered.slice(0, SITEMAP_LIMIT);
