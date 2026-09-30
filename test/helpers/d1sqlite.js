@@ -32,8 +32,8 @@ export class D1Sqlite {
     return log;
   }
 
-  _record(sql, params) {
-    if (this.log) this.log.push({ sql, params });
+  _record(sql, params, changes = 0) {
+    if (this.log) this.log.push({ sql, params, changes });
   }
 
   _tableRowCount(table) {
@@ -92,27 +92,41 @@ export class D1Sqlite {
     return total;
   }
 
-  /** Analyze a recorded statement log into an aggregate rows_read report. */
+  /** Analyze a recorded statement log into an aggregate rows_read/rows_written report. */
   analyze(log) {
     let rowsRead = 0;
+    let rowsWritten = 0;
+    let writeStatements = 0;
+    let readStatements = 0;
     let fullItemScans = 0;
     let correlated = 0;
     const perSql = new Map();
-    for (const { sql } of log) {
-      const cost = this.estimateRowsRead(sql);
-      rowsRead += cost;
+    const isWrite = (sql) => /^\s*(INSERT|UPDATE|DELETE|REPLACE)/i.test(sql);
+    for (const { sql, changes = 0 } of log) {
+      const write = isWrite(sql);
+      if (write) {
+        writeStatements += 1;
+        rowsWritten += Number(changes) || 0;
+      } else {
+        readStatements += 1;
+        rowsRead += this.estimateRowsRead(sql);
+      }
       const plan = this._plan(sql);
       const planText = plan.map((row) => row.detail).join(" | ");
       if (/SCAN items\b/.test(planText)) fullItemScans += 1;
       if (/CORRELATED SCALAR SUBQUERY/.test(planText)) correlated += 1;
-      const entry = perSql.get(sql) || { count: 0, cost: 0, plan: planText };
+      const entry = perSql.get(sql) || { count: 0, cost: 0, writes: 0, plan: planText };
       entry.count += 1;
-      entry.cost += cost;
+      if (write) entry.writes += Number(changes) || 0;
+      else entry.cost += this.estimateRowsRead(sql);
       perSql.set(sql, entry);
     }
     return {
       statements: log.length,
+      readStatements,
+      writeStatements,
       rowsRead,
+      rowsWritten,
       fullItemScans,
       correlatedSubqueries: correlated,
       perSql,
@@ -120,13 +134,14 @@ export class D1Sqlite {
   }
 
   _run(sql, params) {
-    this._record(sql, params);
     const stmt = this.db.prepare(sql);
     const info = stmt.run(...params);
+    const changes = Number(info.changes) || 0;
+    this._record(sql, params, changes);
     return {
       success: true,
       meta: {
-        changes: Number(info.changes) || 0,
+        changes,
         last_row_id: Number(info.lastInsertRowid) || 0,
       },
     };
