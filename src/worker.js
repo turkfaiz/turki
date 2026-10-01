@@ -347,9 +347,25 @@ async function schemaComplete(env) {
   return Number(row?.n) === REQUIRED_TABLES.length;
 }
 
+/**
+ * يُنشئ الفهارس الساخنة على قاعدة مُهيّأة سابقًا دون إعادة التهيئة الكاملة، حتى
+ * تستفيد قواعد الإنتاج القائمة من الفهرس فورًا بلا ترحيل مدمّر أو إعادة زرع.
+ * `CREATE INDEX IF NOT EXISTS` عملية ذرية رخيصة تُنفَّذ مرة واحدة فعليًا.
+ */
+async function ensureHotIndexes(env) {
+  const info = await env.DB.prepare(`PRAGMA table_info(items)`).all();
+  const names = new Set((info.results || []).map((column) => column.name));
+  // على جدول قديم بلا العمود، تتكفّل تهيئة الترحيل بإضافة العمود ثم الفهرس.
+  if (!names.has("brief_claim_id")) return;
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_claim ON items(brief_claim_id)`,
+  ).run();
+}
+
 export async function ensureDb(env) {
   if (bootstrapped.has(env.DB)) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
+  await ensureHotIndexes(env);
   const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
   if (stamp?.v === BOOTSTRAP_VERSION && (await schemaComplete(env))) {
     bootstrapped.add(env.DB);
@@ -594,6 +610,10 @@ async function migrateItems(env) {
   if (!names.has("brief_claim_id")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_claim_id TEXT`).run();
   }
+  // الفهرس يُنشأ هنا بعد ضمان وجود العمود، فقراءة الحجز تبحث بالفهرس لا بمسح كامل.
+  await env.DB.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_items_claim ON items(brief_claim_id)`,
+  ).run();
   if (!names.has("brief_after")) {
     await env.DB.prepare(`ALTER TABLE items ADD COLUMN brief_after TEXT`).run();
   }
@@ -1721,14 +1741,7 @@ async function readBody(request) {
 
 async function stats(env) {
   const laneSql = deskLaneStatSql("items");
-  const row = await env.DB.prepare(
-    `SELECT
-      ${laneSql},
-      SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
-      SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
-      COUNT(*) AS total
-     FROM items`,
-  ).first();
+  // مجاميع كل مكتب تكفي لاشتقاق المجموع الكلي، فيُلغى مسحٌ كامل ثانٍ للجدول.
   const byMayor = await env.DB.prepare(
     `SELECT mayor_id, COUNT(*) AS total,
             ${laneSql},
@@ -1736,33 +1749,42 @@ async function stats(env) {
             SUM(CASE WHEN status = 'excluded' THEN 1 ELSE 0 END) AS excluded
      FROM items GROUP BY mayor_id`,
   ).all();
+  const mayorRows = byMayor.results || [];
+  const laneKeys = ["reading", "verifying", "decision_ready", "attention_required"];
+  const row = mayorRows.reduce(
+    (acc, entry) => {
+      acc.approved += Number(entry.approved) || 0;
+      acc.excluded += Number(entry.excluded) || 0;
+      acc.total += Number(entry.total) || 0;
+      for (const key of laneKeys) acc[key] += Number(entry[key]) || 0;
+      return acc;
+    },
+    { approved: 0, excluded: 0, total: 0, reading: 0, verifying: 0, decision_ready: 0, attention_required: 0 },
+  );
   const lastWeekly = await env.DB.prepare(
     `SELECT * FROM scans WHERE type = 'weekly' ORDER BY started_at DESC LIMIT 1`,
   ).first();
   const lastManual = await env.DB.prepare(
     `SELECT * FROM scans WHERE type = 'manual' ORDER BY started_at DESC LIMIT 1`,
   ).first();
-  const weekDup = await env.DB.prepare(
-    `SELECT COUNT(*) AS duplicates
+  // عدّ المكرر والمكتشف في نافذة الأسبوع بمسح واحد بدل مسحين متتاليين.
+  const week = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN exclude_reason = ? THEN 1 ELSE 0 END) AS duplicates,
+       COUNT(*) AS found
      FROM items
-     WHERE exclude_reason = ?
-       AND COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
+     WHERE COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
   )
     .bind(REASON.DUPLICATE)
     .first();
-  const weekFound = await env.DB.prepare(
-    `SELECT COUNT(*) AS found
-     FROM items
-     WHERE COALESCE(published_at, created_at) >= datetime('now', '-${ITEM_WINDOW_DAYS} days')`,
-  ).first();
   const overview = await slotOverview(env);
   const lanes = publicLaneStats(row);
   return {
     ...lanes,
-    approved: row?.approved || 0,
-    excluded: row?.excluded || 0,
-    total: row?.total || 0,
-    byMayor: (byMayor.results || []).map((entry) => ({
+    approved: row.approved || 0,
+    excluded: row.excluded || 0,
+    total: row.total || 0,
+    byMayor: mayorRows.map((entry) => ({
       mayor_id: entry.mayor_id,
       total: entry.total || 0,
       approved: entry.approved || 0,
@@ -1771,7 +1793,7 @@ async function stats(env) {
     })),
     lastWeekly,
     lastManual,
-    week: { duplicates: weekDup?.duplicates || 0, found: weekFound?.found || 0 },
+    week: { duplicates: week?.duplicates || 0, found: week?.found || 0 },
     sources: {
       ...sourceStatus(env),
       ai_brief: aiBriefEnabled(env) ? "ready" : "unconfigured",

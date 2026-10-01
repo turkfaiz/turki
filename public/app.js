@@ -561,6 +561,9 @@ function renderDiagnostics(d) {
 }
 
 async function loadDiagnostics() {
+  // لوحة التشخيص تُجمّع مسوحًا كاملة على الأخبار؛ لا تُطلب إلا حين تكون مفتوحة
+  // فعلًا أمام المستخدم، فلا تُستهلك قراءات D1 على بيانات لا تُعرض.
+  if (!$("diagnostics")?.open) return;
   try {
     const data = await api("/api/diagnostics");
     state.tools = data.tools || [];
@@ -577,7 +580,7 @@ $("diagnostics").addEventListener("toggle", () => {
   loadDiagnostics();
   diagPoll = window.setInterval(() => {
     if ($("diagnostics").open) loadDiagnostics();
-  }, 4000);
+  }, 20000);
 });
 
 $("diag-body").addEventListener("click", (e) => {
@@ -866,7 +869,10 @@ async function waitForSearchJob(jobId) {
         `${job.running ? ` · يعمل الآن ${num(job.running)}` : ""}` +
         `${job.failed ? ` · تعذر ${num(job.failed)}` : ""}.`,
     );
-    if (attempt % 2 === 0) await refreshAll();
+    // تقدّم الرصد يُقرأ من لقطة المهمة الرخيصة كل ثلاث ثوانٍ. أما التحديث الكامل
+    // (إحصاءات + قائمة + تشخيص) فيمسح جدول الأخبار، فيُشغَّل كل ثلاثين ثانية فقط
+    // بدل كل ست، حتى لا يفجّر بحثٌ واحد قراءات D1 أثناء متابعة اللوحة.
+    if (attempt % 10 === 0) await refreshAll();
     if (["completed", "partial", "failed"].includes(job.status)) {
       localStorage.removeItem("mayorWatchSearchJob");
       if (job.status === "failed") throw new Error("تعذر الرصد في جميع المكاتب.");
