@@ -426,10 +426,6 @@ export function discoverySteps(source) {
   return (source?.discovery || []).filter((entry) => entry && entry.enabled !== false);
 }
 
-export function primaryStrategy(source) {
-  return discoverySteps(source).find((entry) => entry.url) || discoverySteps(source)[0] || null;
-}
-
 export function strategyKind(type) {
   return STRATEGY_KIND[type] || "page";
 }

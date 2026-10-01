@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureDb } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import { assignPendingLanes, aggregateSlotBudget, boundSlotWaitMs, providerLaneSnapshot, slotRuntimeStatuses } from "../src/aiDispatch.js";
 import { boundSlots } from "../src/aiProviders.js";
 import { briefBacklog, translatePending } from "../src/translate.js";

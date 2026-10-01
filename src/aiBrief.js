@@ -443,7 +443,7 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
   );
 }
 
-export const MAX_PROMPT_CHARS = 60000;
+const MAX_PROMPT_CHARS = 60000;
 const MIN_SOURCE_SHARE = 600;
 
 /**
@@ -537,14 +537,17 @@ function renderBriefPrompt(item, mayor, excerpts) {
 
 export function validateAiBrief(payload, sourceText, mayor, engine) {
   const headline = cleanArabic(payload?.headline_ar, 180);
-  if (
-    !headline ||
-    !headline.includes(mayor.name_ar) ||
-    !evidenceExists(sourceText, payload?.headline_evidence) ||
-    !evidenceMentionsMayor(payload?.headline_evidence, mayor)
-  ) {
-    throw new Error("ai_ungrounded_headline");
-  }
+  // اللاحقة تحدد الشرط الذي سقط، والبادئة ثابتة لأن الترحيل والواجهة يطابقانها.
+  const headlineFault = !headline
+    ? "empty"
+    : !headline.includes(mayor.name_ar)
+      ? "name_missing"
+      : !evidenceExists(sourceText, payload?.headline_evidence)
+        ? "quote_not_in_page"
+        : !evidenceMentionsMayor(payload?.headline_evidence, mayor)
+          ? "quote_without_mayor"
+          : "";
+  if (headlineFault) throw new Error(`ai_ungrounded_headline:${headlineFault}`);
 
   const facts = [];
   for (const row of Array.isArray(payload?.facts) ? payload.facts : []) {

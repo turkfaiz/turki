@@ -181,11 +181,3 @@ export async function assessMayorJourney(env, { mayorId, scanId }) {
   };
 }
 
-export function shouldContinueJourney(briefSummary, verifySummary) {
-  const pending = (Number(briefSummary?.pending) || 0) + (Number(verifySummary?.pending) || 0);
-  if (pending <= 0 || briefSummary?.unconfigured) return false;
-  const eligible =
-    (Number(briefSummary?.eligible) || 0) + (Number(verifySummary?.eligible) || 0);
-  if (eligible > 0 && !briefSummary?.deferred && !verifySummary?.deferred) return true;
-  return pending > 0;
-}

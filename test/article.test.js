@@ -6,7 +6,7 @@ import {
   isListingPageUrl,
   usableArticle,
 } from "../src/article.js";
-import { isWithinWeek, parseDate, withWeekQuery } from "../src/time.js";
+import { isWithinWeek } from "../src/time.js";
 import { MAYORS } from "../src/mayors.js";
 
 test("week window rejects 2023 and keeps yesterday", () => {
@@ -14,11 +14,6 @@ test("week window rejects 2023 and keeps yesterday", () => {
   assert.equal(isWithinWeek("2023-05-27T10:00:00Z", now), false);
   assert.equal(isWithinWeek("2026-09-08T09:00:00Z", now), true);
   assert.equal(isWithinWeek("not-a-date", now), null);
-});
-
-test("withWeekQuery appends when:7d once", () => {
-  assert.equal(withWeekQuery('"Oh Se-hoon" Seoul'), '"Oh Se-hoon" Seoul when:7d');
-  assert.equal(withWeekQuery("x when:7d"), "x when:7d");
 });
 
 test("extractArticle reads og title, canonical, published time and paragraphs", () => {

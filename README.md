@@ -107,6 +107,25 @@ npx wrangler queues create mayor-watch-scans
 حماية الصفحة إلزامية عند وجود أي مفتاح ذكاء اصطناعي: إذا ضُبط المفتاح دون
 `DASHBOARD_PASSWORD` يرفض Worker طلبات الويب حتى لا تصبح التكلفة وقرارات الاعتماد عامة.
 
+## بنية الشيفرة
+
+| الملف | الدور |
+|---|---|
+| `src/worker.js` | نقطة الدخول فقط: `fetch` و`scheduled` و`queue` (نحو 100 سطر) |
+| `src/config.js` | ثوابت الجدولة والنوافذ والدفعات |
+| `src/db/` | `schema.js` الجداول · `bootstrap.js` `ensureDb` · `migrations.js` الترحيل additive · `items.js` التقليم وسجل صحة المصادر |
+| `src/jobs/` | `enqueue.js` إرسال المهام · `consumers.js` معالجة رسائل Queue · `desk.js` إنهاء المكتب والتصريف · `continuation.js` قرار الاستكمال · `searchJob.js` حالة مهمة البحث |
+| `src/api/` | `http.js` المصادقة والاستجابة · `status.js` الصحة والإحصاءات والتشخيص · `routes.js` مسارات `/api/*` |
+| `src/pipeline.js` | الرصد → المرشحون → قراءة المقال (يستورده Worker مباشرة) |
+| `src/sources.js` · `discovery.js` · `newsroom.js` · `rss.js` · `sitemap.js` | سجل المصادر المغلق واكتشاف الروابط |
+| `src/article.js` · `governedFetch.js` | قراءة المقال تحت الحوكمة |
+| `src/translate.js` · `aiBrief.js` · `aiDispatch.js` · `aiBudget.js` · `aiProviders.js` | الموجز والتدقيق الدلالي وتوزيع الفتحات والحصص |
+| `src/versions.js` · `deskLanes.js` · `journey.js` | النسخ والاعتماد ومسارات المكتب ورحلة الخبر |
+| `src/brief.js` · `reviewAgent.js` | كشف الموضوع وتجميع الأخبار المكررة في الوارد |
+
+تعمل `npm test` و`wrangler deploy --dry-run` تلقائيًا على GitHub Actions
+(`.github/workflows/ci.yml`) لكل دفعة وكل طلب دمج.
+
 ## الجدول
 
 Cron على Cloudflare: `0 3 * * SUN` = الأحد 03:00 UTC = الأحد 06:00 في الرياض.

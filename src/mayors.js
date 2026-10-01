@@ -459,48 +459,6 @@ export async function resolveMayor(env, id) {
   return seeded ? { ...seeded, origin: "seed" } : null;
 }
 
-export function buildSearchQueries(mayor, extra = "") {
-  const extraBit = String(extra || "").trim();
-  const nameClause =
-    mayor.name_en === mayor.name_native
-      ? `"${mayor.name_en}"`
-      : `("${mayor.name_en}" OR "${mayor.name_native}")`;
-  const base = extraBit ? `${nameClause} ${extraBit}` : `${nameClause} "${mayor.city_en}"`;
-  const official = mayor.official_host
-    ? `${nameClause} site:${mayor.official_host}`
-    : null;
-  return {
-    native: base,
-    english: extraBit
-      ? `"${mayor.name_en}" ${extraBit}`
-      : `"${mayor.name_en}" "${mayor.title_en}"`,
-    official,
-  };
-}
-
-export function relevanceTokens(mayor) {
-  const parts = [
-    mayor.name_en,
-    mayor.name_native,
-    mayor.city_en,
-    mayor.city_ar,
-    mayor.title_en,
-    "mayor",
-    "alcalde",
-    "sindaco",
-    "δήμαρχος",
-    "시장",
-    "市長",
-    "أمين",
-    "عمدة",
-    "بلدية",
-  ];
-  return parts
-    .flatMap((p) => String(p).split(/[\s,."()]+/))
-    .map((t) => t.trim().toLowerCase())
-    .filter((t) => t.length >= 3);
-}
-
 export function identityTokens(mayor) {
   return [...new Set([mayor.name_en, mayor.name_native, mayor.name_ar].filter(Boolean))];
 }

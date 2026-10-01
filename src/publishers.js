@@ -125,7 +125,7 @@ function row(domain, name, tier, country_code, mayor_id) {
   };
 }
 
-export function buildPublishers() {
+function buildPublishers() {
   const out = [];
   const seen = new Set();
   const add = (item) => {

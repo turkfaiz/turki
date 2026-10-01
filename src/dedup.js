@@ -24,11 +24,6 @@ export function tokenOverlap(a, b) {
   return hit / Math.min(sa.size, sb.size);
 }
 
-export function isRelevant(text, tokens) {
-  const hay = String(text || "").toLowerCase();
-  return tokens.some((t) => hay.includes(t));
-}
-
 export async function fingerprint(mayorId, title, url) {
   const key = `${mayorId}|${normalizeTitle(title).slice(0, 96)}|${stripTracking(url)}`;
   const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(key));

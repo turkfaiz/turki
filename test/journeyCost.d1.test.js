@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureDb, completeMayorDesk } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
+import { completeMayorDesk } from "../src/jobs/desk.js";
 import { persistDiscovered, fetchCandidateBatch } from "../src/pipeline.js";
 import { translatePending, verifyPending } from "../src/translate.js";
 import { sourcesFor } from "../src/sources.js";

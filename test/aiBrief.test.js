@@ -476,3 +476,13 @@ test("an invented quote is still rejected no matter how it attributes", () => {
     /ai_ungrounded_headline/,
   );
 });
+
+test("a rejected headline reports which grounding condition failed", () => {
+  const source = "Stefano Lo Russo: non è un'emergenza. La rete sarà controllata domani.";
+  const facts = [{ fact_ar: "ستُفحص الشبكة غدًا.", evidence: "La rete sarà controllata domani." }];
+  const attempt = (headline_ar, headline_evidence) =>
+    validateAiBrief({ headline_ar, headline_evidence, facts, topic_ar: "الكهرباء" }, source, turin, "t");
+  assert.throws(() => attempt("إعلان طوارئ", "Stefano Lo Russo: non è un'emergenza."), /ai_ungrounded_headline:name_missing/);
+  assert.throws(() => attempt("ستيفانو لو روسو يعلن طوارئ", "Frase inventata che non esiste."), /ai_ungrounded_headline:quote_not_in_page/);
+  assert.throws(() => attempt("ستيفانو لو روسو يعلن طوارئ", "La rete sarà controllata domani."), /ai_ungrounded_headline:quote_without_mayor/);
+});

@@ -9,7 +9,8 @@
  *
  * D1 free daily limits: 5,000,000 rows_read, 100,000 rows_written.
  */
-import worker, { ensureDb, completeMayorDesk } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
+import { completeMayorDesk } from "../src/jobs/desk.js";
 import { persistDiscovered, fetchCandidateBatch } from "../src/pipeline.js";
 import { translatePending, verifyPending } from "../src/translate.js";
 import { sourcesFor } from "../src/sources.js";

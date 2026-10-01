@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildSearchQueries, MAYORS } from "../src/mayors.js";
-import { parseRssItems, googleNewsRssUrl } from "../src/rss.js";
+import { MAYORS, isAboutMayor } from "../src/mayors.js";
+import { parseRssItems } from "../src/rss.js";
 import { arabicRatio, splitHeadline } from "../src/translate.js";
-import { isRelevant, normalizeTitle, tokenOverlap } from "../src/dedup.js";
-import { isAboutMayor } from "../src/mayors.js";
-import { extractArticleLinks, stampBrief } from "../src/collect.js";
+import { normalizeTitle, tokenOverlap } from "../src/dedup.js";
+import { extractArticleLinks } from "../src/newsroom.js";
+import { stampBrief } from "../src/pipeline.js";
 import {
   APPROVED_SOURCES,
   MAX_SOURCES_PER_OFFICE,
@@ -16,21 +16,6 @@ import {
 
 test("phase-1 list has 12 mayors", () => {
   assert.equal(MAYORS.length, 12);
-});
-
-test("search keys use english plus native language", () => {
-  const seoul = MAYORS.find((m) => m.id === "seoul");
-  const q = buildSearchQueries(seoul);
-  assert.match(q.native, /Oh Se-hoon/);
-  assert.match(q.native, /오세훈/);
-  assert.match(q.official, /seoul\.go\.kr/);
-});
-
-test("arabic names are display-only and still used when arabic is native", () => {
-  const amman = MAYORS.find((m) => m.id === "amman");
-  const q = buildSearchQueries(amman);
-  assert.match(q.native, /Yousef Al-Shawarbeh/);
-  assert.match(q.native, /يوسف الشواربة/);
 });
 
 test("rss parser reads google-like items", () => {
@@ -50,12 +35,6 @@ test("dedup normalization collapses source suffixes", () => {
   );
 });
 
-test("relevance requires mayor tokens", () => {
-  const tokens = ["oh", "se-hoon", "seoul", "오세훈"];
-  assert.equal(isRelevant("Seoul mayor Oh Se-hoon budget", tokens), true);
-  assert.equal(isRelevant("random sports score", tokens), false);
-});
-
 test("office match requires the mayor identity, not just the city", () => {
   const seoul = MAYORS.find((m) => m.id === "seoul");
   assert.equal(isAboutMayor("Oh Se-hoon announces housing plan", seoul), true);
@@ -67,11 +46,6 @@ test("a common given name is not enough to identify a mayor", () => {
   const turin = MAYORS.find((m) => m.id === "turin");
   assert.equal(isAboutMayor("Luis presenta un progetto culturale a Madrid", madrid), false);
   assert.equal(isAboutMayor("Il sindaco Russo presenta il progetto a Torino", turin), true);
-});
-
-test("google news search is limited to the last seven days", () => {
-  const url = googleNewsRssUrl('"Oh Se-hoon" Seoul', "ko", "KR");
-  assert.match(url, /when%3A7d/);
 });
 
 test("overlap detects near-duplicate titles", () => {

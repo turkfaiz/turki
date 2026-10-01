@@ -196,31 +196,3 @@ export function judgeArticle(article, mayor, row = {}) {
   };
 }
 
-export async function verifyCandidate(row, mayor, opts = {}) {
-  const rssDate = parseDate(row.published_at);
-  if (rssDate && isWithinWeek(rssDate) === false) {
-    return { ok: false, reason: "stale", pageRead: false };
-  }
-  const article = await readArticle(row.publisher_article_url || row.url, {
-    mayorId: mayor.id,
-    fetch: opts.fetch,
-  });
-  if (!article || article.error || article.notModified) {
-    return { ok: false, reason: article?.error === "canonical_outside_registry" ? "untrusted" : "unverified", pageRead: false };
-  }
-  return judgeArticle(article, mayor, row);
-}
-
-export async function mapLimit(items, limit, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-  async function worker() {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx], idx);
-    }
-  }
-  const n = Math.max(1, Math.min(limit, items.length || 1));
-  await Promise.all(Array.from({ length: n }, worker));
-  return out;
-}

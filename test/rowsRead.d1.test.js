@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { ensureDb } from "../src/worker.js";
+import worker from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import { translatePending } from "../src/translate.js";
 import { MAYORS } from "../src/mayors.js";
 import { D1Sqlite } from "./helpers/d1sqlite.js";

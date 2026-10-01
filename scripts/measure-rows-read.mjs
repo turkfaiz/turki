@@ -46,12 +46,6 @@ async function boot(env) {
   await worker.fetch(new Request("https://d/api/health"), env);
 }
 
-function printPlan(env, label, matcher) {
-  const log = env.DB.startRecording();
-  env.DB.stopRecording();
-  return log;
-}
-
 /** Print EXPLAIN QUERY PLAN for a captured statement so the cost driver is visible. */
 function explain(env, sql) {
   try {

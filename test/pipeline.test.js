@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureDb } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import { createTestD1 } from "./helpers/d1.js";
 import {
   fetchCandidateBatch,
@@ -54,7 +54,7 @@ function freshRow(overrides = {}) {
 
 const ARTICLE_HTML = `<html><head>
   <meta property="og:title" content="Stefano Lo Russo inaugura via Roma">
-  <meta property="article:published_time" content="2026-09-13T10:00:00Z">
+  <meta property="article:published_time" content="${new Date(Date.now() - 36 * 3600 * 1000).toISOString()}">
   <link rel="canonical" href="https://www.comune.torino.it/via-roma">
 </head><body>
   <p>Stefano Lo Russo inaugura la nuova via pedonale di Via Roma con una festa sabato nel centro di Torino.</p>
@@ -194,7 +194,7 @@ test("a failing source does not stop the rest of the desk scan", async () => {
         `<?xml version="1.0"?><rss><channel><item>
           <title>Lo Russo in consiglio</title>
           <link>${target.includes("repubblica") ? "https://torino.repubblica.it/2026/a" : "https://www.torinoclick.it/2026/a"}</link>
-          <pubDate>Sun, 13 Sep 2026 10:00:00 GMT</pubDate>
+          <pubDate>${new Date(Date.now() - 36 * 3600 * 1000).toUTCString()}</pubDate>
         </item></channel></rss>`,
       );
     }

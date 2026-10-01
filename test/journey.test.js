@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { completeMayorDesk, ensureDb } from "../src/worker.js";
+import { completeMayorDesk } from "../src/jobs/desk.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import { noteAiFailure } from "../src/aiBudget.js";
 import { assessMayorJourney } from "../src/journey.js";
 import { createTestD1 } from "./helpers/d1.js";

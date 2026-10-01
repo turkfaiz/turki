@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureDb, pruneOldItems, reviewerOf } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
+import { pruneOldItems } from "../src/db/items.js";
+import { reviewerOf } from "../src/api/http.js";
 import { translatePending, verifyPending } from "../src/translate.js";
 import {
   claimVerifications,
@@ -100,7 +102,7 @@ async function desk(overrides = {}) {
 }
 
 test("a brief is saved before verification and survives a deferred verifier", async () => {
-  const { db, env } = await desk();
+  const { env } = await desk();
   await translatePending(env, 1, null, async () => briefResponse());
 
   const saved = await currentVersion(env, "a");

@@ -10,7 +10,6 @@ import {
   FEED_STALE_DAYS,
   SOURCE_POLL_MAX_REQUESTS,
   isApprovedUrl,
-  sourceById,
 } from "./sources.js";
 import { governedFetch, looksLikeErrorPage } from "./governedFetch.js";
 
@@ -497,14 +496,3 @@ export async function discoverSource(source, mayor, extra = {}) {
   return { source, rows: leftover, health };
 }
 
-export async function discoverById(sourceId, mayor, extra = {}) {
-  const source = sourceById(sourceId);
-  if (!source) {
-    return {
-      source: { id: sourceId },
-      rows: [],
-      health: { id: sourceId, ok: false, status: "bad_url", fail_reason: "unknown_source" },
-    };
-  }
-  return discoverSource(source, mayor, extra);
-}
