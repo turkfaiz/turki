@@ -111,7 +111,11 @@ npx wrangler queues create mayor-watch-scans
 
 | الملف | الدور |
 |---|---|
-| `src/worker.js` | نقطة الدخول الوحيدة: الواجهة البرمجية، Cron، Queue |
+| `src/worker.js` | نقطة الدخول فقط: `fetch` و`scheduled` و`queue` (نحو 100 سطر) |
+| `src/config.js` | ثوابت الجدولة والنوافذ والدفعات |
+| `src/db/` | `schema.js` الجداول · `bootstrap.js` `ensureDb` · `migrations.js` الترحيل additive · `items.js` التقليم وسجل صحة المصادر |
+| `src/jobs/` | `enqueue.js` إرسال المهام · `consumers.js` معالجة رسائل Queue · `desk.js` إنهاء المكتب والتصريف · `continuation.js` قرار الاستكمال · `searchJob.js` حالة مهمة البحث |
+| `src/api/` | `http.js` المصادقة والاستجابة · `status.js` الصحة والإحصاءات والتشخيص · `routes.js` مسارات `/api/*` |
 | `src/pipeline.js` | الرصد → المرشحون → قراءة المقال (يستورده Worker مباشرة) |
 | `src/sources.js` · `discovery.js` · `newsroom.js` · `rss.js` · `sitemap.js` | سجل المصادر المغلق واكتشاف الروابط |
 | `src/article.js` · `governedFetch.js` | قراءة المقال تحت الحوكمة |

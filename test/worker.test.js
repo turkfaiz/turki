@@ -1,13 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  authorized,
-  briefStage,
-  continuationDelaySeconds,
-  registryChip,
-  searchJobSnapshot,
-  shouldContinueBriefs,
-} from "../src/worker.js";
+import { authorized } from "../src/api/http.js";
+import { briefStage, continuationDelaySeconds, shouldContinueBriefs } from "../src/jobs/continuation.js";
+import { registryChip } from "../src/api/status.js";
+import { searchJobSnapshot } from "../src/jobs/searchJob.js";
 
 test("dashboard authentication is optional locally and enforced when configured", () => {
   const plain = new Request("https://example.com/api/stats");

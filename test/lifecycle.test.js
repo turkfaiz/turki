@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureDb, pruneOldItems, reviewerOf } from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
+import { pruneOldItems } from "../src/db/items.js";
+import { reviewerOf } from "../src/api/http.js";
 import { translatePending, verifyPending } from "../src/translate.js";
 import {
   claimVerifications,

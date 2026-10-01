@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import worker, { ensureDb } from "../src/worker.js";
+import worker from "../src/worker.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import {
   applyDeskLaneMigration,
   DESK_LANES,
@@ -142,16 +143,17 @@ test("dry-run reports row movement without deleting or applying", async () => {
 });
 
 test("bootstrap source never wipes the desk or zeroes AI budgets", () => {
-  const source = fs.readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+  const read = (file) => fs.readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+  const source = fs.readdirSync(new URL("../src/", import.meta.url), { recursive: true })
+    .filter((file) => file.endsWith(".js"))
+    .map(read)
+    .join("\n");
   assert.doesNotMatch(source, /wipeNewsDesk/);
   assert.doesNotMatch(source, /desk_wipe_epoch/);
   assert.doesNotMatch(source, /fresh-desk-v1/);
   assert.doesNotMatch(source, /DELETE FROM approvals/);
   assert.doesNotMatch(source, /DELETE FROM brief_versions/);
-  const ensure = source.slice(
-    source.indexOf("export async function ensureDb"),
-    source.indexOf("export async function pruneOldItems"),
-  );
+  const ensure = read("db/bootstrap.js") + read("db/migrations.js");
   assert.doesNotMatch(ensure, /DELETE FROM items/);
   assert.doesNotMatch(ensure, /DELETE FROM scans/);
   assert.doesNotMatch(ensure, /DELETE FROM search_jobs/);

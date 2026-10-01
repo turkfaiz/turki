@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { authorized, ensureDb } from "../src/worker.js";
+import worker from "../src/worker.js";
+import { authorized } from "../src/api/http.js";
+import { ensureDb } from "../src/db/bootstrap.js";
 import { createTestD1 } from "./helpers/d1.js";
 import { MAYORS, parseMayorInput, slugifyMayorId } from "../src/mayors.js";
 import { APPROVED_SOURCES } from "../src/sources.js";
