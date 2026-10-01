@@ -25,6 +25,7 @@ import {
 } from "../sources.js";
 import { json, readBody, reviewerOf } from "./http.js";
 import { operationalStatus, publicSlotStatus, slotOverview } from "./status.js";
+import { testTool, toolsOverview } from "./tools.js";
 
 /** حالات تعني أن المصدر المفعّل لا ينتج شيئًا الآن ويحتاج قرارًا من الموظف. */
 const NEEDS_ATTENTION = new Set([
@@ -245,6 +246,14 @@ export async function handleSettingsApi(request, env, path, method) {
   }
   if (path === "/api/settings/offices" && method === "GET") {
     return json({ offices: await settingsOffices(env) });
+  }
+  if (path === "/api/settings/tools" && method === "GET") {
+    return json(await toolsOverview(env));
+  }
+  const toolTest = path.match(/^\/api\/settings\/tools\/([a-z0-9:_-]+)\/test$/i);
+  if (toolTest && method === "POST") {
+    const result = await testTool(env, decodeURIComponent(toolTest[1]).toLowerCase());
+    return json(result, result.unknown ? 404 : 200);
   }
   if (path === "/api/settings/audit" && method === "GET") {
     const limit = new URL(request.url).searchParams.get("limit");

@@ -577,6 +577,33 @@ export function validateAiBrief(payload, sourceText, mayor, engine) {
  * التدقيق الدلالي مرحلة مستقلة تُستدعى بعد حفظ الموجز، لأن وجود الاقتباس حرفيًا
  * لا يثبت أن الاستنتاج العربي يقوله فعلًا: قد يقلب النفي أو يغيّر الرقم أو الفاعل.
  */
+const PING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: { pong: { type: "boolean" } },
+  required: ["pong"],
+};
+
+/**
+ * اختبار حي لنموذج واحد: نداء صغير حقيقي بالمفتاح والطراز والعنوان المضبوطة، فيكشف
+ * خطأ المفتاح أو الحساب غير المدفوع أو الشبكة. يُحتسب من حصة النموذج مثل أي نداء.
+ */
+export async function pingAiSlot(env, slot, fetcher = fetch) {
+  const started = Date.now();
+  try {
+    const out = await callProvider(env, slot, 'أعد JSON {"pong": true} فقط.', PING_SCHEMA, fetcher, "brief");
+    const ok = out?.pong === true || out?.pong === "true";
+    return { ok, ms: Date.now() - started, error: ok ? "" : "ai_unexpected_reply" };
+  } catch (error) {
+    return {
+      ok: false,
+      ms: Date.now() - started,
+      error: String(error.message || error).slice(0, 120),
+      deferred: isDeferredAiError(error),
+    };
+  }
+}
+
 export async function verifyBriefSemantics(env, brief, fetcher = fetch) {
   const evidence = JSON.parse(brief.evidence);
   const facts = brief.snippet_ar.split("\n").filter(Boolean);

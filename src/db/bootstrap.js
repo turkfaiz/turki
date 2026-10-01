@@ -14,7 +14,7 @@ import { REQUIRED_TABLES, SCHEMA_STATEMENTS } from "./schema.js";
 
 const bootstrapped = new WeakSet();
 
-const BOOTSTRAP_VERSION = "bootstrap-v20";
+const BOOTSTRAP_VERSION = "bootstrap-v21";
 
 /**
  * الاعتماد على ختم النسخة وحده يفترض أن كل تغيير في المخطط رفع الختم. حين
@@ -45,6 +45,12 @@ async function ensureHotIndexes(env) {
   await env.DB.prepare(
     `CREATE INDEX IF NOT EXISTS idx_items_claim ON items(brief_claim_id)`,
   ).run();
+  // قمع الرحلة يجمّع بحسب المسح؛ بلا هذين الفهرسين يمسح كل الجدول عند كل متابعة.
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_items_scan ON items(scan_id)`).run();
+  const candidates = await env.DB.prepare(`PRAGMA table_info(candidates)`).all();
+  if ((candidates.results || []).length) {
+    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_candidates_scan ON candidates(scan_id)`).run();
+  }
 }
 
 export async function ensureDb(env) {

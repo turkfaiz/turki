@@ -204,7 +204,7 @@ test("D1 timestamps are read as UTC and shown as relative time", () => {
   const now = Date.parse("2026-10-01T09:00:00Z");
   assert.equal(relTime("2026-10-01 08:59:40", now), "الآن");
   assert.equal(relTime("2026-10-01 08:30:00", now), "قبل 30 دقيقة");
-  assert.equal(relTime("2026-10-01 05:00:00", now), "قبل 4 ساعة");
+  assert.equal(relTime("2026-10-01 05:00:00", now), "قبل 4 ساعات");
   assert.equal(relTime(null, now), "لم يُفحص بعد");
 });
 
@@ -234,4 +234,79 @@ test("add results stay visible after the page re-reads the overview", () => {
   assert.match(html, /x\.org: تعذر فتح الموقع/);
   assert.match(html, /st-note is-error/);
   assert.match(html, /تعمل · 3 روابط/);
+});
+
+const toolsView = () => ({
+  state: "warn",
+  needs_attention: 2,
+  tools: [
+    { id: "security", group: "security", name: "حماية الصفحة", state: "warn", detail: "لا كلمة سر للصفحة. اضبط DASHBOARD_PASSWORD.", testable: false },
+    { id: "database", group: "infrastructure", name: "قاعدة البيانات", state: "ok", detail: "متصلة", testable: true },
+    { id: "scheduler", group: "infrastructure", name: "المجدول التلقائي", state: "idle", detail: "لم تُسجَّل نبضة بعد", testable: true, last_at: "2026-10-01 07:50:00" },
+    { id: "ai:gemini", group: "ai", name: "جيميني — g", state: "ok", detail: "بقي 380 من 400", testable: true, test_cost: "نداء واحد من حصة اليوم", last_error: { code: "ai_http_402" } },
+    { id: "sources", group: "sources", name: "مواقع الرصد", state: "warn", detail: "36 موقعًا · 2 متعثر", testable: true, test_cost: "فحص كل موقع بطلبات حقيقية" },
+    { id: "reader", group: "sources", name: "قارئ الصفحات", state: "idle", detail: "لم يقرأ بعد" },
+  ],
+});
+
+test("the tools tab groups every tool, shows its state in words and offers a live test only where one exists", async () => {
+  const { renderTools, isFreeTest } = await import("../public/settings.js");
+  const html = renderTools(toolsView());
+  for (const group of ["الأمان", "البنية التشغيلية", "الذكاء الاصطناعي", "المواقع والقراءة"]) assert.match(html, new RegExp(group));
+  assert.match(html, /2 تحتاج انتباهًا/);
+  assert.match(html, /يحتاج انتباهًا/);
+  assert.match(html, /data-test-tool="database"/);
+  assert.match(html, /data-test-tool="ai:gemini" data-cost="نداء واحد من حصة اليوم"/);
+  assert.match(html, /يستهلك نداء واحد من حصة اليوم/);
+  assert.match(html, /data-run-sweep/);
+  assert.doesNotMatch(html, /data-test-tool="security"/);
+  assert.doesNotMatch(html, /data-test-tool="reader"/);
+  assert.match(html, /آخر نبضة مسجّلة/);
+  assert.match(html, /آخر خطأ: الحساب|آخر خطأ: هذا النموذج رفض/);
+  assert.deepEqual(toolsView().tools.filter(isFreeTest).map((t) => t.id), ["database", "scheduler"]);
+});
+
+test("a finished live test and a source sweep are reported with results and failing sites", async () => {
+  const { renderTools, renderSweep } = await import("../public/settings.js");
+  const now = Date.parse("2026-10-01T08:00:00Z");
+  const html = renderTools(toolsView(), { results: { database: { ok: true, ms: 12, detail: "يقرأ ويجيب", at: now - 60000 }, "ai:gemini": { ok: false, detail: "فشل النداء: ai_http_403", at: now } }, now });
+  assert.match(html, /✓ آخر اختبار قبل دقيقة · 12ms — يقرأ ويجيب/);
+  assert.match(html, /✕ آخر اختبار الآن — فشل النداء: ai_http_403/);
+
+  const names = new Map([["a", { office: "مدريد", domain: "madridiario.es" }]]);
+  const sweep = renderSweep(
+    { running: false, done: 3, total: 3, results: [{ id: "a", works: false, fail_reason: "http_403" }, { id: "b", works: true }, { id: "c", works: true }] },
+    names,
+  );
+  assert.match(sweep, /اكتمل الفحص/);
+  assert.match(sweep, /2 تعمل · 1 متعثر/);
+  assert.match(sweep, /مدريد<\/b> <span class="num">madridiario\.es<\/span> — الموقع يرفض الطلب الآلي \(403\)/);
+  assert.match(renderSweep({ running: true, done: 1, total: 4, results: [] }), /يفحص المواقع بطلبات حقيقية/);
+  assert.equal(renderSweep(null), "");
+});
+
+test("the brief pipeline shows counts, verification and every error reason in Arabic", async () => {
+  const { renderBriefPipeline } = await import("../public/settings.js");
+  const html = renderBriefPipeline({
+    windowDays: 7,
+    brief: { completed: 63, pending: 0, waitingQuota: 2, failed: 27, maxAttempts: 5, errors: [{ code: "ai_ungrounded_headline:name_missing", count: 25, attempts: 2 }] },
+    verification: { passed: 70, failed: 15, pending: 3 },
+  });
+  assert.match(html, /موجز مكتمل/);
+  assert.match(html, /70<\/b> اجتاز/);
+  assert.match(html, /لا يبدأ باسم العمدة/);
+  assert.match(html, /أقصى محاولات 2 من 5/);
+  assert.match(html, /data-refresh-pipeline/);
+  assert.match(renderBriefPipeline(null), /جاري التحميل/);
+  assert.match(renderBriefPipeline({ brief: { errors: [] }, verification: {} }), /لا أخطاء تلخيص/);
+});
+
+test("the expensive diagnostics call lives in one function that only the AI tab triggers", () => {
+  const source = fs.readFileSync(new URL("../public/settings.js", import.meta.url), "utf8");
+  assert.equal((source.match(/api\("\/api\/diagnostics"\)/g) || []).length, 1);
+  const fn = source.slice(source.indexOf("async function loadBriefPipeline"), source.indexOf("async function runSweep"));
+  assert.match(fn, /\/api\/diagnostics/);
+  assert.match(source, /if \(tab === "ai" && !state\.pipeline\) loadBriefPipeline\(\)/);
+  const html = fs.readFileSync(new URL("../public/settings.html", import.meta.url), "utf8");
+  for (const id of ["tab-tools", "panel-tools"]) assert.match(html, new RegExp(`id="${id}"`));
 });

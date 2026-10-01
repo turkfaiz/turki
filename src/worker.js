@@ -5,6 +5,7 @@ import { briefBacklog } from "./translate.js";
 import { verificationBacklog } from "./versions.js";
 import { authRequired, authorized, json } from "./api/http.js";
 import { handleApi } from "./api/routes.js";
+import { recordHeartbeat } from "./api/tools.js";
 import { publicHealth } from "./api/status.js";
 import { WEEKLY_CRON } from "./config.js";
 import { ensureDb } from "./db/bootstrap.js";
@@ -37,6 +38,12 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // نبضة المجدول: دليل مسجَّل على أن Cron يعمل فعلًا، تقرؤه صفحة الأدوات.
+    ctx.waitUntil(
+      ensureDb(env)
+        .then(() => recordHeartbeat(env, event?.cron))
+        .catch((error) => console.warn("heartbeat_failed", String(error?.message || error))),
+    );
     if (event?.cron === WEEKLY_CRON) {
       ctx.waitUntil(enqueueAllOffices(env));
       return;

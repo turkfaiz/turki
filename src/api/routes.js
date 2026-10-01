@@ -33,7 +33,7 @@ import {
   enqueueBriefPump,
   enqueueManualSearch,
 } from "../jobs/enqueue.js";
-import { readSearchJob } from "../jobs/searchJob.js";
+import { latestSearchJobId, readSearchJob, recentSearchJobs } from "../jobs/searchJob.js";
 
 const ITEM_FIELDS = `items.id, items.mayor_id, items.scan_id, items.source, items.title,
   items.title_ar AS news_title_ar, items.snippet, items.snippet_ar AS news_snippet_ar,
@@ -121,9 +121,17 @@ export async function handleApi(request, env) {
     return json({ scans: results });
   }
 
-  const jobMatch = path.match(/^\/api\/search-jobs\/([0-9a-f-]+)$/i);
+  if (path === "/api/search-jobs" && method === "GET") {
+    return json({ jobs: await recentSearchJobs(env, url.searchParams.get("limit")) });
+  }
+
+  const jobMatch = path.match(/^\/api\/search-jobs\/(latest|[0-9a-f-]+)$/i);
   if (jobMatch && method === "GET") {
-    const job = await readSearchJob(env, jobMatch[1]);
+    const latest = jobMatch[1].toLowerCase() === "latest";
+    const id = latest ? await latestSearchJobId(env) : jobMatch[1];
+    // «آخر رحلة» حين لا رحلات: حالة طبيعية لا خطأ، فلا 404 يملأ الكونسول.
+    if (latest && !id) return json({ job: null });
+    const job = id ? await readSearchJob(env, id, { detail: url.searchParams.get("detail") === "1" }) : null;
     if (!job) return json({ error: "not_found" }, 404);
     return json({ job });
   }

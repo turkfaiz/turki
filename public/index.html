@@ -3,84 +3,66 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>نشرة الرصد الدولي — MayorWatch</title>
+    <title>رصد العمداء</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui25" />
+    <link rel="stylesheet" href="/styles.css?v=ui32" />
+    <link rel="stylesheet" href="/journey.css?v=ui32" />
   </head>
   <body>
     <div class="sheet">
       <header class="mast">
         <div class="mast-right">
           <p class="gazette">نشرة الرصد الدولي</p>
-          <h1>مكتب متابعة عمداء المدن</h1>
-          <p class="sub">International Mayoral Briefing · Phase 1 · 12 selected offices</p>
+          <h1>رصد العمداء</h1>
+          <p class="sub" id="scope-line">جاري التحميل…</p>
         </div>
-        <div class="mast-stamp">
-          <span>الجدول</span>
-          <b class="num">Sunday 06:00</b>
-          <span>Asia/Riyadh</span>
+        <div class="mast-actions">
+          <a class="health-pill is-idle" id="health-pill" href="/settings#tools" title="حالة الأدوات والتحقق من عملها">
+            <i aria-hidden="true"></i><span id="health-text">يفحص الأدوات…</span>
+          </a>
+          <a class="btn-settings" href="/settings">الإعدادات</a>
         </div>
-        <a class="btn-settings" href="/settings">الإعدادات</a>
       </header>
 
       <form id="search-form" class="command">
-        <input id="q" name="q" type="search" placeholder="موضوع اختياري لتضييق النتائج — تُشترط كل كلماته في نص الخبر"
-          title="يُصفّى ما يُجمع قبل حفظه: كل كلمة في الموضوع يجب أن ترد في عنوان الخبر أو نصه. تُتجاهل الحركات وعلامات الترقيم." />
-        <select id="mayor_id" name="mayor_id">
-          <option value="">كل المكاتب (12)</option>
-        </select>
-        <button type="submit" class="btn-search" id="search-btn">بحث</button>
+        <label class="command-field command-office">
+          <span>المكتب</span>
+          <select id="mayor_id" name="mayor_id"><option value="">كل المكاتب</option></select>
+        </label>
+        <label class="command-field command-topic">
+          <span>موضوع (اختياري)</span>
+          <input id="q" name="q" type="search" placeholder="مثال: ميزانية، مياه… تُشترط كل كلماته في نص الخبر"
+            title="يُصفّى ما يُجمع قبل حفظه: كل كلمة في الموضوع يجب أن ترد في عنوان الخبر أو نصه." />
+        </label>
+        <button type="submit" class="btn-search" id="search-btn">رصد الآن</button>
       </form>
 
-      <section class="search-progress" id="search-progress" hidden aria-live="polite">
-        <div class="progress-head">
-          <strong id="progress-title">جاري الرصد</strong>
-          <span class="num" id="progress-count">0 / 0</span>
-        </div>
-        <div class="progress-track"><span id="progress-bar"></span></div>
-        <div class="progress-tasks" id="progress-tasks"></div>
-      </section>
-
-      <section class="kpis">
-        <article><span>قيد القراءة</span><b class="num" id="stat-reading">0</b></article>
-        <article><span>التدقيق</span><b class="num" id="stat-verifying">0</b></article>
-        <article class="kpi-decision"><span>بانتظار القرار</span><b class="num" id="stat-decision-ready">0</b></article>
-        <article><span>يحتاج تدخلاً</span><b class="num" id="stat-attention">0</b></article>
-      </section>
-
-      <details class="diagnostics" id="diagnostics">
-        <summary>
-          <span>التفاصيل والإحصائيات — ما يعمل الآن</span>
-          <small id="diag-headline">اضغط للعرض</small>
-        </summary>
-        <div class="diag-body" id="diag-body">جاري التحميل…</div>
-      </details>
+      <section class="journey" id="journey" aria-label="رحلة الرصد"></section>
+      <div class="journey-foot">
+        <button type="button" class="jr-link-btn" id="history-toggle" aria-expanded="false">سجل الرحلات السابقة</button>
+      </div>
+      <section class="journey-history" id="history" hidden></section>
 
       <section class="desk">
         <div class="index">
-          <nav class="tabs" role="tablist">
-            <button type="button" class="tab" data-status="reading">قيد القراءة</button>
-            <button type="button" class="tab" data-status="verifying">التدقيق</button>
-            <button type="button" class="tab on" data-status="decision_ready">بانتظار القرار</button>
-            <button type="button" class="tab" data-status="attention_required">يحتاج تدخلاً</button>
-            <button type="button" class="tab" data-status="approved">المعتمد</button>
-            <button type="button" class="tab" data-status="excluded">المستبعد</button>
+          <nav class="tabs" role="tablist" aria-label="أقسام الأخبار">
+            <button type="button" class="tab on" data-status="decision_ready" role="tab">بانتظار القرار <span class="tab-count num" data-count="decision_ready">0</span></button>
+            <button type="button" class="tab" data-status="reading" role="tab">قيد القراءة <span class="tab-count num" data-count="reading">0</span></button>
+            <button type="button" class="tab" data-status="verifying" role="tab">التدقيق <span class="tab-count num" data-count="verifying">0</span></button>
+            <button type="button" class="tab" data-status="attention_required" role="tab">يحتاج تدخلاً <span class="tab-count num" data-count="attention_required">0</span></button>
+            <button type="button" class="tab" data-status="approved" role="tab">المعتمد <span class="tab-count num" data-count="approved">0</span></button>
+            <button type="button" class="tab" data-status="excluded" role="tab">المستبعد <span class="tab-count num" data-count="excluded">0</span></button>
           </nav>
-          <p class="index-meta">
-            <span id="desk-status">النطاق الحالي: كل المكاتب. بانتظار القرار للموجز المدقَّق فقط.</span>
-            <span>آخر رصد أسبوعي <b class="num" id="last-weekly">—</b></span>
-          </p>
+          <p class="index-meta" id="desk-status"></p>
           <div id="list" class="list">جاري التحميل…</div>
         </div>
-        <aside class="brief" id="detail">
-          <p class="placeholder">بعد اكتمال المسار اختر بطاقة للقراءة ثم اعتماد أو استبعاد.</p>
-        </aside>
+        <aside class="brief" id="detail"></aside>
       </section>
     </div>
 
-    <script src="/app.js?v=ui25"></script>
+    <script type="module" src="/app.js?v=ui32"></script>
   </body>
 </html>

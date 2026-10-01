@@ -67,6 +67,7 @@ export const SCHEMA_STATEMENTS = [
     created_at TEXT DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_items_scan ON items(scan_id)`,
   `CREATE INDEX IF NOT EXISTS idx_items_mayor ON items(mayor_id)`,
   `CREATE INDEX IF NOT EXISTS idx_items_brief_lane ON items(brief_provider, trans_engine)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_items_fingerprint ON items(fingerprint)`,
@@ -160,6 +161,7 @@ export const SCHEMA_STATEMENTS = [
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_source_url ON candidates(source_id, url)`,
   `CREATE INDEX IF NOT EXISTS idx_candidates_fetch ON candidates(fetch_status, mayor_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_candidates_scan ON candidates(scan_id)`,
   `CREATE TABLE IF NOT EXISTS settings_audit (
     id TEXT PRIMARY KEY,
     actor TEXT NOT NULL,

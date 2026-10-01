@@ -14,6 +14,11 @@ export async function upsertRows(env, prefix, rows, width, chunkSize, conflictCl
 }
 
 export async function migrateSearchJobs(env) {
+  const jobs = await env.DB.prepare(`PRAGMA table_info(search_jobs)`).all();
+  const jobColumns = new Set((jobs.results || []).map((column) => column.name));
+  if (jobColumns.size && !jobColumns.has("kind")) {
+    await env.DB.prepare(`ALTER TABLE search_jobs ADD COLUMN kind TEXT DEFAULT 'manual'`).run();
+  }
   const info = await env.DB.prepare(`PRAGMA table_info(search_job_tasks)`).all();
   const names = new Set((info.results || []).map((column) => column.name));
   if (!names.has("stage")) {
