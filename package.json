@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev --port 8787",
     "test": "node --test test/*.test.js",
-    "db:init": "wrangler d1 execute mayor-watch --local --file=./schema.sql"
+    "db:init": "wrangler d1 execute mayor-watch --local --file=./schema.sql",
+    "check:sources": "node scripts/check-sources.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.37.1"
