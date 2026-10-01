@@ -6,7 +6,7 @@ import {
   pendingFetchIds,
   pollOneSource,
 } from "../pipeline.js";
-import { ARTICLE_FETCH_BATCH } from "../sources.js";
+import { ARTICLE_FETCH_BATCH, sourceById } from "../sources.js";
 import { assignPendingLanes, briefBacklog, verifyPending } from "../translate.js";
 import { verificationBacklog } from "../versions.js";
 import { BRIEF_BATCH_SIZE } from "../config.js";
@@ -44,7 +44,7 @@ async function processSourcePollMessage(env, message) {
            detail = ?, started_at = COALESCE(started_at, datetime('now'))
        WHERE job_id = ? AND mayor_id = ?`,
     )
-      .bind(`يفحص المصدر ${sourceId}`, jobId, mayorId)
+      .bind(`يفحص ${sourceById(sourceId)?.domain || sourceId}`, jobId, mayorId)
       .run();
   }
   await env.DB.prepare(

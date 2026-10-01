@@ -27,7 +27,7 @@ import {
 import {
   enqueueArticleFetches,
   enqueueBriefPump,
-  enqueueSourcePolls,
+  enqueueSearchJob,
 } from "./enqueue.js";
 import { parseTaskResult, refreshSearchJobStatus } from "./searchJob.js";
 
@@ -288,9 +288,6 @@ async function finishAllOffices(env, type = "weekly") {
 
 export async function enqueueAllOffices(env, type = "weekly") {
   if (!env.SCAN_QUEUE) return finishAllOffices(env, type);
-  const queued = await enqueueSourcePolls(env, {
-    mayorIds: (await listMayors(env)).map((mayor) => mayor.id),
-    type,
-  });
-  return { queued: queued.queued, type, scanId: queued.scanId };
+  const started = await enqueueSearchJob(env, { kind: type });
+  return { queued: started.queued, type, scanId: started.scanId, jobId: started.jobId };
 }

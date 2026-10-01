@@ -254,3 +254,37 @@
   .st-site-form { grid-template-columns: 1fr; }
   .st-main, .st-summary, .st-tabs { padding-inline: 14px; }
 }
+
+/* حالة الأدوات */
+.st-tools-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.st-tools-head p { margin: 0; color: var(--muted); font-size: 13px; flex: 1; min-width: 200px; }
+.st-tools-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.st-tools { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.st-tool { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--radius-sm); }
+.st-tool.is-bad { border-color: #f1b8b3; background: #fffafa; }
+.st-tool.is-warn { border-color: #fedf89; background: #fffdf5; }
+.st-tool .st-dot { margin-top: 7px; background: #98a2b3; }
+.st-tool.is-good .st-dot { background: var(--good); }
+.st-tool.is-warn .st-dot { background: #f79009; }
+.st-tool.is-bad .st-dot { background: var(--bad); }
+.st-tool-main p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.st-tool-result.is-ok { color: var(--good); }
+.st-tool-result.is-bad { color: var(--bad); }
+.st-tool-action { display: grid; gap: 4px; justify-items: end; align-content: start; }
+.st-cost { color: var(--muted); font-size: 11px; }
+.st-sweep { margin-top: 8px; }
+.st-sweep p { margin: 6px 0 0; font-size: 12.5px; }
+.st-sweep-fail { margin: 6px 0 0; padding-inline-start: 18px; font-size: 12.5px; color: var(--bad); display: grid; gap: 3px; }
+.st-gauges { list-style: none; margin: 0 0 8px; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.st-gauge { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.st-gauge b { font-size: 20px; color: var(--navy); }
+.st-gauge.is-good b { color: var(--good); }
+.st-gauge.is-warn b { color: var(--warn); }
+.st-gauge.is-bad b { color: var(--bad); }
+.st-errors { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 8px; font-size: 13px; }
+.st-errors li { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding-bottom: 8px; border-bottom: 1px dashed var(--rule); }
+.st-errors small { grid-column: 1 / -1; color: var(--muted); }
+.st-card h2 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-inline-start: 8px; }
+.st-card h3 { margin: 14px 0 6px; font-size: 13px; color: var(--wine); }
+.st-ai-grid + #st-pipeline, #st-pipeline { margin-top: 14px; }
+@media (max-width: 900px) { .st-tools-grid { grid-template-columns: 1fr; } .st-gauges { grid-template-columns: repeat(2, 1fr); } }

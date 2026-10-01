@@ -88,16 +88,20 @@ export async function enqueueArticleFetches(env, { ids, mayorId, scanId, jobId }
   return batches.length;
 }
 
-export async function enqueueManualSearch(env, { mayorId = null, query = "" } = {}) {
+/**
+ * يبدأ مهمة رصد ويُسجَّل لها سجل وبطاقة لكل مكتب، فتظهر رحلتها في الواجهة.
+ * الرصد الأسبوعي يمر من هنا أيضًا (kind = weekly) ليُرى كما يُرى البحث اليدوي.
+ */
+export async function enqueueSearchJob(env, { mayorId = null, query = "", kind = "manual" } = {}) {
   if (!env.SCAN_QUEUE) throw new Error("scan_queue_unavailable");
   const catalog = await listMayors(env);
   const targets = mayorId ? catalog.filter((mayor) => mayor.id === mayorId) : catalog;
   if (!targets.length) throw new Error("mayor_not_found");
   const jobId = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO search_jobs (id, query, mayor_id, status) VALUES (?, ?, ?, 'queued')`,
+    `INSERT INTO search_jobs (id, query, mayor_id, status, kind) VALUES (?, ?, ?, 'queued', ?)`,
   )
-    .bind(jobId, query || null, mayorId)
+    .bind(jobId, query || null, mayorId, kind)
     .run();
   const taskStmt = env.DB.prepare(
     `INSERT INTO search_job_tasks (job_id, mayor_id, status, stage, detail)
@@ -107,7 +111,7 @@ export async function enqueueManualSearch(env, { mayorId = null, query = "" } = 
   try {
     const queued = await enqueueSourcePolls(env, {
       mayorIds: targets.map((mayor) => mayor.id),
-      type: "manual",
+      type: kind === "weekly" ? "weekly" : "manual",
       query,
       jobId,
     });
@@ -122,3 +126,5 @@ export async function enqueueManualSearch(env, { mayorId = null, query = "" } = 
     throw error;
   }
 }
+
+export const enqueueManualSearch = (env, options = {}) => enqueueSearchJob(env, { ...options, kind: "manual" });

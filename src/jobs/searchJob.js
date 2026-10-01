@@ -1,4 +1,6 @@
+import { journeyFunnel } from "../journey.js";
 import { MAYORS, listMayors } from "../mayors.js";
+import { sourceById } from "../sources.js";
 
 const SEARCH_TOTAL_KEYS = [
   "found",
@@ -23,6 +25,24 @@ export function parseTaskResult(value) {
   } catch {
     return {};
   }
+}
+
+/** ما يلزم الواجهة من نتيجة المهمة: رحلة المكتب وأخطاء مصادره، بلا حمولة كاملة. */
+function taskDigest(task) {
+  const result = parseTaskResult(task.result_json);
+  const journey = result.journey || {};
+  return {
+    scan_id: result.scanId || null,
+    journey: {
+      stage: journey.stage || null,
+      total: Number(journey.total) || 0,
+      settled: Number(journey.settled) || 0,
+      reading: Number(journey.reading) || 0,
+      verifying: Number(journey.verifying) || 0,
+      resume_at: journey.resumeAt || null,
+    },
+    source_errors: Array.isArray(result.errors) ? result.errors.slice(0, 6).map(String) : [],
+  };
 }
 
 export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
@@ -67,6 +87,9 @@ export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
     status,
     query: job.query || "",
     mayor_id: job.mayor_id || null,
+    kind: job.kind || "manual",
+    created_at: job.created_at || null,
+    finished_at: job.finished_at || null,
     total,
     completed,
     failed,
@@ -80,20 +103,83 @@ export function searchJobSnapshot(job, tasks, mayors = MAYORS) {
       detail: task.detail || "",
       attempts: Number(task.attempts) || 0,
       error: task.error || null,
+      started_at: task.started_at || null,
+      finished_at: task.finished_at || null,
+      ...taskDigest(task),
     })),
   };
 }
 
-export async function readSearchJob(env, jobId) {
-  const job = await env.DB.prepare(`SELECT * FROM search_jobs WHERE id = ?`).bind(jobId).first();
-  if (!job) return null;
+const TASK_COLUMNS = `mayor_id, status, stage, detail, attempts, result_json, error, started_at, finished_at`;
+
+/** مصادر هذه المهمة وحالة كل منها (queued → polling → polled | failed). */
+async function jobSources(env, jobId) {
   const { results } = await env.DB.prepare(
-    `SELECT mayor_id, status, stage, detail, attempts, result_json, error
-     FROM search_job_tasks WHERE job_id = ? ORDER BY mayor_id`,
+    `SELECT scan_id, source_id, mayor_id, status, detail FROM scan_sources WHERE job_id = ?`,
   )
     .bind(jobId)
     .all();
-  return searchJobSnapshot(job, results || [], await listMayors(env));
+  return (results || []).map((row) => {
+    const source = sourceById(row.source_id);
+    return {
+      scan_id: row.scan_id,
+      mayor_id: row.mayor_id,
+      source_id: row.source_id,
+      domain: source?.domain || String(row.source_id).split(":").slice(1).join(":"),
+      name: source?.name || "",
+      tier: source?.tier ?? null,
+      status: row.status,
+      detail: row.detail || "",
+    };
+  });
+}
+
+/**
+ * لقطة المهمة. مع detail تُضاف المصادر والقمع، وهما أثقل قليلًا، فتُطلبان بوتيرة
+ * أبطأ من لقطة التقدم الأساسية.
+ */
+export async function readSearchJob(env, jobId, { detail = false } = {}) {
+  const job = await env.DB.prepare(`SELECT * FROM search_jobs WHERE id = ?`).bind(jobId).first();
+  if (!job) return null;
+  const { results } = await env.DB.prepare(
+    `SELECT ${TASK_COLUMNS} FROM search_job_tasks WHERE job_id = ? ORDER BY mayor_id`,
+  )
+    .bind(jobId)
+    .all();
+  const snapshot = searchJobSnapshot(job, results || [], await listMayors(env));
+  if (!detail) return snapshot;
+  const sources = await jobSources(env, jobId);
+  const scanIds = [...sources.map((row) => row.scan_id), ...snapshot.tasks.map((task) => task.scan_id)];
+  return { ...snapshot, sources, funnel: await journeyFunnel(env, scanIds) };
+}
+
+export async function latestSearchJobId(env) {
+  const row = await env.DB.prepare(`SELECT id FROM search_jobs ORDER BY created_at DESC, rowid DESC LIMIT 1`).first();
+  return row?.id || null;
+}
+
+/** آخر مهام الرصد، لسجل الرحلات. لقطات خفيفة بلا مصادر ولا قمع. */
+export async function recentSearchJobs(env, limit = 8) {
+  const take = Math.min(Math.max(Number(limit) || 8, 1), 20);
+  const { results: jobs } = await env.DB.prepare(
+    `SELECT * FROM search_jobs ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+  )
+    .bind(take)
+    .all();
+  if (!jobs?.length) return [];
+  const ids = jobs.map((job) => job.id);
+  const { results: tasks } = await env.DB.prepare(
+    `SELECT job_id, ${TASK_COLUMNS} FROM search_job_tasks WHERE job_id IN (${ids.map(() => "?").join(", ")})`,
+  )
+    .bind(...ids)
+    .all();
+  const mayors = await listMayors(env);
+  return jobs.map((job) => {
+    const snapshot = searchJobSnapshot(job, (tasks || []).filter((task) => task.job_id === job.id), mayors);
+    const light = { ...snapshot, offices: snapshot.tasks.length };
+    delete light.tasks;
+    return light;
+  });
 }
 
 export async function refreshSearchJobStatus(env, jobId) {

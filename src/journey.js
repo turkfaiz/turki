@@ -181,3 +181,63 @@ export async function assessMayorJourney(env, { mayorId, scanId }) {
   };
 }
 
+
+const IN = (values) => values.map(() => "?").join(", ");
+
+/**
+ * أعداد القمع لمسح أو أكثر: كم رابطًا اكتُشف، وكم قُرئ، وكم استُبعد ولماذا، وأين
+ * استقرت الأخبار المحفوظة. استعلامان مجمّعان على فهرس scan_id، لا مسح كامل.
+ */
+export async function journeyFunnel(env, scanIds) {
+  const ids = [...new Set((scanIds || []).filter(Boolean))].slice(0, 40);
+  const funnel = {
+    candidates: { total: 0, waiting: 0, read: 0, failed: 0, duplicates: 0, dropped: {} },
+    items: {
+      total: 0,
+      excluded: 0,
+      reading: 0,
+      verifying: 0,
+      decision_ready: 0,
+      attention_required: 0,
+      approved: 0,
+    },
+  };
+  if (!ids.length) return funnel;
+
+  const { results: candidateRows } = await env.DB.prepare(
+    `SELECT fetch_status AS status, IFNULL(skip_reason, '') AS reason, COUNT(*) AS n
+     FROM candidates WHERE scan_id IN (${IN(ids)})
+     GROUP BY fetch_status, skip_reason`,
+  )
+    .bind(...ids)
+    .all();
+  for (const row of candidateRows || []) {
+    const n = Number(row.n) || 0;
+    const c = funnel.candidates;
+    c.total += n;
+    if (["pending", "retry", "working"].includes(row.status)) c.waiting += n;
+    else if (row.status === "failed") c.failed += n;
+    else {
+      c.read += n;
+      if (row.reason === "duplicate") c.duplicates += n;
+      else if (row.status === "skipped" && row.reason) c.dropped[row.reason] = (c.dropped[row.reason] || 0) + n;
+    }
+  }
+
+  const { results: itemRows } = await env.DB.prepare(
+    `SELECT items.status AS status, (${deskLaneCaseSql("items")}) AS lane, COUNT(*) AS n
+     FROM items WHERE items.scan_id IN (${IN(ids)})
+     GROUP BY items.status, lane`,
+  )
+    .bind(...ids)
+    .all();
+  for (const row of itemRows || []) {
+    const n = Number(row.n) || 0;
+    const t = funnel.items;
+    t.total += n;
+    if (row.status === "excluded") t.excluded += n;
+    else if (row.status === "approved") t.approved += n;
+    else if (row.lane && row.lane in t) t[row.lane] += n;
+  }
+  return funnel;
+}

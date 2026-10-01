@@ -53,29 +53,9 @@ const NEEDS_ATTENTION = new Set([
   "not_articles",
 ]);
 
-export const esc = (value) =>
-  String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
-
-export const num = (value) => new Intl.NumberFormat("en-US").format(Number(value) || 0);
-
-/** تواريخ D1 بلا منطقة زمنية ("2026-10-01 07:18:38") وهي UTC. */
-export function parseDbDate(value) {
-  if (!value) return null;
-  const raw = String(value);
-  const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : `${raw.replace(" ", "T")}Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-export function relTime(value, now = Date.now()) {
-  const date = parseDbDate(value);
-  if (!date) return "لم يُفحص بعد";
-  const minutes = Math.round((now - date.getTime()) / 60000);
-  if (minutes < 1) return "الآن";
-  if (minutes < 60) return `قبل ${num(minutes)} دقيقة`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `قبل ${num(hours)} ساعة`;
-  return `قبل ${num(Math.round(hours / 24))} يومًا`;
-}
+import { briefErrorReason } from "./desk.js";
+import { esc, num, parseDbDate, relTime, sourceStatusAr } from "./lib.js";
+export { esc, num, parseDbDate, relTime };
 
 export function siteTone(platform) {
   if (!platform.enabled) return "off";
@@ -378,11 +358,119 @@ export function renderSystem(view) {
   </div>`;
 }
 
+/* ───────────── حالة الأدوات ───────────── */
+
+const TOOL_GROUPS = [
+  ["security", "الأمان"],
+  ["infrastructure", "البنية التشغيلية"],
+  ["ai", "الذكاء الاصطناعي"],
+  ["sources", "المواقع والقراءة"],
+];
+const TOOL_STATE_AR = { ok: "يعمل", warn: "يحتاج انتباهًا", bad: "معطّل", idle: "لم يبدأ بعد" };
+const TOOL_TONE = { ok: "good", warn: "warn", bad: "bad", idle: "off" };
+
+/** الأدوات التي يُجرى اختبارها بنقرة واحدة بلا كلفة: لا تستهلك نداءً ولا تطلب مواقع. */
+export const isFreeTest = (tool) => tool.testable && !tool.test_cost;
+
+export function siteIndex(offices) {
+  const map = new Map();
+  for (const office of offices || []) {
+    for (const platform of office.platforms) map.set(platform.id, { office: office.name_ar, domain: platform.domain });
+  }
+  return map;
+}
+
+export function renderSweep(sweep, names = new Map()) {
+  if (!sweep) return "";
+  const works = sweep.results.filter((row) => row.works).length;
+  const bad = sweep.results.filter((row) => !row.works);
+  const pct = sweep.total ? Math.round((sweep.done / sweep.total) * 100) : 0;
+  const failing = bad
+    .map((row) => {
+      const site = names.get(row.id) || { office: "", domain: row.id };
+      return `<li><b>${esc(site.office)}</b> <span class="num">${esc(site.domain)}</span> — ${esc(sourceStatusAr(row.fail_reason || row.status))}</li>`;
+    })
+    .join("");
+  return `<div class="st-sweep">
+    <div class="st-meter" role="img" aria-label="${pct}% اكتمل"><i style="width:${pct}%"></i></div>
+    <p>${sweep.running ? "يفحص المواقع بطلبات حقيقية… " : "اكتمل الفحص · "}<b class="num">${num(sweep.done)}/${num(sweep.total)}</b> · ${num(works)} تعمل · ${num(bad.length)} متعثر</p>
+    ${failing ? `<ul class="st-sweep-fail">${failing}</ul>` : ""}
+  </div>`;
+}
+
+export function renderTools(view, { results = {}, sweep = null, names = new Map(), now = Date.now() } = {}) {
+  if (!view) return `<p class="st-empty">جاري التحميل…</p>`;
+  const tone = TOOL_TONE[view.state] || "off";
+  const head = `<div class="st-tools-head">
+    <span class="st-pill is-${tone}">${view.state === "ok" ? "كل الأدوات تعمل" : `${num(view.needs_attention)} تحتاج انتباهًا`}</span>
+    <p>كل أداة تُفحص هنا فحصًا حقيقيًا بطلب منك؛ لا يُعرض «يعمل» بالافتراض.</p>
+    <button type="button" class="st-btn st-btn-primary" data-test-basic>اختبار البنية الأساسية</button>
+  </div>`;
+  const groups = TOOL_GROUPS.map(([group, title]) => {
+    const tools = view.tools.filter((tool) => tool.group === group);
+    if (!tools.length) return "";
+    const rows = tools
+      .map((tool) => {
+        const r = results[tool.id];
+        const result = r
+          ? `<p class="st-tool-result is-${r.ok ? "ok" : "bad"}">${r.ok ? "✓" : "✕"} آخر اختبار ${esc(relTime(new Date(r.at).toISOString(), now, ""))}${r.ms ? ` · ${num(r.ms)}ms` : ""} — ${esc(r.detail)}</p>`
+          : "";
+        const beat = tool.last_at ? `<p class="st-tool-result">آخر نبضة مسجّلة: ${esc(relTime(tool.last_at, now, ""))}</p>` : "";
+        const err = tool.last_error ? `<p class="st-tool-result is-bad">آخر خطأ: ${esc(briefErrorReason(tool.last_error.code))}</p>` : "";
+        let action = "";
+        if (tool.id === "sources") {
+          action = `<button type="button" class="st-btn st-btn-ghost" data-run-sweep ${sweep?.running ? "disabled" : ""}>${sweep?.running ? "يفحص…" : "فحص كل المواقع"}</button>`;
+        } else if (tool.testable) {
+          action = `<button type="button" class="st-btn st-btn-ghost" data-test-tool="${esc(tool.id)}" ${tool.test_cost ? `data-cost="${esc(tool.test_cost)}"` : ""}>اختبار حي</button>${tool.test_cost ? `<small class="st-cost">يستهلك ${esc(tool.test_cost)}</small>` : ""}`;
+        }
+        return `<li class="st-tool is-${TOOL_TONE[tool.state] || "off"}" data-tool="${esc(tool.id)}">
+          <span class="st-dot" aria-hidden="true"></span>
+          <div class="st-tool-main">
+            <div><b>${esc(tool.name)}</b> <span class="st-pill is-${TOOL_TONE[tool.state] || "off"}">${esc(TOOL_STATE_AR[tool.state] || tool.state)}</span></div>
+            <p>${esc(tool.detail)}</p>${beat}${err}${result}
+            ${tool.id === "sources" ? renderSweep(sweep, names) : ""}
+          </div>
+          <div class="st-tool-action">${action}</div>
+        </li>`;
+      })
+      .join("");
+    return `<section class="st-card"><h2>${esc(title)}</h2><ul class="st-tools">${rows}</ul></section>`;
+  }).join("");
+  return head + `<div class="st-tools-grid">${groups}</div>`;
+}
+
+/* ───────────── مسار التلخيص (يُحمَّل عند فتح تبويب الذكاء فقط) ───────────── */
+
+export function renderBriefPipeline(d) {
+  if (!d) return `<section class="st-card st-wide"><h2>مسار التلخيص والتدقيق</h2><p class="st-hint">جاري التحميل…</p></section>`;
+  const b = d.brief || {};
+  const v = d.verification || {};
+  const total = (b.completed || 0) + (b.pending || 0) + (b.waitingQuota || 0) + (b.failed || 0) || 0;
+  const meter = (label, value, tone) => {
+    const pct = total ? Math.min(100, Math.round(((value || 0) / total) * 100)) : 0;
+    return `<li class="st-gauge is-${tone}"><span>${esc(label)}</span><b class="num">${num(value)}</b><div class="st-meter"><i style="width:${pct}%"></i></div></li>`;
+  };
+  const errors = (b.errors || [])
+    .map((row) => `<li><span>${esc(briefErrorReason(row.code))}</span><b class="num">${num(row.count)}</b><small>أقصى محاولات ${num(row.attempts)} من ${num(b.maxAttempts)}</small></li>`)
+    .join("");
+  return `<section class="st-card st-wide"><h2>مسار التلخيص والتدقيق <small>أخبار نافذة ${num(d.windowDays)} أيام</small></h2>
+    <ul class="st-gauges">
+      ${meter("موجز مكتمل", b.completed, "good")}
+      ${meter("بانتظار الدور", b.pending, "off")}
+      ${meter("بانتظار الحصة", b.waitingQuota, "warn")}
+      ${meter("تعذّر", b.failed, "bad")}
+    </ul>
+    <p class="st-hint">التدقيق الدلالي: <b class="num">${num(v.passed)}</b> اجتاز · <b class="num">${num(v.failed)}</b> رُفض · <b class="num">${num(v.pending)}</b> بانتظار التدقيق.</p>
+    ${errors ? `<h3>أسباب التعثر</h3><ul class="st-errors">${errors}</ul>` : `<p class="st-hint">لا أخطاء تلخيص مسجّلة.</p>`}
+    <button type="button" class="st-btn st-btn-ghost" data-refresh-pipeline>تحديث</button>
+  </section>`;
+}
+
 /* ───────────── التشغيل في المتصفح ───────────── */
 
 function init() {
   const $ = (id) => document.getElementById(id);
-  const state = { view: null, query: "", filter: "all", notes: {}, tab: "offices" };
+  const state = { view: null, query: "", filter: "all", notes: {}, tab: "offices", tools: null, toolResults: {}, sweep: null, pipeline: null };
 
   async function api(path, options = {}) {
     const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -395,6 +483,7 @@ function init() {
     return data;
   }
 
+  const TABS = ["offices", "tools", "ai", "system"];
   let toastTimer = null;
   function toast(message, bad = false) {
     const el = $("st-toast");
@@ -410,8 +499,73 @@ function init() {
     if (!view) return;
     $("st-summary").innerHTML = renderSummary(view);
     $("st-offices").innerHTML = renderOffices(view, { query: state.query, filter: state.filter, notes: state.notes });
-    $("panel-ai").innerHTML = renderAi(view);
+    $("panel-ai").innerHTML = renderAi(view) + `<div id="st-pipeline">${renderBriefPipeline(state.pipeline)}</div>`;
     $("panel-system").innerHTML = renderSystem(view);
+    paintTools();
+  }
+
+  function paintTools() {
+    $("panel-tools").innerHTML = renderTools(state.tools, {
+      results: state.toolResults,
+      sweep: state.sweep,
+      names: siteIndex(state.view?.offices),
+    });
+  }
+
+  async function loadTools() {
+    try {
+      state.tools = await api("/api/settings/tools");
+    } catch (error) {
+      toast(`تعذّر قراءة حالة الأدوات: ${error.message}`, true);
+    }
+    paintTools();
+  }
+
+  /** لوحة التشخيص تمسح جداول الأخبار، فلا تُطلب إلا حين يفتح الموظف تبويب الذكاء. */
+  async function loadBriefPipeline() {
+    try {
+      state.pipeline = await api("/api/diagnostics");
+    } catch (error) {
+      toast(`تعذّر تحميل مسار التلخيص: ${error.message}`, true);
+    }
+    const slot = $("st-pipeline");
+    if (slot) slot.innerHTML = renderBriefPipeline(state.pipeline);
+  }
+
+  async function runSweep() {
+    const ids = state.view.offices.flatMap((office) => office.platforms.filter((p) => p.enabled).map((p) => p.id));
+    state.sweep = { running: true, done: 0, total: ids.length, results: [] };
+    paintTools();
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length) {
+        const id = ids[next++];
+        try {
+          const r = await api(`/api/settings/sources/${encodeURIComponent(id)}/check`, { method: "POST" });
+          state.sweep.results.push({ id, works: r.works, status: r.status, fail_reason: r.fail_reason });
+        } catch (error) {
+          state.sweep.results.push({ id, works: false, status: error.message });
+        }
+        state.sweep.done += 1;
+        paintTools();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    state.sweep.running = false;
+    await load();
+    await loadTools();
+  }
+
+  async function testTool(id, button) {
+    await guarded(button, "يختبر…", async () => {
+      try {
+        const r = await api(`/api/settings/tools/${encodeURIComponent(id)}/test`, { method: "POST" });
+        state.toolResults[id] = { ...r, at: Date.now() };
+      } catch (error) {
+        state.toolResults[id] = { ok: false, detail: error.message, at: Date.now() };
+      }
+      await loadTools();
+    });
   }
 
   async function load() {
@@ -428,8 +582,10 @@ function init() {
     for (const button of document.querySelectorAll("[data-tab]")) {
       button.setAttribute("aria-selected", String(button.dataset.tab === tab));
     }
-    for (const name of ["offices", "ai", "system"]) $(`panel-${name}`).hidden = name !== tab;
+    for (const name of TABS) $(`panel-${name}`).hidden = name !== tab;
     if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
+    if (tab === "tools") loadTools();
+    if (tab === "ai" && !state.pipeline) loadBriefPipeline();
   }
 
   async function guarded(button, busyLabel, work) {
@@ -514,6 +670,34 @@ function init() {
     }
     if (target.id === "st-edit-cancel") {
       $("st-edit-dialog").close();
+      return;
+    }
+    if (target.dataset.testTool) {
+      if (target.dataset.cost && !window.confirm(`هذا الاختبار يستهلك ${target.dataset.cost}. متابعة؟`)) return;
+      await testTool(target.dataset.testTool, target);
+      return;
+    }
+    if (target.dataset.testBasic !== undefined) {
+      await guarded(target, "يختبر…", async () => {
+        for (const tool of (state.tools?.tools || []).filter(isFreeTest)) {
+          try {
+            const r = await api(`/api/settings/tools/${encodeURIComponent(tool.id)}/test`, { method: "POST" });
+            state.toolResults[tool.id] = { ...r, at: Date.now() };
+          } catch (error) {
+            state.toolResults[tool.id] = { ok: false, detail: error.message, at: Date.now() };
+          }
+        }
+        await loadTools();
+      });
+      return;
+    }
+    if (target.dataset.runSweep !== undefined) {
+      if (!window.confirm("فحص كل المواقع المفعّلة بطلبات حقيقية؟ قد يستغرق دقائق.")) return;
+      await runSweep();
+      return;
+    }
+    if (target.dataset.refreshPipeline !== undefined) {
+      await guarded(target, "يحدّث…", loadBriefPipeline);
       return;
     }
     if (target.dataset.runWeekly) {
@@ -625,7 +809,7 @@ function init() {
   });
 
   const initial = location.hash.replace("#", "");
-  showTab(["offices", "ai", "system"].includes(initial) ? initial : "offices");
+  showTab(TABS.includes(initial) ? initial : "offices");
   load();
 }
 
