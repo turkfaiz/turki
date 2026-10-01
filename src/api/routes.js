@@ -6,16 +6,10 @@ import {
   planDeskLaneMigration,
   resolveDeskQuery,
 } from "../deskLanes.js";
-import {
-  insertCustomMayor,
-  listMayors,
-  mayorInputMessage,
-  parseMayorInput,
-} from "../mayors.js";
+import { listMayors } from "../mayors.js";
 import { REASON } from "../reasons.js";
 import { reviewInbox } from "../reviewAgent.js";
 import { MAX_SOURCES_PER_OFFICE, registeredSourcesSql } from "../sources.js";
-import { addSite, removeSite } from "../sourceAdmin.js";
 import { assignPendingLanes, briefBacklog, translatePending } from "../translate.js";
 import {
   currentVersion,
@@ -25,11 +19,10 @@ import {
   recordDecision,
 } from "../versions.js";
 import { json, readBody, reviewerOf } from "./http.js";
+import { handleSettingsApi } from "./settings.js";
 import {
   diagnostics,
   publicSlotStatus,
-  setSourceEnabled,
-  settingsOffices,
   slotOverview,
   stats,
 } from "./status.js";
@@ -97,110 +90,9 @@ export async function handleApi(request, env) {
     return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });
   }
 
-  if (path === "/api/settings/offices" && method === "GET") {
-    return json({ offices: await settingsOffices(env) });
-  }
-
-  const siteMatch = path.match(/^\/api\/settings\/mayors\/([a-z][a-z0-9-]*)\/sites$/i);
-  if (siteMatch && method === "POST") {
-    const body = await readBody(request);
-    const result = await addSite(env, {
-      mayorId: siteMatch[1].toLowerCase(),
-      input: body.url,
-      platform: body.platform || "newspaper",
-      actor: reviewerOf(request, env),
-    });
-    return json(result, result.ok ? 201 : result.status || 400);
-  }
-
-  const toggleMatch = path.match(/^\/api\/settings\/sources\/([^/]+)$/i);
-  if (toggleMatch && method === "DELETE") {
-    const result = await removeSite(env, {
-      sourceId: decodeURIComponent(toggleMatch[1]),
-      actor: reviewerOf(request, env),
-    });
-    return json(result, result.ok ? 200 : result.status || 400);
-  }
-  if (toggleMatch && method === "POST") {
-    const body = await readBody(request);
-    if (typeof body.enabled !== "boolean") {
-      return json({ error: "enabled_required" }, 400);
-    }
-    if (body.domain || body.url) {
-      return json({ error: "registry_closed", detail: "لا تُضاف النطاقات من الواجهة." }, 403);
-    }
-    const result = await setSourceEnabled(
-      env,
-      decodeURIComponent(toggleMatch[1]),
-      body.enabled,
-      reviewerOf(request, env),
-    );
-    if (result.error) return json(result, result.status || 400);
-    return json(result);
-  }
-
-  if (path === "/api/settings/mayors" && method === "POST") {
-    const body = await readBody(request);
-    if (body.domain || body.url || body.discovery || body.sources) {
-      return json(
-        {
-          error: "registry_closed",
-          message: "أضف المواقع عبر الحقل المخصص لها (sites) ليجري فحصها واعتمادها تلقائيًا.",
-        },
-        403,
-      );
-    }
-    const parsed = parseMayorInput(body);
-    if (parsed.error) {
-      return json(
-        { error: parsed.error, detail: parsed.detail || null, message: mayorInputMessage(parsed) },
-        400,
-      );
-    }
-    const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
-      .bind(parsed.mayor.id)
-      .first();
-    if (existing) {
-      return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
-    }
-    const wanted = (Array.isArray(body.sites) ? body.sites : [])
-      .map((entry) => (typeof entry === "string" ? { url: entry } : entry))
-      .filter((entry) => entry?.url);
-    if (wanted.length > MAX_SOURCES_PER_OFFICE) {
-      return json(
-        { error: "too_many_sites", message: `الحد الأقصى ${MAX_SOURCES_PER_OFFICE} مواقع لكل مكتب.` },
-        400,
-      );
-    }
-    const mayor = await insertCustomMayor(env, parsed.mayor);
-    await env.DB.prepare(
-      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
-       VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
-    )
-      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
-      .run();
-    const sites = [];
-    for (const entry of wanted) {
-      const added = await addSite(env, {
-        mayorId: mayor.id,
-        input: entry.url,
-        platform: entry.platform || "newspaper",
-        actor: reviewerOf(request, env),
-      });
-      sites.push({ input: entry.url, ...added });
-    }
-    return json(
-      {
-        ok: true,
-        mayor,
-        sites,
-        note: sites.length
-          ? "أُضيف العمدة وفُحصت مواقعه؛ الرصد يعمل عليها تلقائيًا."
-          : "أُضيفت هوية العمدة. أضف موقعًا أو أكثر ليبدأ الرصد.",
-        offices: await settingsOffices(env),
-      },
-      201,
-    );
+  if (path.startsWith("/api/settings/")) {
+    const handled = await handleSettingsApi(request, env, path, method);
+    if (handled) return handled;
   }
 
   if (path === "/api/admin/migrations/desk-lanes" && method === "GET") {

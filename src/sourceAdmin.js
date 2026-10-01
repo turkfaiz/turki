@@ -6,6 +6,7 @@
  * مواقع مفعّلة لكل مكتب حتى لا تكثر الأخبار بلا فائدة.
  */
 import { refreshCustomSources } from "./db/customSources.js";
+import { recordSourceHealth } from "./db/items.js";
 import { discoverSource } from "./discovery.js";
 import { isAboutMayor, resolveMayor } from "./mayors.js";
 import { enabledSources } from "./pipeline.js";
@@ -148,4 +149,35 @@ export async function removeSite(env, { sourceId, actor } = {}) {
     before: { domain: row.domain },
   });
   return { ok: true, id: sourceId };
+}
+
+/**
+ * فحص فوري لمصدر واحد (من السجل أو مضاف) بمحرك الرصد نفسه، وتسجيل حالته.
+ * لا يحفظ أخبارًا؛ غرضه أن يرى الموظف هل يعمل المصدر الآن وماذا يلتقط.
+ */
+export async function checkSite(env, { sourceId, fetch } = {}) {
+  const source = sourceById(sourceId);
+  if (!source) return fail("unknown_source", "المصدر غير موجود.", 404);
+  const mayor = await resolveMayor(env, source.mayor_id);
+  if (!mayor) return fail("mayor_not_found", "المكتب غير موجود.", 404);
+  let trial;
+  try {
+    trial = await discoverSource(source, mayor, { fetch });
+  } catch (error) {
+    trial = { rows: [], health: { id: source.id, ok: false, status: String(error.message || error).slice(0, 80) } };
+  }
+  await recordSourceHealth(env, [{ ...trial.health, id: source.id, mayor_id: mayor.id }]);
+  const about = trial.rows.filter((row) => isAboutMayor(`${row.title || ""} ${row.snippet || ""}`, mayor));
+  return {
+    ok: true,
+    id: source.id,
+    works: Boolean(trial.health.ok),
+    status: trial.health.status,
+    fail_reason: trial.health.fail_reason || "",
+    strategy: trial.health.last_strategy || "",
+    recent_links: trial.rows.length,
+    about_mayor: about.length,
+    supplement_found: trial.health.supplement_found || 0,
+    samples: about.slice(0, 3).map((row) => ({ title: String(row.title || "").slice(0, 120), url: row.url })),
+  };
 }

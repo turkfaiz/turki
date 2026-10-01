@@ -270,3 +270,74 @@ test("custom sources survive a new worker isolate through the D1 reload", async 
   assert.equal(sourcesFor(mayorId).length, 1);
   assert.equal(sourcesFor(mayorId)[0].origin, "custom");
 });
+
+test("the settings overview gathers offices, AI slots, system facts and recent changes in one call", async () => {
+  const { env, mayorId } = await newDesk();
+  fakeWeb(feedSite("over.example.org", [{ title: "x one two", link: "https://over.example.org/1", date: hoursAgo(1) }]));
+  await addSite(env, mayorId, "over.example.org");
+  const res = await worker.fetch(request("/api/settings/overview"), env);
+  assert.equal(res.status, 200);
+  const view = await res.json();
+  assert.equal(view.summary.cap_per_office, 3);
+  assert.equal(view.summary.custom_offices, 1);
+  assert.ok(view.summary.sources_total >= 37);
+  assert.equal(view.offices.find((o) => o.id === mayorId).platforms[0].origin, "custom");
+  assert.ok(view.ai.slots.some((slot) => slot.id === "gemini"));
+  assert.equal(typeof view.system.queue, "boolean");
+  assert.deepEqual(
+    view.audit.map((row) => row.action).slice(0, 2),
+    ["source_added", "mayor_created"],
+  );
+});
+
+test("a source can be re-checked on demand and the result is recorded on the row", async () => {
+  const { env, mayorId } = await newDesk();
+  fakeWeb(
+    feedSite("chk.example.org", [
+      { title: "Noura Alabdullah opens a park", link: "https://chk.example.org/1", date: hoursAgo(2) },
+    ]),
+  );
+  await addSite(env, mayorId, "chk.example.org");
+  const id = encodeURIComponent(`${mayorId}:chk.example.org`);
+  const res = await worker.fetch(request(`/api/settings/sources/${id}/check`, { method: "POST" }), env);
+  assert.equal(res.status, 200);
+  const result = await res.json();
+  assert.equal(result.works, true);
+  assert.equal(result.about_mayor, 1);
+  const row = env.DB.one(`SELECT last_status, last_checked_at FROM sources WHERE id = ?`, `${mayorId}:chk.example.org`);
+  assert.equal(row.last_status, "ok");
+  assert.ok(row.last_checked_at);
+
+  fakeWeb({ "https://chk.example.org/feed.xml": { status: 403, body: "no" }, "https://chk.example.org/": { status: 403 } });
+  const failing = await (await worker.fetch(request(`/api/settings/sources/${id}/check`, { method: "POST" }), env)).json();
+  assert.equal(failing.works, false);
+});
+
+test("a custom mayor can be edited and deleted, a seed mayor cannot, and decisions block deletion", async () => {
+  const { env, mayorId } = await newDesk();
+  const patched = await worker.fetch(
+    request(`/api/settings/mayors/${mayorId}`, { method: "PATCH", body: { name_ar: "نورة المطيري", city_ar: "جدة" } }),
+    env,
+  );
+  assert.equal(patched.status, 200);
+  assert.equal(env.DB.one(`SELECT name_ar, city_ar FROM mayors WHERE id = ?`, mayorId).name_ar, "نورة المطيري");
+
+  const bad = await worker.fetch(request(`/api/settings/mayors/${mayorId}`, { method: "PATCH", body: { country_code: "SAU" } }), env);
+  assert.equal(bad.status, 400);
+  const seed = await worker.fetch(request("/api/settings/mayors/turin", { method: "PATCH", body: { name_ar: "x" } }), env);
+  assert.equal(seed.status, 403);
+  assert.equal((await worker.fetch(request("/api/settings/mayors/turin", { method: "DELETE" }), env)).status, 403);
+
+  env.DB.exec(`
+    INSERT INTO items (id, mayor_id, source, title, title_normalized, url, confidence, status, fingerprint)
+    VALUES ('keep-1', '${mayorId}', 'approved_rss', 't', 't', 'https://x.example/1', 'raw', 'approved', 'fp-keep-1')
+  `);
+  const blocked = await worker.fetch(request(`/api/settings/mayors/${mayorId}`, { method: "DELETE" }), env);
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json()).error, "has_decisions");
+
+  env.DB.exec(`DELETE FROM items WHERE id = 'keep-1'`);
+  const gone = await worker.fetch(request(`/api/settings/mayors/${mayorId}`, { method: "DELETE" }), env);
+  assert.equal(gone.status, 200);
+  assert.equal(env.DB.one(`SELECT COUNT(*) AS n FROM mayors WHERE id = ?`, mayorId).n, 0);
+});

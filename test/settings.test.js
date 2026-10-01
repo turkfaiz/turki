@@ -114,7 +114,7 @@ test("an unauthenticated caller cannot change platform settings", async () => {
   assert.equal(authorized(request("/api/settings/offices"), env), false);
 });
 
-test("the settings api refuses a random domain addition", async () => {
+test("toggling a source never accepts a raw domain; sites go through the site form", async () => {
   const env = envWith({ DASHBOARD_PASSWORD: "secret" });
   await ensureDb(env);
   const res = await worker.fetch(
@@ -125,7 +125,8 @@ test("the settings api refuses a random domain addition", async () => {
     }),
     env,
   );
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "use_sites");
 });
 
 test("parseMayorInput fills titles and language labels from the required basics", () => {
@@ -184,7 +185,7 @@ test("an authorized user can add a custom mayor from settings", async () => {
   assert.equal(audit.mayor_id, payload.mayor.id);
 });
 
-test("adding a mayor from settings still refuses a crawl domain", async () => {
+test("adding a mayor refuses raw registry fields; sites go in the sites list", async () => {
   const env = envWith({ DASHBOARD_PASSWORD: "secret" });
   await ensureDb(env);
   const res = await worker.fetch(
@@ -195,7 +196,8 @@ test("adding a mayor from settings still refuses a crawl domain", async () => {
     }),
     env,
   );
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "use_sites");
 });
 
 test("missing mayor fields and seed ids are rejected", async () => {
