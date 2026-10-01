@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/styles.css?v=ui23" />
+    <link rel="stylesheet" href="/styles.css?v=ui24" />
   </head>
   <body>
     <div class="sheet">
@@ -87,14 +87,14 @@
           <div>
             <p class="gazette">الإعدادات</p>
             <h2 id="settings-title">العمداء ومنصات الرصد</h2>
-            <p class="sub">أضف هوية عمدة جديد بالبيانات الأساسية. المنصات تبقى من السجل المعتمد ولا تُفتح نطاقات من هنا.</p>
+            <p class="sub">أضف عمدة ومواقعه (حتى 3 لكل مكتب). يفحص النظام كل موقع، ويختار أفضل طريقة لقراءته، ويبحث فيه باسم العمدة تلقائيًا.</p>
           </div>
           <button type="button" class="settings-close" id="settings-close">إغلاق</button>
         </div>
         <div class="settings-scroll">
         <form id="add-mayor-form" class="settings-add" autocomplete="off">
           <h3>إضافة عمدة</h3>
-          <p class="settings-add-note">الحقول المطلوبة تكفي لإنشاء المكتب. النطاق الرسمي للعرض والتصنيف فقط، ولا يصبح منصة رصد.</p>
+          <p class="settings-add-note">الحقول المطلوبة تكفي لإنشاء المكتب. المواقع اختيارية الآن، ويمكن إضافتها لاحقًا من بطاقة المكتب. النطاق الرسمي للتصنيف، وإن كتبتَه ضمن المواقع عُدّ موقعًا رسميًا.</p>
           <div class="settings-fields">
             <label class="settings-field">
               الاسم بالعربية *
@@ -144,6 +144,10 @@
               النطاق الرسمي
               <input name="official_host" maxlength="253" placeholder="alriyadh.gov.sa" dir="ltr">
             </label>
+            <label class="settings-field settings-field-wide">
+              مواقع الرصد (حتى 3، رابط في كل سطر)
+              <textarea name="sites_text" rows="3" dir="ltr" placeholder="https://example.com/news&#10;https://another-site.com"></textarea>
+            </label>
             <label class="settings-field">
               معرّف المكتب
               <input name="id" maxlength="40" placeholder="يُشتق تلقائياً من المدينة والاسم" dir="ltr" pattern="[A-Za-z][A-Za-z0-9-]{1,39}">
@@ -158,6 +162,6 @@
         </div>
       </div>
     </div>
-    <script src="/app.js?v=ui23"></script>
+    <script src="/app.js?v=ui24"></script>
   </body>
 </html>

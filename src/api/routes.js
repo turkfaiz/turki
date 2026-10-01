@@ -15,6 +15,7 @@ import {
 import { REASON } from "../reasons.js";
 import { reviewInbox } from "../reviewAgent.js";
 import { MAX_SOURCES_PER_OFFICE, registeredSourcesSql } from "../sources.js";
+import { addSite, removeSite } from "../sourceAdmin.js";
 import { assignPendingLanes, briefBacklog, translatePending } from "../translate.js";
 import {
   currentVersion,
@@ -90,7 +91,7 @@ export async function handleApi(request, env) {
     const { results } = await env.DB.prepare(
       `SELECT sources.*, mayors.name_ar, mayors.city_ar
        FROM sources JOIN mayors ON mayors.id = sources.mayor_id
-       WHERE ${registeredSourcesSql("sources.id")}
+       WHERE ${registeredSourcesSql("sources.")}
        ORDER BY sources.mayor_id, sources.rank`,
     ).all();
     return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });
@@ -100,7 +101,26 @@ export async function handleApi(request, env) {
     return json({ offices: await settingsOffices(env) });
   }
 
+  const siteMatch = path.match(/^\/api\/settings\/mayors\/([a-z][a-z0-9-]*)\/sites$/i);
+  if (siteMatch && method === "POST") {
+    const body = await readBody(request);
+    const result = await addSite(env, {
+      mayorId: siteMatch[1].toLowerCase(),
+      input: body.url,
+      platform: body.platform || "newspaper",
+      actor: reviewerOf(request, env),
+    });
+    return json(result, result.ok ? 201 : result.status || 400);
+  }
+
   const toggleMatch = path.match(/^\/api\/settings\/sources\/([^/]+)$/i);
+  if (toggleMatch && method === "DELETE") {
+    const result = await removeSite(env, {
+      sourceId: decodeURIComponent(toggleMatch[1]),
+      actor: reviewerOf(request, env),
+    });
+    return json(result, result.ok ? 200 : result.status || 400);
+  }
   if (toggleMatch && method === "POST") {
     const body = await readBody(request);
     if (typeof body.enabled !== "boolean") {
@@ -125,7 +145,7 @@ export async function handleApi(request, env) {
       return json(
         {
           error: "registry_closed",
-          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
+          message: "أضف المواقع عبر الحقل المخصص لها (sites) ليجري فحصها واعتمادها تلقائيًا.",
         },
         403,
       );
@@ -143,6 +163,15 @@ export async function handleApi(request, env) {
     if (existing) {
       return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
     }
+    const wanted = (Array.isArray(body.sites) ? body.sites : [])
+      .map((entry) => (typeof entry === "string" ? { url: entry } : entry))
+      .filter((entry) => entry?.url);
+    if (wanted.length > MAX_SOURCES_PER_OFFICE) {
+      return json(
+        { error: "too_many_sites", message: `الحد الأقصى ${MAX_SOURCES_PER_OFFICE} مواقع لكل مكتب.` },
+        400,
+      );
+    }
     const mayor = await insertCustomMayor(env, parsed.mayor);
     await env.DB.prepare(
       `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
@@ -150,11 +179,24 @@ export async function handleApi(request, env) {
     )
       .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
       .run();
+    const sites = [];
+    for (const entry of wanted) {
+      const added = await addSite(env, {
+        mayorId: mayor.id,
+        input: entry.url,
+        platform: entry.platform || "newspaper",
+        actor: reviewerOf(request, env),
+      });
+      sites.push({ input: entry.url, ...added });
+    }
     return json(
       {
         ok: true,
         mayor,
-        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
+        sites,
+        note: sites.length
+          ? "أُضيف العمدة وفُحصت مواقعه؛ الرصد يعمل عليها تلقائيًا."
+          : "أُضيفت هوية العمدة. أضف موقعًا أو أكثر ليبدأ الرصد.",
         offices: await settingsOffices(env),
       },
       201,

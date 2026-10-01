@@ -9,8 +9,8 @@ import { listMayors } from "../mayors.js";
 import { sourceStatus } from "../pipeline.js";
 import { REASON } from "../reasons.js";
 import {
-  APPROVED_SOURCES,
   MAX_SOURCES_PER_OFFICE,
+  allSources,
   platformLabelAr,
   registeredSourcesSql,
   sourceById,
@@ -224,7 +224,7 @@ export async function diagnostics(env) {
             sources.last_discovery_at, sources.fail_reason, sources.last_strategy,
             mayors.name_ar
      FROM sources JOIN mayors ON mayors.id = sources.mayor_id
-     WHERE ${registeredSourcesSql("sources.id")}
+     WHERE ${registeredSourcesSql("sources.")}
      ORDER BY sources.mayor_id, sources.rank`,
   ).all();
   const window = await env.DB.prepare(
@@ -245,7 +245,7 @@ export async function diagnostics(env) {
   const mergeSlot =
     overview.slots.find((slot) => slot.id === "gemini" && slot.bound) ||
     overview.slots.find((slot) => slot.bound);
-  const pageSources = APPROVED_SOURCES.filter((source) =>
+  const pageSources = allSources().filter((source) =>
     (source.discovery || []).some((step) => step.type === "newsroom"),
   ).length;
   const readerOk = Number(window?.total) > 0 || !lastScan;
@@ -446,6 +446,7 @@ export async function settingsOffices(env) {
       url: row.url,
       rank: row.rank,
       enabled: Number(row.enabled) !== 0,
+      origin: row.origin === "custom" ? "custom" : "registry",
       platform: registered?.platform || (row.tier === 0 ? "official" : "newspaper"),
       platform_ar: platformLabelAr(registered || row),
       strategies: (registered?.discovery || []).map((step) => ({

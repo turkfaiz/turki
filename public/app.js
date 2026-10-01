@@ -1017,16 +1017,33 @@ function renderSettings(payload) {
                         <small>آخر فحص: ${escapeHtml(fmtDate(platform.last_checked_at))} · آخر اكتشاف: ${escapeHtml(fmtDate(platform.last_discovery_at))}</small>
                         <small>${escapeHtml(platform.operational?.label || "—")}</small>
                       </div>
-                      <label class="settings-toggle">
-                        <input type="checkbox" data-source-toggle="${escapeHtml(platform.id)}" ${checked}>
-                        ${platform.enabled ? "مفعّلة" : "متوقفة"}
-                      </label>
+                      <div class="settings-platform-actions">
+                        <label class="settings-toggle">
+                          <input type="checkbox" data-source-toggle="${escapeHtml(platform.id)}" ${checked}>
+                          ${platform.enabled ? "مفعّلة" : "متوقفة"}
+                        </label>
+                        ${
+                          platform.origin === "custom"
+                            ? `<button type="button" class="btn-link-danger" data-source-delete="${escapeHtml(platform.id)}">حذف</button>`
+                            : ""
+                        }
+                      </div>
                     </div>`;
                   })
                   .join("")
               : `<p class="settings-empty">لا منصات مسجّلة لهذا المكتب.</p>`
           }
         </div>
+        <form class="settings-site-form" data-site-form="${escapeHtml(office.id)}" autocomplete="off">
+          <input name="url" dir="ltr" required placeholder="أضف موقعًا: https://example.com" aria-label="رابط الموقع">
+          <select name="platform" aria-label="نوع الموقع">
+            <option value="newspaper">صحيفة</option>
+            <option value="official">رسمي</option>
+            <option value="agency">وكالة</option>
+          </select>
+          <button type="submit">إضافة وفحص</button>
+          <p class="settings-site-status" role="status"></p>
+        </form>
       </article>`;
     })
     .join("");
@@ -1075,17 +1092,75 @@ $("settings-body").addEventListener("change", async (e) => {
   }
 });
 
+function siteResultText(result) {
+  if (!result.ok) return `${result.input ? `${result.input}: ` : ""}${result.message || result.error}`;
+  const trial = result.trial || {};
+  const search = (result.steps || []).some((step) => step.supplement) ? " · يبحث باسم العمدة" : "";
+  return `${result.domain}: تعمل — ${num(trial.recent_links || 0)} رابطًا حديثًا، ${num(trial.about_mayor || 0)} منها يذكر العمدة${search}`;
+}
+
+$("settings-body").addEventListener("submit", async (e) => {
+  const form = e.target.closest("form[data-site-form]");
+  if (!form) return;
+  e.preventDefault();
+  const status = form.querySelector(".settings-site-status");
+  const button = form.querySelector("[type=submit]");
+  button.disabled = true;
+  status.classList.remove("is-error");
+  status.textContent = "يفحص الموقع ويجرّبه… قد يستغرق دقيقة";
+  try {
+    const result = await api(`/api/settings/mayors/${encodeURIComponent(form.dataset.siteForm)}/sites`, {
+      method: "POST",
+      body: JSON.stringify({ url: form.url.value, platform: form.platform.value }),
+    });
+    const mayorId = form.dataset.siteForm;
+    await loadSettings();
+    const note = document.querySelector(`[data-site-form="${CSS.escape(mayorId)}"] .settings-site-status`);
+    if (note) note.textContent = siteResultText(result);
+  } catch (error) {
+    status.textContent = error.message;
+    status.classList.add("is-error");
+    button.disabled = false;
+  }
+});
+
+$("settings-body").addEventListener("click", async (e) => {
+  const button = e.target.closest("button[data-source-delete]");
+  if (!button) return;
+  if (!window.confirm("حذف هذا الموقع من المكتب؟ الأخبار المحفوظة منه تبقى.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/settings/sources/${encodeURIComponent(button.dataset.sourceDelete)}`, { method: "DELETE" });
+    await loadSettings();
+  } catch (error) {
+    button.disabled = false;
+    renderSettings({ error: `تعذر الحذف: ${error.message}` });
+  }
+});
+
 $("add-mayor-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
   const submit = form.querySelector("[type=submit]");
   const status = $("add-mayor-status");
   const payload = Object.fromEntries(new FormData(form).entries());
+  const officialHost = String(payload.official_host || "").trim().replace(/^www\./i, "").toLowerCase();
+  const sites = String(payload.sites_text || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((url) => {
+      const host = url.replace(/^[a-z]+:\/\//i, "").replace(/^www\./i, "").split("/")[0].toLowerCase();
+      const official = officialHost && (host === officialHost || host.endsWith(`.${officialHost}`));
+      return { url, platform: official ? "official" : "newspaper" };
+    });
+  delete payload.sites_text;
   for (const key of Object.keys(payload)) {
     if (!String(payload[key] || "").trim()) delete payload[key];
   }
+  if (sites.length) payload.sites = sites;
   submit.disabled = true;
-  status.textContent = "جاري الحفظ…";
+  status.textContent = sites.length ? "يحفظ العمدة ويفحص مواقعه… قد يستغرق دقيقة" : "جاري الحفظ…";
   status.classList.remove("is-error");
   try {
     const created = await api("/api/settings/mayors", {
@@ -1093,7 +1168,10 @@ $("add-mayor-form").addEventListener("submit", async (e) => {
       body: JSON.stringify(payload),
     });
     form.reset();
-    status.textContent = "أُضيف المكتب. يمكنك إضافة عمدة آخر من النموذج نفسه.";
+    status.textContent = [
+      "أُضيف المكتب.",
+      ...(created.sites || []).map(siteResultText),
+    ].join(" · ");
     await loadSettings();
     await loadMayors();
     const card = document.querySelector(

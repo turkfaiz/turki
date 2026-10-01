@@ -460,25 +460,74 @@ function withIds(mayorId, entries) {
   });
 }
 
+/** مصادر السجل المكتوب في الشيفرة: بذرة ثابتة تُزرع في كل ترحيل. */
 export const APPROVED_SOURCES = Object.entries(REGISTRY).flatMap(([mayorId, entries]) =>
   withIds(mayorId, entries),
 );
 
 /**
- * شرط SQL يحصر قراءة جدول sources في المسجّل في الشيفرة. صفوف مصادر استُبدلت
- * تبقى في القاعدة بلا حذف، لكنها لا تُعدّ ولا تُعرض في اللوحة. المعرّفات ثوابت
- * من السجل، وليست مدخلات.
+ * مصادر أضافها الموظف من الإعدادات. تُحمَّل من D1 إلى ذاكرة العامل عند بدء كل
+ * طلب أو مهمة (`refreshCustomSources`)، فتمر عبر نفس بوابة الحوكمة التي تمر بها
+ * مصادر الشيفرة: نطاق معتمد لمكتبه فقط، وتحويلات مراقبة، وهوية العمدة إلزامية.
  */
-export function registeredSourcesSql(column = "id") {
-  return `${column} IN (${APPROVED_SOURCES.map((source) => `'${source.id}'`).join(", ")})`;
+let customSources = [];
+
+export function setCustomSources(rows) {
+  customSources = (rows || []).map(customSourceFromRow).filter(Boolean);
+}
+
+export function customSourceFromRow(row) {
+  let discovery;
+  try {
+    discovery = JSON.parse(row.discovery_json || "[]");
+  } catch {
+    return null;
+  }
+  if (!row.id || !row.mayor_id || !row.domain || !Array.isArray(discovery)) return null;
+  discovery = discovery.map((entry, index) => ({
+    ...entry,
+    enabled: entry.enabled !== false,
+    rank: index + 1,
+  }));
+  const primary = discovery.find((entry) => entry.enabled && entry.url && !entry.supplement) || discovery[0] || {};
+  return {
+    id: row.id,
+    mayor_id: row.mayor_id,
+    domain: row.domain,
+    name: row.name || row.domain,
+    tier: row.tier == null ? 1 : Number(row.tier),
+    platform: row.platform || "newspaper",
+    discovery,
+    kind: strategyKind(primary.type),
+    url: primary.url || row.url || "",
+    adapter: discovery.find((entry) => entry.type === "newsroom")?.adapter || "generic",
+    rank: Number(row.rank) || 1,
+    verified: 1,
+    curated_at: row.curated_at || "",
+    origin: "custom",
+  };
+}
+
+/** كل المصادر المعتمدة الآن: السجل المكتوب ثم ما أضافه الموظف. */
+export function allSources() {
+  return customSources.length ? [...APPROVED_SOURCES, ...customSources] : APPROVED_SOURCES;
+}
+
+/**
+ * شرط SQL يحصر قراءة جدول sources في المسجّل: ما في الشيفرة، أو ما أضافه الموظف
+ * (origin = 'custom'). صفوف مصادر استُبدلت في الشيفرة تبقى في القاعدة بلا حذف
+ * لكنها لا تُعدّ ولا تُعرض. المعرّفات ثوابت من السجل، وليست مدخلات.
+ */
+export function registeredSourcesSql(prefix = "") {
+  return `(${prefix}id IN (${APPROVED_SOURCES.map((source) => `'${source.id}'`).join(", ")}) OR ${prefix}origin = 'custom')`;
 }
 
 export function sourcesFor(mayorId) {
-  return APPROVED_SOURCES.filter((source) => source.mayor_id === mayorId);
+  return allSources().filter((source) => source.mayor_id === mayorId);
 }
 
 export function sourceById(id) {
-  return APPROVED_SOURCES.find((source) => source.id === id) || null;
+  return allSources().find((source) => source.id === id) || null;
 }
 
 function hostOf(value) {

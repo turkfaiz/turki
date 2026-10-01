@@ -1,5 +1,5 @@
 import { MAYORS, isAboutMayor } from "./mayors.js";
-import { APPROVED_SOURCES } from "./sources.js";
+import { APPROVED_SOURCES, sourcesFor } from "./sources.js";
 import { isAggregatorHost, publisherDomain, resolvePublisherDomain } from "./domain.js";
 import { pickConfidence } from "./dedup.js";
 import { REASON } from "./reasons.js";
@@ -170,6 +170,22 @@ export function matchPublisher(domain, mayor) {
       domain: official,
       name: mayor.title_en || mayor.name_en,
       tier: 0,
+      country_code: mayor.country_code || null,
+      mayor_id: mayor.id,
+    };
+  }
+  // موقع أضافه الموظف لهذا المكتب موثوق بقرار الإضافة نفسه، وليس في القائمة الثابتة.
+  const custom = sourcesFor(mayor?.id).find(
+    (source) =>
+      source.origin === "custom" &&
+      (domain === source.domain || domain.endsWith(`.${source.domain}`) || source.domain.endsWith(`.${domain}`)),
+  );
+  if (custom) {
+    return {
+      id: custom.id,
+      domain: custom.domain,
+      name: custom.name,
+      tier: custom.tier,
       country_code: mayor.country_code || null,
       mayor_id: mayor.id,
     };

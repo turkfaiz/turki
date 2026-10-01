@@ -1038,3 +1038,61 @@ h1 {
   .settings-fields { grid-template-columns: 1fr; }
   .mast { grid-template-columns: 1fr; }
 }
+
+/* إضافة مواقع الرصد من الإعدادات */
+.settings-platform-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.btn-link-danger {
+  font: inherit;
+  font-size: 13px;
+  border: 0;
+  background: none;
+  color: var(--bad);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.btn-link-danger:disabled { opacity: 0.5; cursor: wait; }
+.settings-site-form {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+.settings-site-form input,
+.settings-site-form select,
+.settings-field textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+}
+.settings-site-form button {
+  font: inherit;
+  font-weight: 700;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--navy);
+  color: #ffffff;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+.settings-site-form button:disabled { opacity: 0.45; cursor: wait; }
+.settings-site-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.settings-site-status:empty { display: none; }
+.settings-site-status.is-error { color: var(--bad); }
+.settings-field-wide { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .settings-site-form { grid-template-columns: 1fr; }
+}

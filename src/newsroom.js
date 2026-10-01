@@ -88,7 +88,55 @@ function defaultLooksLikeArticle(url, adapter) {
   );
 }
 
-function pushLink(found, url, title, adapter, base) {
+const DATE_IN_PATH = [
+  /(?:^|[/_-])(20\d{2})[/-](0?[1-9]|1[0-2])[/-](0?[1-9]|[12]\d|3[01])(?:[/_.-]|$)/,
+  /(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)/,
+];
+
+/** تاريخ يظهر في مسار الرابط نفسه، وهو أدق مصدر لتاريخ خبر في قائمة صفحة. */
+export function dateFromUrl(url) {
+  let path = `${url.pathname}${url.search}`;
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    /* مسار بترميز ناقص: نقرأه كما هو */
+  }
+  for (const pattern of DATE_IN_PATH) {
+    const m = path.match(pattern);
+    if (m) return sanePastDate(m[1], m[2], m[3]);
+  }
+  return "";
+}
+
+function sanePastDate(year, month, day) {
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const when = Date.parse(`${iso}T12:00:00Z`);
+  if (Number.isNaN(when)) return "";
+  // تاريخ في المستقبل البعيد رقم تعريف لا موعد نشر.
+  if (when > Date.now() + 2 * 24 * 60 * 60 * 1000) return "";
+  return iso;
+}
+
+const NEARBY_DATE =
+  /<time\b[^>]*datetime\s*=\s*["']([^"']{8,40})["']|datePublished["']?\s*[:=]\s*["']([^"']{8,40})["']|\b(20\d{2}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?)\b/gi;
+
+/** أقرب تاريخ حول الرابط داخل نفس البطاقة. الخطأ هنا يلتقطه فحص تاريخ الصفحة لاحقًا. */
+export function dateNearAnchor(html, start, end, reach = 500) {
+  const from = Math.max(0, start - reach);
+  const window = html.slice(from, Math.min(html.length, end + reach));
+  const anchorAt = start - from;
+  let best = null;
+  NEARBY_DATE.lastIndex = 0;
+  for (let m = NEARBY_DATE.exec(window); m; m = NEARBY_DATE.exec(window)) {
+    const value = m[1] || m[2] || m[3];
+    const distance = Math.abs(m.index - anchorAt);
+    if (Number.isNaN(Date.parse(value))) continue;
+    if (!best || distance < best.distance) best = { value, distance };
+  }
+  return best ? best.value : "";
+}
+
+function pushLink(found, url, title, adapter, base, publishedAt = "") {
   if (!/^https?:$/i.test(url.protocol)) return;
   const baseHost = hostOf(base);
   const linkHost = hostOf(url);
@@ -99,6 +147,8 @@ function pushLink(found, url, title, adapter, base) {
   const key = url.toString();
   if (found.has(key)) return;
   found.set(key, decodeEntities(title || "").trim());
+  const dated = publishedAt || dateFromUrl(url);
+  if (dated) (found.dates ||= new Map()).set(key, dated);
 }
 
 function extractJsonLdLinks(html, baseUrl, adapter, found) {
@@ -112,13 +162,17 @@ function extractJsonLdLinks(html, baseUrl, adapter, found) {
     const type = String(node["@type"] || "");
     if (/NewsArticle|Article|BlogPosting/i.test(type) && node.url) {
       const url = resolveUrl(node.url, base);
-      if (url) pushLink(found, url, node.headline || node.name || "", adapter, base);
+      if (url) {
+        pushLink(found, url, node.headline || node.name || "", adapter, base, node.datePublished || node.dateCreated || "");
+      }
     }
     const item = node.item || node.url;
     const href = typeof item === "string" ? item : item?.url || item?.["@id"];
     if (href) {
       const url = resolveUrl(href, base);
-      if (url) pushLink(found, url, node.name || node.headline || "", adapter, base);
+      if (url) {
+        pushLink(found, url, node.name || node.headline || "", adapter, base, node.datePublished || node.dateCreated || "");
+      }
     }
   }
 }
@@ -131,8 +185,10 @@ function extractAnchorLinks(html, baseUrl, adapter, found) {
     return;
   }
   const newsroomDir = base.pathname.replace(/[^/]*$/, "");
-  const tags = String(html || "").match(/<a\b[^>]*>[\s\S]*?<\/a>/gi) || [];
-  for (const tag of tags) {
+  const source = String(html || "");
+  const tags = [...source.matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/gi)];
+  for (const match of tags) {
+    const tag = match[0];
     if (found.size >= ARTICLE_LINK_LIMIT) break;
     const href = tag.match(/href\s*=\s*["']([^"']+)["']/i)?.[1];
     if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href)) continue;
@@ -145,7 +201,13 @@ function extractAnchorLinks(html, baseUrl, adapter, found) {
         continue;
       }
     }
+    const before = found.size;
     pushLink(found, url, title, adapter, base);
+    const key = url.toString();
+    if (found.size > before && !found.dates?.has(key)) {
+      const near = dateNearAnchor(source, match.index, match.index + tag.length);
+      if (near) (found.dates ||= new Map()).set(key, near);
+    }
   }
 }
 
@@ -299,7 +361,11 @@ export function extractArticleLinks(html, baseUrl, adapterName = "generic") {
   if (adapter.nextData) extractRabatNextData(html, baseUrl, found);
   if (adapter.jsonLd) extractJsonLdLinks(html, baseUrl, adapter, found);
   if (adapter.anchors !== false) extractAnchorLinks(html, baseUrl, adapter, found);
-  return [...found.entries()].slice(0, ARTICLE_LINK_LIMIT).map(([url, title]) => ({ url, title }));
+  return [...found.entries()].slice(0, ARTICLE_LINK_LIMIT).map(([url, title]) => ({
+    url,
+    title,
+    published_at: found.dates?.get(url) || "",
+  }));
 }
 
 export function inspectListingPage(html, httpStatus, url) {
