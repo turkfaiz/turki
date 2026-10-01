@@ -357,13 +357,30 @@ async function runApi(strategy, source, mayor, state, extra) {
   };
 }
 
-async function runInternalSearch(strategy, source, mayor, state, extra) {
-  if (!strategy.enabled || !strategy.query_template) {
-    return { ok: false, status: "disabled", rows: [], fallback: true, fail_reason: "disabled" };
+/**
+ * أسماء البحث: كل اسم بمفرده، لأن بحث الموقع الداخلي يشترط ظهور كل الكلمات معًا،
+ * فدمج الاسم الإنجليزي والمحلي في استعلام واحد لا يطابق شيئًا تقريبًا.
+ */
+export function searchNames(mayor) {
+  return [...new Set([mayor.name_native, mayor.name_en].map((n) => String(n || "").trim()).filter(Boolean))];
+}
+
+async function runSearchStep(strategy, source, mayor, state, extra) {
+  const template = strategy.query_template || strategy.url || "";
+  if (!template.includes("{query}")) {
+    return { ok: false, status: "disabled", rows: [], fallback: false, fail_reason: "no_query_template" };
   }
-  const query = encodeURIComponent(`${mayor.name_en} ${mayor.name_native}`.trim());
-  const url = strategy.query_template.replace("{query}", query);
-  return runNewsroom({ ...strategy, url, adapter: strategy.adapter || source.adapter }, source, mayor, state, extra);
+  const runner = strategy.type === "api" ? runApi : runNewsroom;
+  const rows = [];
+  let last = null;
+  for (const name of searchNames(mayor)) {
+    if (state.requests >= SOURCE_POLL_MAX_REQUESTS) break;
+    const url = template.replace("{query}", encodeURIComponent(name));
+    last = await runner({ ...strategy, url, also: [] }, source, mayor, state, extra);
+    if (last.ok) rows.push(...(last.rows || []));
+  }
+  if (!last) return { ok: false, status: "request_budget", rows: [], fallback: false, fail_reason: "request_budget" };
+  return rows.length ? { ...last, ok: true, status: "ok", rows } : last;
 }
 
 async function runBrowser(strategy, source, mayor, extra) {
@@ -412,7 +429,7 @@ const RUNNERS = {
   newsroom: runNewsroom,
   sitemap: runSitemap,
   api: runApi,
-  internal_search: runInternalSearch,
+  internal_search: runSearchStep,
   browser: runBrowser,
 };
 
@@ -420,11 +437,13 @@ const RUNNERS = {
  * يشغّل استراتيجيات المصدر بالترتيب. نجاح بلا عناصر جديدة يوقف السلسلة.
  * العطل الحقيقي فقط ينتقل للتالية.
  */
-export async function discoverSource(source, mayor, extra = {}) {
+async function discoverPrimary(source, mayor, extra = {}) {
   const started = Date.now();
   const health = emptyHealth(source);
   const state = { requests: 0 };
-  const steps = (source.discovery || []).filter((entry) => entry && entry.enabled !== false);
+  const steps = (source.discovery || []).filter(
+    (entry) => entry && entry.enabled !== false && !entry.supplement,
+  );
   if (!steps.length) {
     health.status = "bad_url";
     health.fail_reason = "no_discovery_strategy";
@@ -496,3 +515,53 @@ export async function discoverSource(source, mayor, extra = {}) {
   return { source, rows: leftover, health };
 }
 
+
+/**
+ * بحث تكميلي داخل الموقع نفسه باسم العمدة، يعمل بعد قراءة آخر ما نشره الموقع.
+ * قراءة آخر العناوين وحدها تفوّت خبر العمدة بين مئات العناوين، والبحث الداخلي
+ * يصل إليه مباشرة. النتائج تمر بنفس بوابة النطاق المعتمد وشرط التاريخ.
+ */
+async function discoverWithSupplements(primary, supplements, source, mayor, extra) {
+  const state = { requests: 0 };
+  const found = [];
+  let lastFailure = "";
+  for (const strategy of supplements) {
+    try {
+      const result = await runSearchStep(strategy, source, mayor, state, extra);
+      if (result.ok) found.push(...filterApproved(result.rows || [], mayor.id));
+      else lastFailure = result.fail_reason || result.status || "";
+    } catch (error) {
+      lastFailure = error.code || String(error.message || error).slice(0, 80);
+    }
+  }
+  const seen = new Set(primary.rows.map((row) => row.url));
+  const extraRows = found.filter((row) => !seen.has(row.url) && seen.add(row.url));
+  const rows = [...primary.rows, ...extraRows];
+  const health = {
+    ...primary.health,
+    supplement_found: extraRows.length,
+    supplement_error: extraRows.length ? "" : lastFailure,
+    requests: (primary.health.requests || 0) + state.requests,
+  };
+  if (extraRows.length) {
+    health.discovered = rows.length;
+    health.items = rows.length;
+    if (!health.ok) {
+      health.ok = true;
+      health.status = "ok";
+      health.fail_reason = "";
+    } else if (health.status === "ok_no_new") {
+      health.status = "ok";
+    }
+  }
+  return { ...primary, rows, health };
+}
+
+export async function discoverSource(source, mayor, extra = {}) {
+  const primary = await discoverPrimary(source, mayor, extra);
+  const supplements = (source.discovery || []).filter(
+    (entry) => entry && entry.enabled !== false && entry.supplement,
+  );
+  if (!supplements.length) return primary;
+  return discoverWithSupplements(primary, supplements, source, mayor, extra);
+}

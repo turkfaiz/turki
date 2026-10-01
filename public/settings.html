@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>الإعدادات — مكتب رصد العمداء</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Naskh+Arabic:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css?v=ui25" />
+    <link rel="stylesheet" href="/settings.css?v=s2" />
+  </head>
+  <body>
+    <div class="sheet" id="settings-root">
+      <header class="mast st-mast">
+        <div class="mast-right">
+          <p class="gazette">الإعدادات</p>
+          <h1>المكاتب ومواقع الرصد</h1>
+          <p class="sub">أضف عمدة وحدّد مواقعه (حتى 3)، والنظام يفحص كل موقع ويرصده تلقائيًا.</p>
+        </div>
+        <a class="btn-settings" href="/">← العودة إلى الرصد</a>
+      </header>
+
+      <section class="st-summary" id="st-summary" aria-live="polite"></section>
+
+      <nav class="st-tabs" role="tablist" aria-label="أقسام الإعدادات">
+        <button type="button" role="tab" id="tab-offices" data-tab="offices" aria-selected="true">المكاتب والمواقع</button>
+        <button type="button" role="tab" id="tab-ai" data-tab="ai" aria-selected="false">الذكاء الاصطناعي</button>
+        <button type="button" role="tab" id="tab-system" data-tab="system" aria-selected="false">النظام والسجل</button>
+      </nav>
+
+      <main class="st-main">
+        <section role="tabpanel" aria-labelledby="tab-offices" id="panel-offices">
+          <div class="st-toolbar">
+            <input type="search" id="st-search" placeholder="ابحث باسم العمدة أو المدينة أو الدولة" aria-label="بحث في المكاتب" />
+            <select id="st-filter" aria-label="تصفية المكاتب">
+              <option value="all">كل المكاتب</option>
+              <option value="attention">مواقع تحتاج انتباهًا</option>
+              <option value="empty">بلا مواقع مفعّلة</option>
+              <option value="custom">المضافة من الإعدادات</option>
+            </select>
+            <button type="button" class="st-btn st-btn-primary" id="st-add-mayor">+ إضافة عمدة</button>
+          </div>
+          <div id="st-add-panel" hidden></div>
+          <div id="st-offices" class="st-offices"><p class="st-empty">جاري التحميل…</p></div>
+        </section>
+        <section role="tabpanel" aria-labelledby="tab-ai" id="panel-ai" hidden></section>
+        <section role="tabpanel" aria-labelledby="tab-system" id="panel-system" hidden></section>
+      </main>
+    </div>
+
+    <dialog id="st-edit-dialog" class="st-dialog"></dialog>
+    <div id="st-toast" class="st-toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/settings.js?v=s2"></script>
+  </body>
+</html>

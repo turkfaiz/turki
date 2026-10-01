@@ -74,26 +74,25 @@ const REGISTRY = {
       discovery: [step("rss", { url: "https://www.yna.co.kr/rss/politics.xml" })],
     },
     {
-      domain: "koreaherald.com",
-      name: "The Korea Herald",
+      domain: "en.sedaily.com",
+      name: "Seoul Economic Daily",
       tier: 1,
       platform: "newspaper",
-      discovery: [step("rss", { url: "https://www.koreaherald.com/rss/newsAll" })],
+      discovery: [
+        step("rss", { url: "https://en.sedaily.com/RSS" }),
+        step("newsroom", { url: "https://en.sedaily.com/", adapter: "generic" }),
+      ],
     },
   ],
   madrid: [
     {
-      domain: "diario.madrid.es",
-      name: "Diario de Madrid",
-      tier: 0,
-      platform: "official",
+      domain: "madridiario.es",
+      name: "Madridiario",
+      tier: 1,
+      platform: "newspaper",
       discovery: [
-        step("newsroom", { url: "https://diario.madrid.es/", adapter: "madrid-diario" }),
-        step("sitemap", {
-          url: "https://diario.madrid.es/sitemap.xml",
-          include_patterns: ["blog", "noticia", "20"],
-        }),
-        step("browser", { enabled: false }),
+        step("rss", { url: "https://www.madridiario.es/rss" }),
+        step("newsroom", { url: "https://www.madridiario.es/", adapter: "generic" }),
       ],
     },
     {
@@ -142,26 +141,23 @@ const REGISTRY = {
   ],
   "northeast-england": [
     {
-      domain: "northeast-ca.gov.uk",
-      name: "North East Combined Authority",
-      tier: 0,
-      platform: "official",
-      discovery: [
-        step("newsroom", { url: "https://www.northeast-ca.gov.uk/news", adapter: "neca-news" }),
-        step("sitemap", {
-          url: "https://www.northeast-ca.gov.uk/sitemap.xml",
-          include_patterns: ["/news/"],
-        }),
-        step("browser", { enabled: false }),
-      ],
-    },
-    {
-      domain: "chroniclelive.co.uk",
-      name: "Chronicle Live",
+      domain: "sunderlandecho.com",
+      name: "Sunderland Echo",
       tier: 1,
       platform: "newspaper",
       discovery: [
-        step("rss", { url: "https://www.chroniclelive.co.uk/news/north-east-news/?service=rss" }),
+        step("rss", { url: "https://www.sunderlandecho.com/rss" }),
+        step("newsroom", { url: "https://www.sunderlandecho.com/", adapter: "generic" }),
+      ],
+    },
+    {
+      domain: "newcastlemagazine.com",
+      name: "Newcastle Magazine",
+      tier: 1,
+      platform: "newspaper",
+      discovery: [
+        step("rss", { url: "https://www.newcastlemagazine.com/feed" }),
+        step("newsroom", { url: "https://www.newcastlemagazine.com/", adapter: "generic" }),
       ],
     },
     {
@@ -174,24 +170,22 @@ const REGISTRY = {
   ],
   amman: [
     {
-      domain: "ammancity.gov.jo",
-      name: "أمانة عمّان الكبرى",
+      domain: "media.ammancity.gov.jo",
+      name: "إعلام أمانة عمّان",
       tier: 0,
       platform: "official",
       discovery: [
-        step("newsroom", {
-          url: "https://www.ammancity.gov.jo/ar/gam/news.aspx",
-          adapter: "amman-gam",
-        }),
-        step("browser", { enabled: false }),
+        step("newsroom", { url: "https://media.ammancity.gov.jo/", adapter: "generic" }),
       ],
     },
     {
-      domain: "roya.tv",
-      name: "رؤيا",
+      domain: "petra.gov.jo",
+      name: "وكالة الأنباء الأردنية بترا",
       tier: 1,
-      platform: "newspaper",
-      discovery: [step("rss", { url: "https://roya.tv/rss" })],
+      platform: "agency",
+      discovery: [
+        step("newsroom", { url: "https://www.petra.gov.jo/", adapter: "generic" }),
+      ],
     },
     {
       domain: "almamlakatv.com",
@@ -203,13 +197,13 @@ const REGISTRY = {
   ],
   baghdad: [
     {
-      domain: "amanatbaghdad.gov.iq",
-      name: "أمانة بغداد",
-      tier: 0,
-      platform: "official",
+      domain: "iraqinews.com",
+      name: "Iraqi News",
+      tier: 1,
+      platform: "newspaper",
       discovery: [
-        step("newsroom", { url: "https://amanatbaghdad.gov.iq/news", adapter: "baghdad-amanat" }),
-        step("browser", { enabled: false }),
+        step("rss", { url: "https://www.iraqinews.com/feed/" }),
+        step("newsroom", { url: "https://www.iraqinews.com/", adapter: "generic" }),
       ],
     },
     {
@@ -277,11 +271,13 @@ const REGISTRY = {
       ],
     },
     {
-      domain: "nhk.or.jp",
-      name: "NHK",
+      domain: "tv-osaka.co.jp",
+      name: "テレビ大阪",
       tier: 1,
-      platform: "agency",
-      discovery: [step("rss", { url: "https://www3.nhk.or.jp/rss/news/cat0.xml" })],
+      platform: "newspaper",
+      discovery: [
+        step("newsroom", { url: "https://www.tv-osaka.co.jp/", adapter: "generic" }),
+      ],
     },
     {
       domain: "asahi.com",
@@ -293,21 +289,13 @@ const REGISTRY = {
   ],
   athens: [
     {
-      domain: "cityofathens.gr",
-      name: "Δήμος Αθηναίων",
-      tier: 0,
-      platform: "official",
+      domain: "athens24.com",
+      name: "Athens 24",
+      tier: 1,
+      platform: "newspaper",
       discovery: [
-        step("rss", { url: "https://www.cityofathens.gr/feed/" }),
-        step("newsroom", { url: "https://www.cityofathens.gr/news/", adapter: "athens-wp" }),
-        step("api", {
-          url: "https://www.cityofathens.gr/wp-json/wp/v2/posts?per_page=20",
-          format: "wp-json",
-        }),
-        step("sitemap", {
-          url: "https://www.cityofathens.gr/post-sitemap.xml",
-          include_patterns: ["deltio-typoy", "anakoinosi"],
-        }),
+        step("rss", { url: "https://www.athens24.com/feed/" }),
+        step("newsroom", { url: "https://www.athens24.com/", adapter: "generic" }),
       ],
     },
     {
@@ -394,15 +382,12 @@ const VERIFIED_AT_CURATION = new Set([
   "turin:torino.repubblica.it",
   "seoul:seoul.go.kr",
   "seoul:yna.co.kr",
-  "seoul:koreaherald.com",
   "madrid:europapress.es",
   "madrid:elmundo.es",
   "malaga:malaga.eu",
   "malaga:diariosur.es",
   "malaga:europapress.es",
-  "northeast-england:chroniclelive.co.uk",
   "northeast-england:thenorthernecho.co.uk",
-  "amman:roya.tv",
   "amman:almamlakatv.com",
   "baghdad:baghdadtoday.news",
   "baghdad:ina.iq",
@@ -410,9 +395,7 @@ const VERIFIED_AT_CURATION = new Set([
   "muscat:timesofoman.com",
   "muscat:omanobserver.om",
   "osaka:city.osaka.lg.jp",
-  "osaka:nhk.or.jp",
   "osaka:asahi.com",
-  "athens:cityofathens.gr",
   "athens:efsyn.gr",
   "athens:in.gr",
   "pristina:prishtinaonline.com",
@@ -477,16 +460,74 @@ function withIds(mayorId, entries) {
   });
 }
 
+/** مصادر السجل المكتوب في الشيفرة: بذرة ثابتة تُزرع في كل ترحيل. */
 export const APPROVED_SOURCES = Object.entries(REGISTRY).flatMap(([mayorId, entries]) =>
   withIds(mayorId, entries),
 );
 
+/**
+ * مصادر أضافها الموظف من الإعدادات. تُحمَّل من D1 إلى ذاكرة العامل عند بدء كل
+ * طلب أو مهمة (`refreshCustomSources`)، فتمر عبر نفس بوابة الحوكمة التي تمر بها
+ * مصادر الشيفرة: نطاق معتمد لمكتبه فقط، وتحويلات مراقبة، وهوية العمدة إلزامية.
+ */
+let customSources = [];
+
+export function setCustomSources(rows) {
+  customSources = (rows || []).map(customSourceFromRow).filter(Boolean);
+}
+
+export function customSourceFromRow(row) {
+  let discovery;
+  try {
+    discovery = JSON.parse(row.discovery_json || "[]");
+  } catch {
+    return null;
+  }
+  if (!row.id || !row.mayor_id || !row.domain || !Array.isArray(discovery)) return null;
+  discovery = discovery.map((entry, index) => ({
+    ...entry,
+    enabled: entry.enabled !== false,
+    rank: index + 1,
+  }));
+  const primary = discovery.find((entry) => entry.enabled && entry.url && !entry.supplement) || discovery[0] || {};
+  return {
+    id: row.id,
+    mayor_id: row.mayor_id,
+    domain: row.domain,
+    name: row.name || row.domain,
+    tier: row.tier == null ? 1 : Number(row.tier),
+    platform: row.platform || "newspaper",
+    discovery,
+    kind: strategyKind(primary.type),
+    url: primary.url || row.url || "",
+    adapter: discovery.find((entry) => entry.type === "newsroom")?.adapter || "generic",
+    rank: Number(row.rank) || 1,
+    verified: 1,
+    curated_at: row.curated_at || "",
+    origin: "custom",
+  };
+}
+
+/** كل المصادر المعتمدة الآن: السجل المكتوب ثم ما أضافه الموظف. */
+export function allSources() {
+  return customSources.length ? [...APPROVED_SOURCES, ...customSources] : APPROVED_SOURCES;
+}
+
+/**
+ * شرط SQL يحصر قراءة جدول sources في المسجّل: ما في الشيفرة، أو ما أضافه الموظف
+ * (origin = 'custom'). صفوف مصادر استُبدلت في الشيفرة تبقى في القاعدة بلا حذف
+ * لكنها لا تُعدّ ولا تُعرض. المعرّفات ثوابت من السجل، وليست مدخلات.
+ */
+export function registeredSourcesSql(prefix = "") {
+  return `(${prefix}id IN (${APPROVED_SOURCES.map((source) => `'${source.id}'`).join(", ")}) OR ${prefix}origin = 'custom')`;
+}
+
 export function sourcesFor(mayorId) {
-  return APPROVED_SOURCES.filter((source) => source.mayor_id === mayorId);
+  return allSources().filter((source) => source.mayor_id === mayorId);
 }
 
 export function sourceById(id) {
-  return APPROVED_SOURCES.find((source) => source.id === id) || null;
+  return allSources().find((source) => source.id === id) || null;
 }
 
 function hostOf(value) {

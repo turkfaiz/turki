@@ -247,3 +247,27 @@ test("one source failure does not prevent discovering another office source", as
   assert.equal(ok.health.ok, true);
   assert.equal(ok.rows.length, 1);
 });
+
+test("listing links carry a date from the URL, a nearby <time>, or JSON-LD", () => {
+  const now = new Date();
+  const ymd = (offsetDays) => new Date(now.getTime() - offsetDays * 86400000).toISOString().slice(0, 10);
+  const [y1, m1, d1] = ymd(1).split("-");
+  const html = `
+    <div class="card"><a href="/news/${y1}/${m1}/${d1}/city-opens-park">City opens park</a></div>
+    <div class="card"><time datetime="${ymd(2)}T09:00:00Z"></time><a href="/news/second-story-here">Second story here</a></div>
+    <div class="card"><a href="/news/third-story-without-date">Third story without date</a></div>
+    <script type="application/ld+json">{"@type":"NewsArticle","url":"/news/json-ld-story","headline":"JSON-LD story","datePublished":"${ymd(3)}T08:00:00Z"}</script>`;
+  const links = extractArticleLinks(html, "https://example.com/news/");
+  const by = (needle) => links.find((link) => link.url.includes(needle));
+  assert.equal(by("city-opens-park").published_at, `${y1}-${m1}-${d1}`);
+  assert.match(by("second-story-here").published_at, new RegExp(ymd(2)));
+  assert.match(by("json-ld-story").published_at, new RegExp(ymd(3)));
+});
+
+test("a far-future number in a URL is an id, not a publication date", () => {
+  const links = extractArticleLinks(
+    `<a href="/news/20991231-announcement-page">Announcement page</a>`,
+    "https://example.com/news/",
+  );
+  assert.equal(links[0].published_at, "");
+});

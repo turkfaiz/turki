@@ -1,7 +1,7 @@
 import { MAYORS, listMayors, matchesTopic, resolveMayor } from "./mayors.js";
 import {
-  APPROVED_SOURCES,
   ARTICLE_FETCH_BATCH,
+  allSources,
   INLINE_ARTICLE_FETCH_LIMIT,
   MAX_CANDIDATES_PER_SOURCE_POLL,
   MAX_PENDING_CANDIDATES_PER_SOURCE,
@@ -521,7 +521,7 @@ export async function pollOneSource(env, { sourceId, mayorId, scanId = null, que
 export function sourceStatus(_env) {
   return {
     registry: "ready",
-    approved_sources: APPROVED_SOURCES.length,
+    approved_sources: allSources().length,
     offices: MAYORS.length,
     search_engines: "disabled",
   };

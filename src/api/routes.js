@@ -6,15 +6,10 @@ import {
   planDeskLaneMigration,
   resolveDeskQuery,
 } from "../deskLanes.js";
-import {
-  insertCustomMayor,
-  listMayors,
-  mayorInputMessage,
-  parseMayorInput,
-} from "../mayors.js";
+import { listMayors } from "../mayors.js";
 import { REASON } from "../reasons.js";
 import { reviewInbox } from "../reviewAgent.js";
-import { MAX_SOURCES_PER_OFFICE } from "../sources.js";
+import { MAX_SOURCES_PER_OFFICE, registeredSourcesSql } from "../sources.js";
 import { assignPendingLanes, briefBacklog, translatePending } from "../translate.js";
 import {
   currentVersion,
@@ -24,11 +19,10 @@ import {
   recordDecision,
 } from "../versions.js";
 import { json, readBody, reviewerOf } from "./http.js";
+import { handleSettingsApi } from "./settings.js";
 import {
   diagnostics,
   publicSlotStatus,
-  setSourceEnabled,
-  settingsOffices,
   slotOverview,
   stats,
 } from "./status.js";
@@ -90,74 +84,15 @@ export async function handleApi(request, env) {
     const { results } = await env.DB.prepare(
       `SELECT sources.*, mayors.name_ar, mayors.city_ar
        FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+       WHERE ${registeredSourcesSql("sources.")}
        ORDER BY sources.mayor_id, sources.rank`,
     ).all();
     return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });
   }
 
-  if (path === "/api/settings/offices" && method === "GET") {
-    return json({ offices: await settingsOffices(env) });
-  }
-
-  const toggleMatch = path.match(/^\/api\/settings\/sources\/([^/]+)$/i);
-  if (toggleMatch && method === "POST") {
-    const body = await readBody(request);
-    if (typeof body.enabled !== "boolean") {
-      return json({ error: "enabled_required" }, 400);
-    }
-    if (body.domain || body.url) {
-      return json({ error: "registry_closed", detail: "لا تُضاف النطاقات من الواجهة." }, 403);
-    }
-    const result = await setSourceEnabled(
-      env,
-      decodeURIComponent(toggleMatch[1]),
-      body.enabled,
-      reviewerOf(request, env),
-    );
-    if (result.error) return json(result, result.status || 400);
-    return json(result);
-  }
-
-  if (path === "/api/settings/mayors" && method === "POST") {
-    const body = await readBody(request);
-    if (body.domain || body.url || body.discovery || body.sources) {
-      return json(
-        {
-          error: "registry_closed",
-          message: "لا يمكن إضافة منصة أو نطاق رصد من الواجهة — أضف هوية العمدة فقط.",
-        },
-        403,
-      );
-    }
-    const parsed = parseMayorInput(body);
-    if (parsed.error) {
-      return json(
-        { error: parsed.error, detail: parsed.detail || null, message: mayorInputMessage(parsed) },
-        400,
-      );
-    }
-    const existing = await env.DB.prepare(`SELECT id FROM mayors WHERE id = ?`)
-      .bind(parsed.mayor.id)
-      .first();
-    if (existing) {
-      return json({ error: "duplicate_id", message: "معرّف العمدة مستخدم مسبقاً" }, 409);
-    }
-    const mayor = await insertCustomMayor(env, parsed.mayor);
-    await env.DB.prepare(
-      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
-       VALUES (?, ?, 'mayor_created', NULL, ?, NULL, ?)`,
-    )
-      .bind(crypto.randomUUID(), reviewerOf(request, env), mayor.id, JSON.stringify(mayor))
-      .run();
-    return json(
-      {
-        ok: true,
-        mayor,
-        note: "أُضيفت هوية العمدة فقط. المنصات تُفعَّل من السجل المغلق في الكود إن وُجدت.",
-        offices: await settingsOffices(env),
-      },
-      201,
-    );
+  if (path.startsWith("/api/settings/")) {
+    const handled = await handleSettingsApi(request, env, path, method);
+    if (handled) return handled;
   }
 
   if (path === "/api/admin/migrations/desk-lanes" && method === "GET") {

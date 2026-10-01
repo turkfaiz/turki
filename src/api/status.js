@@ -5,16 +5,9 @@ import {
 } from "../aiDispatch.js";
 import { aiBriefEnabled } from "../aiProviders.js";
 import { deskLaneStatSql, publicLaneStats } from "../deskLanes.js";
-import { listMayors } from "../mayors.js";
 import { sourceStatus } from "../pipeline.js";
 import { REASON } from "../reasons.js";
-import {
-  APPROVED_SOURCES,
-  MAX_SOURCES_PER_OFFICE,
-  platformLabelAr,
-  sourceById,
-  strategyLabelAr,
-} from "../sources.js";
+import { MAX_SOURCES_PER_OFFICE, allSources, registeredSourcesSql } from "../sources.js";
 import { MAX_BRIEF_ATTEMPTS, briefBacklog, pendingBriefCount } from "../translate.js";
 import { ITEM_RETENTION_DAYS, ITEM_WINDOW_DAYS } from "../config.js";
 
@@ -223,6 +216,7 @@ export async function diagnostics(env) {
             sources.last_discovery_at, sources.fail_reason, sources.last_strategy,
             mayors.name_ar
      FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+     WHERE ${registeredSourcesSql("sources.")}
      ORDER BY sources.mayor_id, sources.rank`,
   ).all();
   const window = await env.DB.prepare(
@@ -243,7 +237,7 @@ export async function diagnostics(env) {
   const mergeSlot =
     overview.slots.find((slot) => slot.id === "gemini" && slot.bound) ||
     overview.slots.find((slot) => slot.bound);
-  const pageSources = APPROVED_SOURCES.filter((source) =>
+  const pageSources = allSources().filter((source) =>
     (source.discovery || []).some((step) => step.type === "newsroom"),
   ).length;
   const readerOk = Number(window?.total) > 0 || !lastScan;
@@ -343,7 +337,7 @@ export async function diagnostics(env) {
   };
 }
 
-function operationalStatus(row) {
+export function operationalStatus(row) {
   if (Number(row?.enabled) === 0) {
     return { code: "disabled", label: "متوقفة يدويًا" };
   }
@@ -415,7 +409,7 @@ async function registrySummary(env) {
             SUM(CASE WHEN IFNULL(consecutive_failures, 0) >= 3 THEN 1 ELSE 0 END) AS failing,
             SUM(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked,
             SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS verified
-     FROM sources`,
+     FROM sources WHERE ${registeredSourcesSql()}`,
   ).first();
   return {
     total: Number(row?.total) || 0,
@@ -425,82 +419,4 @@ async function registrySummary(env) {
     verified: Number(row?.verified) || 0,
     perOffice: MAX_SOURCES_PER_OFFICE,
   };
-}
-
-export async function settingsOffices(env) {
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM sources ORDER BY mayor_id, rank`,
-  ).all();
-  const byMayor = new Map();
-  for (const row of results || []) {
-    if (!byMayor.has(row.mayor_id)) byMayor.set(row.mayor_id, []);
-    const registered = sourceById(row.id);
-    byMayor.get(row.mayor_id).push({
-      id: row.id,
-      domain: row.domain,
-      name: row.name,
-      tier: row.tier,
-      kind: row.kind,
-      url: row.url,
-      rank: row.rank,
-      enabled: Number(row.enabled) !== 0,
-      platform: registered?.platform || (row.tier === 0 ? "official" : "newspaper"),
-      platform_ar: platformLabelAr(registered || row),
-      strategies: (registered?.discovery || []).map((step) => ({
-        type: step.type,
-        type_ar: strategyLabelAr(step.type),
-        url: step.url || null,
-        enabled: step.enabled !== false,
-      })),
-      last_checked_at: row.last_checked_at,
-      last_discovery_at: row.last_discovery_at,
-      last_ok_at: row.last_ok_at,
-      last_status: row.last_status,
-      fail_reason: row.fail_reason,
-      operational: operationalStatus(row),
-    });
-  }
-  const catalog = await listMayors(env);
-  return catalog.map((mayor) => ({
-    id: mayor.id,
-    origin: mayor.origin || "seed",
-    name_ar: mayor.name_ar,
-    name_en: mayor.name_en,
-    name_native: mayor.name_native,
-    city_ar: mayor.city_ar,
-    city_en: mayor.city_en,
-    country_ar: mayor.country_ar,
-    country_code: mayor.country_code,
-    title_ar: mayor.title_ar,
-    title_en: mayor.title_en,
-    official_host: mayor.official_host || "",
-    platforms: byMayor.get(mayor.id) || [],
-  }));
-}
-
-export async function setSourceEnabled(env, sourceId, enabled, actor) {
-  if (!sourceById(sourceId)) {
-    return { error: "unknown_source", status: 404 };
-  }
-  const before = await env.DB.prepare(`SELECT enabled FROM sources WHERE id = ?`)
-    .bind(sourceId)
-    .first();
-  const next = enabled ? 1 : 0;
-  await env.DB.prepare(`UPDATE sources SET enabled = ? WHERE id = ?`)
-    .bind(next, sourceId)
-    .run();
-  await env.DB.prepare(
-    `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
-     VALUES (?, ?, 'source_enabled', ?, ?, ?, ?)`,
-  )
-    .bind(
-      crypto.randomUUID(),
-      actor || "unknown",
-      sourceId,
-      sourceById(sourceId).mayor_id,
-      JSON.stringify({ enabled: Number(before?.enabled) !== 0 }),
-      JSON.stringify({ enabled: Boolean(next) }),
-    )
-    .run();
-  return { ok: true, id: sourceId, enabled: Boolean(next) };
 }

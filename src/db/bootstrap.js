@@ -9,11 +9,12 @@ import {
   seedSources,
   upsertRows,
 } from "./migrations.js";
+import { refreshCustomSources } from "./customSources.js";
 import { REQUIRED_TABLES, SCHEMA_STATEMENTS } from "./schema.js";
 
 const bootstrapped = new WeakSet();
 
-const BOOTSTRAP_VERSION = "bootstrap-v19";
+const BOOTSTRAP_VERSION = "bootstrap-v20";
 
 /**
  * الاعتماد على ختم النسخة وحده يفترض أن كل تغيير في المخطط رفع الختم. حين
@@ -47,12 +48,16 @@ async function ensureHotIndexes(env) {
 }
 
 export async function ensureDb(env) {
-  if (bootstrapped.has(env.DB)) return;
+  if (bootstrapped.has(env.DB)) {
+    await refreshCustomSources(env);
+    return;
+  }
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)`).run();
   await ensureHotIndexes(env);
   const stamp = await env.DB.prepare(`SELECT v FROM meta WHERE k = 'bootstrap_version'`).first();
   if (stamp?.v === BOOTSTRAP_VERSION && (await schemaComplete(env))) {
     bootstrapped.add(env.DB);
+    await refreshCustomSources(env, { force: true });
     return;
   }
   for (const sql of SCHEMA_STATEMENTS) {
@@ -108,4 +113,5 @@ export async function ensureDb(env) {
     .bind(BOOTSTRAP_VERSION)
     .run();
   bootstrapped.add(env.DB);
+  await refreshCustomSources(env, { force: true });
 }

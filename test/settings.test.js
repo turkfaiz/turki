@@ -114,7 +114,7 @@ test("an unauthenticated caller cannot change platform settings", async () => {
   assert.equal(authorized(request("/api/settings/offices"), env), false);
 });
 
-test("the settings api refuses a random domain addition", async () => {
+test("toggling a source never accepts a raw domain; sites go through the site form", async () => {
   const env = envWith({ DASHBOARD_PASSWORD: "secret" });
   await ensureDb(env);
   const res = await worker.fetch(
@@ -125,7 +125,8 @@ test("the settings api refuses a random domain addition", async () => {
     }),
     env,
   );
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "use_sites");
 });
 
 test("parseMayorInput fills titles and language labels from the required basics", () => {
@@ -184,7 +185,7 @@ test("an authorized user can add a custom mayor from settings", async () => {
   assert.equal(audit.mayor_id, payload.mayor.id);
 });
 
-test("adding a mayor from settings still refuses a crawl domain", async () => {
+test("adding a mayor refuses raw registry fields; sites go in the sites list", async () => {
   const env = envWith({ DASHBOARD_PASSWORD: "secret" });
   await ensureDb(env);
   const res = await worker.fetch(
@@ -195,7 +196,8 @@ test("adding a mayor from settings still refuses a crawl domain", async () => {
     }),
     env,
   );
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "use_sites");
 });
 
 test("missing mayor fields and seed ids are rejected", async () => {
@@ -272,4 +274,18 @@ test("a custom mayor without platforms completes a scan and a queued job", async
   assert.equal(task.status, "completed");
   assert.match(task.detail, /لا منصات/);
   assert.equal(queue.messages.length, 0);
+});
+
+test("a replaced source row stays in D1 but is hidden from the registry views", async () => {
+  const env = envWith();
+  await ensureDb(env);
+  env.DB.exec(`
+    INSERT INTO sources (id, mayor_id, domain, name, tier, kind, url, rank)
+    VALUES ('amman:roya.tv', 'amman', 'roya.tv', 'رؤيا', 1, 'feed', 'https://roya.tv/rss', 2)
+  `);
+  const res = await worker.fetch(request("/api/sources"), env);
+  const { sources } = await res.json();
+  assert.equal(sources.some((row) => row.domain === "roya.tv"), false);
+  assert.equal(sources.length, APPROVED_SOURCES.length);
+  assert.equal(env.DB.one(`SELECT COUNT(*) AS n FROM sources WHERE id = 'amman:roya.tv'`).n, 1);
 });

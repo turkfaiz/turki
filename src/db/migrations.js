@@ -82,6 +82,12 @@ async function migrateSources(env) {
   await add("last_discovered_url", `ALTER TABLE sources ADD COLUMN last_discovered_url TEXT`);
   await add("etag", `ALTER TABLE sources ADD COLUMN etag TEXT`);
   await add("last_modified", `ALTER TABLE sources ADD COLUMN last_modified TEXT`);
+  // مصادر الإعدادات: origin='custom' وخطوات الاكتشاف المحفوظة JSON.
+  await add("origin", `ALTER TABLE sources ADD COLUMN origin TEXT DEFAULT 'registry'`);
+  await add("discovery_json", `ALTER TABLE sources ADD COLUMN discovery_json TEXT`);
+  await add("platform", `ALTER TABLE sources ADD COLUMN platform TEXT`);
+  await add("added_by", `ALTER TABLE sources ADD COLUMN added_by TEXT`);
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sources_origin ON sources(origin)`).run();
 }
 
 export async function seedSources(env) {
