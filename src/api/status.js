@@ -12,6 +12,7 @@ import {
   APPROVED_SOURCES,
   MAX_SOURCES_PER_OFFICE,
   platformLabelAr,
+  registeredSourcesSql,
   sourceById,
   strategyLabelAr,
 } from "../sources.js";
@@ -223,6 +224,7 @@ export async function diagnostics(env) {
             sources.last_discovery_at, sources.fail_reason, sources.last_strategy,
             mayors.name_ar
      FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+     WHERE ${registeredSourcesSql("sources.id")}
      ORDER BY sources.mayor_id, sources.rank`,
   ).all();
   const window = await env.DB.prepare(
@@ -415,7 +417,7 @@ async function registrySummary(env) {
             SUM(CASE WHEN IFNULL(consecutive_failures, 0) >= 3 THEN 1 ELSE 0 END) AS failing,
             SUM(CASE WHEN last_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked,
             SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS verified
-     FROM sources`,
+     FROM sources WHERE ${registeredSourcesSql()}`,
   ).first();
   return {
     total: Number(row?.total) || 0,
@@ -429,7 +431,7 @@ async function registrySummary(env) {
 
 export async function settingsOffices(env) {
   const { results } = await env.DB.prepare(
-    `SELECT * FROM sources ORDER BY mayor_id, rank`,
+    `SELECT * FROM sources WHERE ${registeredSourcesSql()} ORDER BY mayor_id, rank`,
   ).all();
   const byMayor = new Map();
   for (const row of results || []) {

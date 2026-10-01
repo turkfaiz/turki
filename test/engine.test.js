@@ -93,7 +93,12 @@ test("every office is governed by at most three approved sources, ranked", () =>
       sources.map((source) => source.rank),
       sources.map((_source, index) => index + 1),
     );
-    assert.equal(sources[0].tier, 0, `${mayor.id} must lead with its official newsroom`);
+    // الرسمي يتصدر حيث يوجد؛ مكاتب بلا مصدر رسمي صالح تبدأ بأقوى مصدر متاح.
+    assert.equal(
+      sources[0].tier,
+      Math.min(...sources.map((source) => source.tier)),
+      `${mayor.id} must lead with its strongest tier`,
+    );
     for (const source of sources) {
       assert.match(source.url, /^https:\/\//);
       assert.ok(["feed", "page", "sitemap", "api", "search", "browser"].includes(source.kind));

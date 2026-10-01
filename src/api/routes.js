@@ -14,7 +14,7 @@ import {
 } from "../mayors.js";
 import { REASON } from "../reasons.js";
 import { reviewInbox } from "../reviewAgent.js";
-import { MAX_SOURCES_PER_OFFICE } from "../sources.js";
+import { MAX_SOURCES_PER_OFFICE, registeredSourcesSql } from "../sources.js";
 import { assignPendingLanes, briefBacklog, translatePending } from "../translate.js";
 import {
   currentVersion,
@@ -90,6 +90,7 @@ export async function handleApi(request, env) {
     const { results } = await env.DB.prepare(
       `SELECT sources.*, mayors.name_ar, mayors.city_ar
        FROM sources JOIN mayors ON mayors.id = sources.mayor_id
+       WHERE ${registeredSourcesSql("sources.id")}
        ORDER BY sources.mayor_id, sources.rank`,
     ).all();
     return json({ sources: results || [], perOffice: MAX_SOURCES_PER_OFFICE });

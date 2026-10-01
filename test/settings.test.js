@@ -273,3 +273,17 @@ test("a custom mayor without platforms completes a scan and a queued job", async
   assert.match(task.detail, /لا منصات/);
   assert.equal(queue.messages.length, 0);
 });
+
+test("a replaced source row stays in D1 but is hidden from the registry views", async () => {
+  const env = envWith();
+  await ensureDb(env);
+  env.DB.exec(`
+    INSERT INTO sources (id, mayor_id, domain, name, tier, kind, url, rank)
+    VALUES ('amman:roya.tv', 'amman', 'roya.tv', 'رؤيا', 1, 'feed', 'https://roya.tv/rss', 2)
+  `);
+  const res = await worker.fetch(request("/api/sources"), env);
+  const { sources } = await res.json();
+  assert.equal(sources.some((row) => row.domain === "roya.tv"), false);
+  assert.equal(sources.length, APPROVED_SOURCES.length);
+  assert.equal(env.DB.one(`SELECT COUNT(*) AS n FROM sources WHERE id = 'amman:roya.tv'`).n, 1);
+});
