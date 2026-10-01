@@ -4,7 +4,7 @@ import worker, { authorized, ensureDb } from "../src/worker.js";
 import { createTestD1 } from "./helpers/d1.js";
 import { MAYORS, parseMayorInput, slugifyMayorId } from "../src/mayors.js";
 import { APPROVED_SOURCES } from "../src/sources.js";
-import { runScan } from "../src/collect.js";
+import { runScan } from "../src/pipeline.js";
 
 function envWith(overrides = {}) {
   return {

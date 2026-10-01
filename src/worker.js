@@ -6,7 +6,7 @@ import {
   parseMayorInput,
   resolveMayor,
 } from "./mayors.js";
-import { runScan, sourceStatus } from "./collect.js";
+import { runScan, sourceStatus } from "./pipeline.js";
 import {
   enabledSources,
   fetchCandidateBatch,

@@ -443,7 +443,7 @@ async function callGemini(env, input, schema, fetcher, purpose = "brief") {
   );
 }
 
-export const MAX_PROMPT_CHARS = 60000;
+const MAX_PROMPT_CHARS = 60000;
 const MIN_SOURCE_SHARE = 600;
 
 /**

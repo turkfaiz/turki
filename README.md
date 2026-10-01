@@ -107,6 +107,21 @@ npx wrangler queues create mayor-watch-scans
 حماية الصفحة إلزامية عند وجود أي مفتاح ذكاء اصطناعي: إذا ضُبط المفتاح دون
 `DASHBOARD_PASSWORD` يرفض Worker طلبات الويب حتى لا تصبح التكلفة وقرارات الاعتماد عامة.
 
+## بنية الشيفرة
+
+| الملف | الدور |
+|---|---|
+| `src/worker.js` | نقطة الدخول الوحيدة: الواجهة البرمجية، Cron، Queue |
+| `src/pipeline.js` | الرصد → المرشحون → قراءة المقال (يستورده Worker مباشرة) |
+| `src/sources.js` · `discovery.js` · `newsroom.js` · `rss.js` · `sitemap.js` | سجل المصادر المغلق واكتشاف الروابط |
+| `src/article.js` · `governedFetch.js` | قراءة المقال تحت الحوكمة |
+| `src/translate.js` · `aiBrief.js` · `aiDispatch.js` · `aiBudget.js` · `aiProviders.js` | الموجز والتدقيق الدلالي وتوزيع الفتحات والحصص |
+| `src/versions.js` · `deskLanes.js` · `journey.js` | النسخ والاعتماد ومسارات المكتب ورحلة الخبر |
+| `src/brief.js` · `reviewAgent.js` | كشف الموضوع وتجميع الأخبار المكررة في الوارد |
+
+تعمل `npm test` و`wrangler deploy --dry-run` تلقائيًا على GitHub Actions
+(`.github/workflows/ci.yml`) لكل دفعة وكل طلب دمج.
+
 ## الجدول
 
 Cron على Cloudflare: `0 3 * * SUN` = الأحد 03:00 UTC = الأحد 06:00 في الرياض.

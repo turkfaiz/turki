@@ -10,6 +10,9 @@ import { sourcesFor } from "../src/sources.js";
 const fixture = (name) =>
   fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
+const recentRfc = (hoursAgo) =>
+  new Date(Date.now() - hoursAgo * 3600 * 1000).toUTCString();
+
 function response(status, body, headers = {}) {
   return {
     status,
@@ -152,7 +155,7 @@ test("not-modified rss is success without opening the newsroom", async () => {
 test("healthy rss with no new items this week is not a fault", async () => {
   const xml = `<?xml version="1.0"?><rss><channel>
     <item><title>Oh Se-hoon yesterday</title><link>https://english.seoul.go.kr/a</link>
-    <pubDate>Sun, 13 Sep 2026 10:00:00 GMT</pubDate></item>
+    <pubDate>${recentRfc(36)}</pubDate></item>
   </channel></rss>`;
   const source = sourcesFor("seoul")[0];
   const mayor = MAYORS.find((row) => row.id === "seoul");
@@ -231,7 +234,7 @@ test("one source failure does not prevent discovering another office source", as
         `<?xml version="1.0"?><rss><channel>
           <item><title>Lo Russo in centro</title>
           <link>https://torino.repubblica.it/2026/09/lo-russo</link>
-          <pubDate>Sun, 13 Sep 2026 09:00:00 GMT</pubDate></item>
+          <pubDate>${recentRfc(36)}</pubDate></item>
         </channel></rss>`,
       );
     }

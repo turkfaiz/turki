@@ -30,9 +30,3 @@ export function toIso(value) {
   const d = parseDate(value);
   return d ? d.toISOString() : null;
 }
-
-export function withWeekQuery(query) {
-  const q = String(query || "").trim();
-  if (/\bwhen:\d+[dhw]\b/i.test(q)) return q;
-  return `${q} when:${WEEK_DAYS}d`;
-}

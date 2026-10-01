@@ -100,7 +100,7 @@ async function desk(overrides = {}) {
 }
 
 test("a brief is saved before verification and survives a deferred verifier", async () => {
-  const { db, env } = await desk();
+  const { env } = await desk();
   await translatePending(env, 1, null, async () => briefResponse());
 
   const saved = await currentVersion(env, "a");

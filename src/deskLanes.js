@@ -32,13 +32,6 @@ export const LANE_ALIASES = {
   decision: DESK_LANES.DECISION_READY,
 };
 
-export const LANE_LABELS_AR = {
-  [DESK_LANES.READING]: "قيد القراءة",
-  [DESK_LANES.VERIFYING]: "التدقيق",
-  [DESK_LANES.DECISION_READY]: "بانتظار القرار",
-  [DESK_LANES.ATTENTION_REQUIRED]: "يحتاج تدخلاً",
-};
-
 export const ATTENTION_REASONS = {
   VERIFY_FAILED: "verify_failed",
   MISSING_VERSION: "missing_version",
@@ -88,17 +81,6 @@ export function currentVerifyStateSql(alias = "items") {
 
 export function currentVerifyAttemptsSql(alias = "items") {
   return `(SELECT verify_attempts FROM brief_versions WHERE brief_versions.id = ${alias}.current_version_id)`;
-}
-
-/**
- * جاهزية القرار: نسخة حالية + تدقيق مجتاز + داخل نافذة العرض.
- * اكتمال trans_engine وحده لا يكفي.
- */
-export function decisionReadySql(alias = "items") {
-  return `${alias}.status = 'inbox'
-    AND ${alias}.current_version_id IS NOT NULL
-    AND ${currentVerifyStateSql(alias)} = '${VERIFY_STATE.PASSED}'
-    AND ${inDisplayWindowSql(alias)}`;
 }
 
 /**
