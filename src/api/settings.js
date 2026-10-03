@@ -250,7 +250,8 @@ export async function handleSettingsApi(request, env, path, method) {
   if (path === "/api/settings/tools" && method === "GET") {
     return json(await toolsOverview(env));
   }
-  const toolTest = path.match(/^\/api\/settings\/tools\/([a-z0-9:_-]+)\/test$/i);
+  // المعرّف قد يحوي «:» فيصل مشفّرًا (ai%3Agemini)؛ لا نقيّده بمحارف خام.
+  const toolTest = path.match(/^\/api\/settings\/tools\/([^/]+)\/test$/i);
   if (toolTest && method === "POST") {
     const result = await testTool(env, decodeURIComponent(toolTest[1]).toLowerCase());
     return json(result, result.unknown ? 404 : 200);

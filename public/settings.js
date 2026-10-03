@@ -74,6 +74,14 @@ export function lastErrorLabel(code) {
     : `آخر خطأ: ${aiErrorReason(code)}`;
 }
 
+/** رسائل أخطاء الواجهة البرمجية بكلمات مفهومة بدل الرموز الخام. */
+export function friendlyError(message) {
+  const raw = String(message || "");
+  if (raw === "not_found") return "المسار غير متاح في النسخة المنشورة. حدّث الصفحة بقوة (Command+Shift+R) أو أعد النشر.";
+  if (raw === "request_failed" || raw === "Failed to fetch") return "تعذّر الاتصال بالخادم.";
+  return raw;
+}
+
 export function aiErrorReason(code) {
   const raw = String(code || "");
   const rules = [
@@ -573,7 +581,7 @@ function init() {
         const r = await api(`/api/settings/tools/${encodeURIComponent(id)}/test`, { method: "POST" });
         state.toolResults[id] = { ...r, at: Date.now() };
       } catch (error) {
-        state.toolResults[id] = { ok: false, detail: error.message, at: Date.now() };
+        state.toolResults[id] = { ok: false, detail: friendlyError(error.message), at: Date.now() };
       }
       await loadTools();
     });
@@ -695,7 +703,7 @@ function init() {
             const r = await api(`/api/settings/tools/${encodeURIComponent(tool.id)}/test`, { method: "POST" });
             state.toolResults[tool.id] = { ...r, at: Date.now() };
           } catch (error) {
-            state.toolResults[tool.id] = { ok: false, detail: error.message, at: Date.now() };
+            state.toolResults[tool.id] = { ok: false, detail: friendlyError(error.message), at: Date.now() };
           }
         }
         await loadTools();

@@ -324,3 +324,10 @@ test("a content rejection is not shown as a model failure, but a provider error 
   assert.match(html, /لا يعني عطلًا في النموذج/);
   assert.doesNotMatch(html, /st-tool-result is-bad">آخر موجز/);
 });
+
+test("raw API error codes are shown as sentences", async () => {
+  const { friendlyError } = await import("../public/settings.js");
+  assert.match(friendlyError("not_found"), /حدّث الصفحة بقوة/);
+  assert.match(friendlyError("Failed to fetch"), /تعذّر الاتصال/);
+  assert.equal(friendlyError("لا كلمة سر"), "لا كلمة سر");
+});

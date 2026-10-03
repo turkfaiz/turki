@@ -104,3 +104,30 @@ test("a failed AI test never puts the model into cooldown, so it cannot disturb 
   const view = await toolsOverview(env);
   assert.equal(byId(view, "ai:gemini").state, "ok");
 });
+
+test("the HTTP route accepts an AI tool id exactly as the browser sends it, encoded or raw", async () => {
+  const env = await envWith({ GEMINI_API_KEY: "k", DASHBOARD_PASSWORD: "p" });
+  const post = (path) => worker.fetch(new Request(`https://mayor-watch.test${path}`, { method: "POST", headers: { Authorization: `Basic ${btoa("mayorwatch:p")}` } }), env);
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return { outputs: [{ type: "text", text: '{"pong": true}' }], candidates: [{ content: { parts: [{ text: '{"pong": true}' }] } }] };
+    },
+  });
+  try {
+    for (const id of ["ai%3Agemini", "ai:gemini"]) {
+      const res = await post(`/api/settings/tools/${id}/test`);
+      assert.equal(res.status, 200, id);
+      const body = await res.json();
+      assert.notEqual(body.error, "not_found", id);
+      assert.equal(typeof body.ok, "boolean", id);
+    }
+    const unknown = await post("/api/settings/tools/ai%3Anothing/test");
+    assert.equal(unknown.status, 200);
+    assert.equal((await unknown.json()).ok, false);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
