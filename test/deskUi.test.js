@@ -8,6 +8,7 @@ import {
   briefErrorReason,
   briefState,
   deskHeading,
+  failureAdvice,
   renderDetail,
   renderItemCard,
   renderItemList,
@@ -116,20 +117,60 @@ test("approval is offered only for a verified brief; excluded items can be resto
   assert.match(pending, /disabled title="لا يُعتمد موجز قبل اجتياز التدقيق الدلالي"/);
   assert.doesNotMatch(pending, /data-act="approved">/);
 
+  // لا موجز مدقَّق ولا ينتظر تدقيقًا (فشل الموجز): لا زر اعتماد يوحي بانتظار لن يأتي.
+  const failed = renderDetail(item({ verify_state: null, trans_engine: "brief-ai-error", desk_lane: "attention_required", attention_reason: "brief_error", brief_error: "ai_http_503" }));
+  assert.doesNotMatch(failed, /btn-good/);
+  assert.match(failed, /data-act="excluded"/);
+
   const excluded = renderDetail(item({ status: "excluded", exclude_reason: "لا يخص العمدة" }));
   assert.match(excluded, /data-act="inbox"/);
   assert.match(excluded, /سبب الاستبعاد: لا يخص العمدة/);
   assert.doesNotMatch(excluded, /data-act="excluded"/);
 });
 
-test("an item needing attention explains why, and exhausted briefs offer a retry", () => {
-  const html = renderDetail(item({ desk_lane: "attention_required", attention_reason: "verify_failed", verify_state: "failed" }));
-  assert.match(html, new RegExp(ATTENTION_REASON_AR.verify_failed.slice(0, 20)));
-  const stuck = renderDetail(
-    item({ trans_engine: "brief-ai-error", brief_error: "ai_http_5xx", brief_attempts: 5, verify_state: null, desk_lane: "attention_required", attention_reason: "brief_exhausted" }),
+test("a failed brief shows one coherent box: the real reason, what to do, and a retry", () => {
+  const html = renderDetail(
+    item({
+      desk_lane: "attention_required",
+      attention_reason: "brief_error",
+      trans_engine: "brief-ai-error",
+      brief_error: "ai_ungrounded_headline:quote_without_mayor",
+      brief_attempts: 2,
+      verify_state: null,
+      current_version_id: null,
+    }),
   );
-  assert.match(stuck, /data-act="retry-brief"/);
-  assert.match(stuck, /توقفت المحاولات بعد 5 محاولات/);
+  assert.equal((html.match(/class="brief-error"/g) || []).length, 1);
+  assert.match(html, /تعذّرت كتابة موجز موثّق/);
+  assert.match(html, /اقتباس العنوان لا يذكر العمدة/);
+  assert.match(html, /جرّب النظام محاولتين على النماذج المربوطة ثم توقف/);
+  assert.match(html, /الأنسب استبعاده/);
+  assert.match(html, /data-act="retry-brief"/);
+  assert.match(html, /تعذّر التلخيص — يحتاج مراجعتك/);
+  assert.doesNotMatch(html, /ستُعاد المحاولة/);
+  // لا «خطأ تشغيلي» عامًا يناقض السبب، ولا «المحاولة 2 من 5» وكأن إعادة تلقائية قادمة
+  assert.doesNotMatch(html, /خطأ تشغيلي/);
+  assert.doesNotMatch(html, /المحاولة 2 من 5/);
+});
+
+test("advice follows the actual failure instead of one generic line", () => {
+  assert.match(failureAdvice("ai_ungrounded_headline:name_missing"), /إعادة المحاولة قد تنجح/);
+  assert.match(failureAdvice("ai_has_no_grounded_facts"), /استبعاده/);
+  assert.match(failureAdvice("ai_http_503"), /عطل مؤقت/);
+  assert.match(failureAdvice(""), /أعد المحاولة/);
+});
+
+test("other attention reasons keep their own single box, and in-progress failures are not called final", () => {
+  const verify = renderDetail(item({ desk_lane: "attention_required", attention_reason: "verify_failed", verify_state: "failed" }));
+  assert.equal((verify.match(/class="brief-error"/g) || []).length, 1);
+  assert.match(verify, new RegExp(ATTENTION_REASON_AR.verify_failed.slice(0, 20)));
+  assert.doesNotMatch(verify, /data-act="retry-brief"/);
+
+  const retrying = renderDetail(item({ desk_lane: "reading", trans_engine: "brief-pending", brief_error: "ai_http_503", brief_attempts: 2, verify_state: null }));
+  assert.match(retrying, /ستُعاد المحاولة تلقائيًا \(2 من 5\)/);
+  const exhausted = renderDetail(item({ desk_lane: "reading", trans_engine: "brief-ai-error", brief_error: "ai_http_503", brief_attempts: 5, verify_state: null }));
+  assert.match(exhausted, /توقفت المحاولات بعد 5 محاولات/);
+  assert.match(exhausted, /data-act="retry-brief"/);
 });
 
 test("the detail view links the source safely and lists merged sources", () => {
