@@ -180,7 +180,9 @@ export async function handleApi(request, env) {
   const itemMatch = path.match(/^\/api\/items\/([0-9a-f-]+)$/i);
   if (itemMatch && method === "GET") {
     const row = await env.DB.prepare(
-      `SELECT ${ITEM_FIELDS}
+      `SELECT ${ITEM_FIELDS},
+              (SELECT evidence FROM brief_versions
+                WHERE brief_versions.id = items.current_version_id) AS version_evidence
        FROM items JOIN mayors ON mayors.id = items.mayor_id WHERE items.id = ?`,
     )
       .bind(itemMatch[1])
