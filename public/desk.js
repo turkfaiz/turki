@@ -90,7 +90,8 @@ export function briefErrorReason(code) {
     [/ai_ungrounded_headline:quote_without_mayor/i, "اقتباس العنوان لا يذكر العمدة باسمه ولا بلقبه ولا بمنصبه، فالخبر على الأغلب ليس عنه."],
     [/ai_ungrounded_headline/i, "لم يجد الذكاء الاصطناعي في نص الصفحة جملة حرفية تُسند العنوان وتذكر العمدة بالاسم، فرُفض العنوان بدل نشر عنوان غير موثّق."],
     [/ai_has_no_grounded_facts/i, "لا توجد في الصفحة حقائق يمكن إسنادها باقتباس حرفي، فالصفحة على الأغلب ليست خبرًا عن العمدة."],
-    [/ai_headline_not_supported|ai_facts_not_supported/i, "رفض المدقق المستقل الادعاء لعدم مطابقته الاقتباس الأصلي."],
+    [/ai_headline_not_supported/i, "رفض المدقق المستقل العنوان: لا يطابق الاقتباس الأصلي (اختلاف في الفاعل أو الفعل أو النفي أو الرقم أو التاريخ)."],
+    [/ai_facts_not_supported/i, "رفض المدقق المستقل كل حقائق الموجز: لا يدعمها الاقتباس الأصلي."],
     [/article_text_too_short/i, "نص الصفحة أقصر من أن يُستخرج منه موجز موثّق."],
     [/ai_empty_response|ai_invalid_json/i, "جاء رد الذكاء الاصطناعي فارغًا أو غير صالح."],
     [/ai_not_configured/i, "مفتاح الذكاء الاصطناعي غير مربوط."],
@@ -123,6 +124,9 @@ export function failureAdvice(code) {
   if (/quote_without_mayor|ai_has_no_grounded_facts/.test(raw)) {
     return "غالبًا لا يتناول الخبر العمدة نفسه، فاسمه يرد في الصفحة عرَضًا. الأنسب استبعاده، وأعد المحاولة فقط إن رأيتَ أنه عنه.";
   }
+  if (/headline_not_supported|facts_not_supported/.test(raw)) {
+    return "قارن العنوان بالاقتباس الأصلي أعلاه. إن كان الخبر يخص العمدة فأعد إنتاج الموجز فقد تأتي صياغة أدق، وإن كان الاقتباس لا يدعم الادعاء أو الخبر ليس عنه فاستبعده.";
+  }
   if (/name_missing/.test(raw)) return "كتب النموذج عنوانًا بلا اسم العمدة المسجّل. إعادة المحاولة قد تنجح.";
   if (/ai_ungrounded|not_supported|quote_not_in_page/.test(raw)) {
     return "لم يجد النموذج جملة حرفية تسند العنوان. إعادة المحاولة قد تنجح، وإلا فاستبعد الخبر.";
@@ -135,6 +139,18 @@ export function failureAdvice(code) {
  * صندوق واحد متسق لما يعطّل الخبر. كان يُعرض سببان يناقض أحدهما الآخر: «خطأ تشغيلي»
  * عام وتحته سبب المحتوى الحقيقي. الآن يظهر السبب الفعلي مع نصيحة وزر إعادة المحاولة.
  */
+/** الاقتباس الأصلي الذي رُفض ادعاؤه أمام المدقق، ليقارنه الموظف بنفسه. */
+export function evidenceQuote(item) {
+  try {
+    const evidence = JSON.parse(item.version_evidence || "null");
+    if (evidence && !Array.isArray(evidence) && evidence.headline) return String(evidence.headline);
+    if (Array.isArray(evidence) && evidence[0]?.evidence) return String(evidence[0].evidence);
+  } catch {
+    /* دليل تالف: لا اقتباس يُعرض */
+  }
+  return "";
+}
+
 export function renderProblem(item) {
   if (item.desk_lane !== "attention_required") return briefErrorBox(item);
   const reason = item.attention_reason;
@@ -149,6 +165,19 @@ export function renderProblem(item) {
       ${attempts ? `<p class="brief-error-meta">جرّب النظام ${amount(attempts, "attempt")} على النماذج المربوطة ثم توقف.</p>` : ""}
       <p class="brief-error-advice">${escapeHtml(failureAdvice(code))}</p>
       <div><button type="button" class="btn-retry" data-act="retry-brief">إعادة المحاولة</button></div>
+    </div>`;
+  }
+  if (["verify_failed", "verify_exhausted"].includes(reason)) {
+    const detail = item.verify_detail || "";
+    const why = detail ? briefErrorReason(detail) : ATTENTION_REASON_AR[reason];
+    const quote = evidenceQuote(item);
+    return `<div class="brief-error">
+      <b>رفض المدقق المستقل هذا الموجز</b>
+      <p>${escapeHtml(why)}</p>
+      ${reason === "verify_exhausted" ? `<p class="brief-error-meta">${escapeHtml(ATTENTION_REASON_AR.verify_exhausted)}</p>` : ""}
+      ${quote ? `<p class="brief-error-meta">الاقتباس الأصلي الذي قارن به: <q dir="auto">${escapeHtml(quote)}</q></p>` : ""}
+      <p class="brief-error-advice">${escapeHtml(failureAdvice(detail))}</p>
+      <div><button type="button" class="btn-retry" data-act="retry-brief">إعادة إنتاج الموجز</button></div>
     </div>`;
   }
   const why =

@@ -286,3 +286,4 @@ h1 {
 .brief-error p { margin: 6px 0 0; }
 .brief-error-meta { color: #7a271a; font-size: 12px; }
 .brief-error-advice { font-weight: 600; }
+.brief-error q { display: block; margin-top: 4px; padding: 8px 10px; background: #fff; border: 1px solid #f1b8b3; border-radius: var(--radius-sm); color: #344054; font-size: 13px; line-height: 1.8; quotes: none; }

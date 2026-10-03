@@ -331,3 +331,15 @@ test("raw API error codes are shown as sentences", async () => {
   assert.match(friendlyError("Failed to fetch"), /تعذّر الاتصال/);
   assert.equal(friendlyError("لا كلمة سر"), "لا كلمة سر");
 });
+
+test("clear card lists what goes and what stays, and disables itself when nothing is removable", async () => {
+  const { renderClearCard } = await import("../public/settings.js");
+  const full = renderClearCard({ removable_items: 5, kept_items: 2, candidates: 9 });
+  assert.match(full, /data-clear-review/);
+  assert.doesNotMatch(full, /data-clear-review\s+disabled/);
+  assert.match(full, /5<\/b> خبرًا غير معتمد/);
+  assert.match(full, /2<\/b> خبرًا يحمل قرارًا/);
+  assert.match(renderClearCard({ removable_items: 0, kept_items: 2, candidates: 0 }), /data-clear-review disabled/);
+  assert.match(renderClearCard(null), /جاري حساب/);
+  assert.match(renderSystem(view(), { preview: { removable_items: 1, kept_items: 0, candidates: 1 } }), /بدء رصد جديد من الصفر/);
+});

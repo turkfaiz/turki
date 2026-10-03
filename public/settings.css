@@ -288,3 +288,5 @@
 .st-card h3 { margin: 14px 0 6px; font-size: 13px; color: var(--wine); }
 .st-ai-grid + #st-pipeline, #st-pipeline { margin-top: 14px; }
 @media (max-width: 900px) { .st-tools-grid { grid-template-columns: 1fr; } .st-gauges { grid-template-columns: repeat(2, 1fr); } }
+.st-danger { border-color: #f1b8b3; background: #fffafa; }
+.st-clear-list { margin: 10px 0 14px; padding-inline-start: 20px; display: grid; gap: 6px; font-size: 13.5px; line-height: 1.8; }

@@ -8,6 +8,7 @@ import {
   briefErrorReason,
   briefState,
   deskHeading,
+  evidenceQuote,
   failureAdvice,
   renderDetail,
   renderItemCard,
@@ -163,8 +164,8 @@ test("advice follows the actual failure instead of one generic line", () => {
 test("other attention reasons keep their own single box, and in-progress failures are not called final", () => {
   const verify = renderDetail(item({ desk_lane: "attention_required", attention_reason: "verify_failed", verify_state: "failed" }));
   assert.equal((verify.match(/class="brief-error"/g) || []).length, 1);
-  assert.match(verify, new RegExp(ATTENTION_REASON_AR.verify_failed.slice(0, 20)));
-  assert.doesNotMatch(verify, /data-act="retry-brief"/);
+  assert.match(verify, /رفض المدقق المستقل هذا الموجز/);
+  assert.match(verify, /data-act="retry-brief">إعادة إنتاج الموجز/);
 
   const retrying = renderDetail(item({ desk_lane: "reading", trans_engine: "brief-pending", brief_error: "ai_http_503", brief_attempts: 2, verify_state: null }));
   assert.match(retrying, /ستُعاد المحاولة تلقائيًا \(2 من 5\)/);
@@ -180,4 +181,36 @@ test("the detail view links the source safely and lists merged sources", () => {
   assert.match(html, /rel="noopener noreferrer"/);
   assert.doesNotMatch(html, /"onmouseover="/);
   assert.match(html, /المصادر: a\.it · b\.it/);
+});
+
+test("a verifier rejection names what was rejected, shows the quote it was compared with, and offers regeneration", () => {
+  const html = renderDetail(
+    item({
+      desk_lane: "attention_required",
+      attention_reason: "verify_failed",
+      verify_state: "failed",
+      verify_detail: "ai_headline_not_supported",
+      version_evidence: JSON.stringify({ headline: "Il sindaco ha annunciato un piano <b>casa</b>", facts: ["x"] }),
+    }),
+  );
+  assert.equal((html.match(/class="brief-error"/g) || []).length, 1);
+  assert.match(html, /رفض المدقق المستقل العنوان: لا يطابق الاقتباس الأصلي/);
+  assert.match(html, /الاقتباس الأصلي الذي قارن به: <q dir="auto">Il sindaco ha annunciato un piano &lt;b&gt;casa&lt;\/b&gt;<\/q>/);
+  assert.match(html, /قارن العنوان بالاقتباس الأصلي أعلاه/);
+  assert.match(html, /data-act="retry-brief">إعادة إنتاج الموجز/);
+  assert.doesNotMatch(html, /<b>casa<\/b>/);
+
+  const facts = renderDetail(item({ desk_lane: "attention_required", attention_reason: "verify_failed", verify_state: "failed", verify_detail: "ai_facts_not_supported" }));
+  assert.match(facts, /رفض المدقق المستقل كل حقائق الموجز/);
+  assert.doesNotMatch(facts, /الاقتباس الأصلي الذي قارن به/);
+
+  const exhausted = renderDetail(item({ desk_lane: "attention_required", attention_reason: "verify_exhausted", verify_state: "pending" }));
+  assert.match(exhausted, /استُنفدت محاولات التدقيق/);
+});
+
+test("the quote helper reads the current evidence shape and the legacy one, and survives garbage", () => {
+  assert.equal(evidenceQuote({ version_evidence: JSON.stringify({ headline: "H", facts: [] }) }), "H");
+  assert.equal(evidenceQuote({ version_evidence: JSON.stringify([{ fact_ar: "x", evidence: "Q" }]) }), "Q");
+  assert.equal(evidenceQuote({ version_evidence: "not json" }), "");
+  assert.equal(evidenceQuote({}), "");
 });

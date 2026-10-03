@@ -342,7 +342,26 @@ export function renderAi(view) {
 
 /* ───────────── النظام والسجل ───────────── */
 
-export function renderSystem(view) {
+export const CLEAR_PHRASE = "احذف كل الأخبار";
+
+/** بدء رصد جديد من الصفر: ما سيُمسح وما سيبقى، بزر لا ينفّذ إلا بعبارة تأكيد تكتبها. */
+export function renderClearCard(preview) {
+  const counts = preview
+    ? `<ul class="st-clear-list">
+        <li><b class="num">${num(preview.removable_items)}</b> خبرًا غير معتمد سيُمسح (قيد القراءة، التدقيق، الجاهز، المتعثر، والمستبعد تلقائيًا)</li>
+        <li><b class="num">${num(preview.candidates)}</b> رابطًا مكتشفًا سابقًا سيُمسح ليتمكن البحث الجديد من إيجادها</li>
+        <li><b class="num">${num(preview.kept_items)}</b> خبرًا يحمل قرارًا أو اعتمادًا <b>سيبقى</b></li>
+      </ul>`
+    : `<p class="st-hint">جاري حساب ما سيُمسح…</p>`;
+  return `<section class="st-card st-wide st-danger"><h2>بدء رصد جديد من الصفر</h2>
+    <p class="st-hint">يمسح الأخبار التي لم تُقرَّر بعد وسجل الرحلات، لتبدأ بحثًا نظيفًا. لا يمسّ المكاتب ولا المواقع ولا الإعدادات ولا حصص الذكاء الاصطناعي، ولا أي خبر اعتمدتَه أو قررتَ فيه.</p>
+    ${counts}
+    <button type="button" class="st-btn st-btn-danger" data-clear-review ${preview && !preview.removable_items && !preview.candidates ? "disabled" : ""}>مسح الأخبار غير المعتمدة</button>
+    <p class="st-form-status" id="st-clear-status" role="status"></p>
+  </section>`;
+}
+
+export function renderSystem(view, { preview = null } = {}) {
   const sys = view.system;
   const rows = [
     ["الرصد الأسبوعي", sys.weekly_cron],
@@ -371,6 +390,7 @@ export function renderSystem(view) {
       <p class="st-form-status" id="st-run-status" role="status"></p>
       <p class="st-hint">للتشخيص: <a href="/api/health">/api/health</a> · <a href="/api/diagnostics">/api/diagnostics</a></p>
     </section>
+    ${renderClearCard(preview)}
     <section class="st-card st-wide"><h2>آخر التغييرات</h2><ol class="st-audit">${audit}</ol></section>
   </div>`;
 }
@@ -489,7 +509,7 @@ export function renderBriefPipeline(d) {
 
 function init() {
   const $ = (id) => document.getElementById(id);
-  const state = { view: null, query: "", filter: "all", notes: {}, tab: "offices", tools: null, toolResults: {}, sweep: null, pipeline: null };
+  const state = { view: null, query: "", filter: "all", notes: {}, tab: "offices", tools: null, toolResults: {}, sweep: null, pipeline: null, preview: null };
 
   async function api(path, options = {}) {
     const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -519,7 +539,7 @@ function init() {
     $("st-summary").innerHTML = renderSummary(view);
     $("st-offices").innerHTML = renderOffices(view, { query: state.query, filter: state.filter, notes: state.notes });
     $("panel-ai").innerHTML = renderAi(view) + `<div id="st-pipeline">${renderBriefPipeline(state.pipeline)}</div>`;
-    $("panel-system").innerHTML = renderSystem(view);
+    $("panel-system").innerHTML = renderSystem(view, { preview: state.preview });
     paintTools();
   }
 
@@ -529,6 +549,34 @@ function init() {
       sweep: state.sweep,
       names: siteIndex(state.view?.offices),
     });
+  }
+
+  async function loadPreview() {
+    try {
+      state.preview = await api("/api/settings/clear-preview");
+    } catch (error) {
+      toast(`تعذّر حساب ما سيُمسح: ${friendlyError(error.message)}`, true);
+    }
+    if (state.view) paint();
+  }
+
+  async function clearReview() {
+    const p = state.preview || {};
+    const typed = window.prompt(
+      `سيُمسح ${p.removable_items ?? "؟"} خبرًا غير معتمد و${p.candidates ?? "؟"} رابطًا مكتشفًا وسجل الرحلات.\nيبقى المعتمد وكل ما فيه قرار، والمكاتب والمواقع وحصص الذكاء.\n\nللتأكيد اكتب العبارة التالية كما هي:\n${CLEAR_PHRASE}`,
+    );
+    if (typed === null) return;
+    const status = $("st-clear-status");
+    try {
+      const r = await api("/api/admin/reset", { method: "POST", body: JSON.stringify({ confirm: typed.trim() }) });
+      toast(`مُسح ${r.removedItems} خبرًا و${r.removedCandidates} رابطًا. بقي ${r.keptDecided} معتمدًا. ابدأ رصدًا جديدًا من الصفحة الرئيسية.`);
+      state.preview = null;
+      await load();
+      await loadPreview();
+    } catch (error) {
+      if (status) status.textContent = error.message === "confirmation_required" ? "العبارة غير مطابقة، لم يُمسح شيء." : friendlyError(error.message);
+      if (status) status.classList.add("is-error");
+    }
   }
 
   async function loadTools() {
@@ -604,6 +652,7 @@ function init() {
     for (const name of TABS) $(`panel-${name}`).hidden = name !== tab;
     if (location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
     if (tab === "tools") loadTools();
+    if (tab === "system") loadPreview();
     if (tab === "ai" && !state.pipeline) loadBriefPipeline();
   }
 
@@ -689,6 +738,10 @@ function init() {
     }
     if (target.id === "st-edit-cancel") {
       $("st-edit-dialog").close();
+      return;
+    }
+    if (target.dataset.clearReview !== undefined) {
+      await clearReview();
       return;
     }
     if (target.dataset.testTool) {
