@@ -2,7 +2,7 @@
  * مكتب الأخبار: بطاقات القائمة وتفصيل الخبر وما يلزمهما من نصوص.
  * دوال نقية (بيانات ← HTML) تُختبر دون متصفح؛ التفاعل في app.js.
  */
-import { fmtDate, num, relTime } from "./lib.js";
+import { amount, fmtDate, num, relTime } from "./lib.js";
 
 export const LANE_EMPTY = {
   reading: "لا توجد أخبار تُقرأ الآن. بعد الرصد تظهر هنا حتى يكتمل الموجز.",
@@ -17,7 +17,7 @@ export const ATTENTION_REASON_AR = {
   verify_failed: "رُفض الموجز في التدقيق الدلالي ويحتاج مراجعة أو إعادة إنتاج.",
   ai_unconfigured: "مفتاح الذكاء الاصطناعي غير مربوط، فتوقفت القراءة.",
   brief_exhausted: "استُنفدت محاولات التلخيص دون موجز صالح.",
-  brief_error: "تعذر التلخيص بعد خطأ تشغيلي ويحتاج تدخلاً.",
+  brief_error: "تعذّرت كتابة الموجز بعد تجربة النماذج المتاحة، ويحتاج مراجعتك.",
   brief_without_version: "يوجد موجز مكتمل بلا نسخة محفوظة، فلا يُعتمد.",
   verify_exhausted: "استُنفدت محاولات التدقيق دون اجتياز.",
 };
@@ -110,11 +110,52 @@ export function briefErrorBox(item) {
     ? `توقفت المحاولات بعد ${num(attempts)} محاولات`
     : engine === "brief-deferred"
       ? "التلخيص مؤجل ويكمل تلقائيًا"
-      : `تعذر التلخيص — المحاولة ${num(attempts)} من 5`;
+      : `تعذّر نداء سابق وستُعاد المحاولة تلقائيًا (${num(attempts)} من 5)`;
   return `<div class="brief-error">
       <b>${escapeHtml(heading)}</b><br />${escapeHtml(briefErrorReason(item.brief_error))}
       ${exhausted ? `<div><button type="button" class="btn-retry" data-act="retry-brief">إعادة المحاولة الآن</button></div>` : ""}
     </div>`;
+}
+
+/** ماذا يفعل الموظف بعد هذا الفشل تحديدًا، بدل رسالة عامة تناقض سببها. */
+export function failureAdvice(code) {
+  const raw = String(code || "");
+  if (/quote_without_mayor|ai_has_no_grounded_facts/.test(raw)) {
+    return "غالبًا لا يتناول الخبر العمدة نفسه، فاسمه يرد في الصفحة عرَضًا. الأنسب استبعاده، وأعد المحاولة فقط إن رأيتَ أنه عنه.";
+  }
+  if (/name_missing/.test(raw)) return "كتب النموذج عنوانًا بلا اسم العمدة المسجّل. إعادة المحاولة قد تنجح.";
+  if (/ai_ungrounded|not_supported|quote_not_in_page/.test(raw)) {
+    return "لم يجد النموذج جملة حرفية تسند العنوان. إعادة المحاولة قد تنجح، وإلا فاستبعد الخبر.";
+  }
+  if (/http_5|timeout|abort|provider_error|deferred|429/i.test(raw)) return "عطل مؤقت في خدمة الذكاء الاصطناعي. أعد المحاولة.";
+  return "أعد المحاولة، فإن تكرر الفشل فاستبعد الخبر.";
+}
+
+/**
+ * صندوق واحد متسق لما يعطّل الخبر. كان يُعرض سببان يناقض أحدهما الآخر: «خطأ تشغيلي»
+ * عام وتحته سبب المحتوى الحقيقي. الآن يظهر السبب الفعلي مع نصيحة وزر إعادة المحاولة.
+ */
+export function renderProblem(item) {
+  if (item.desk_lane !== "attention_required") return briefErrorBox(item);
+  const reason = item.attention_reason;
+  const briefFailed = ["brief_error", "brief_exhausted"].includes(reason) && !item.current_version_id;
+  if (briefFailed) {
+    const code = item.brief_error || "";
+    const attempts = Number(item.brief_attempts) || 0;
+    const why = code ? briefErrorReason(code) : ATTENTION_REASON_AR[reason];
+    return `<div class="brief-error">
+      <b>تعذّرت كتابة موجز موثّق</b>
+      <p>${escapeHtml(why)}</p>
+      ${attempts ? `<p class="brief-error-meta">جرّب النظام ${amount(attempts, "attempt")} على النماذج المربوطة ثم توقف.</p>` : ""}
+      <p class="brief-error-advice">${escapeHtml(failureAdvice(code))}</p>
+      <div><button type="button" class="btn-retry" data-act="retry-brief">إعادة المحاولة</button></div>
+    </div>`;
+  }
+  const why =
+    ATTENTION_REASON_AR[reason] ||
+    briefErrorReason(item.verify_detail || item.brief_error) ||
+    "يحتاج تدخلاً قبل أن يدخل مسار القرار.";
+  return `<div class="brief-error"><b>سبب التعثر</b><p>${escapeHtml(why)}</p></div>`;
 }
 
 export function factItems(snippet) {
@@ -217,12 +258,6 @@ export function renderDetail(item) {
   const facts = factItems(item.news_snippet_ar);
   const sources = mergedSources(item);
   const reader = providerFromItem(item);
-  const attention =
-    item.desk_lane === "attention_required"
-      ? `<div class="brief-error"><b>سبب التعثر</b><br />${escapeHtml(
-          ATTENTION_REASON_AR[item.attention_reason] || briefErrorReason(item.brief_error || item.verify_detail) || "يحتاج تدخلاً قبل أن يدخل مسار القرار.",
-        )}</div>`
-      : "";
   const excluded = item.status === "excluded" ? `<p class="meta">سبب الاستبعاد: ${escapeHtml(item.exclude_reason || "—")}</p>` : "";
   const canApprove = item.verify_state === "passed";
   return `
@@ -242,8 +277,7 @@ export function renderDetail(item) {
         <span class="num">${escapeHtml(fmtDate(item.published_at || item.created_at))}</span>
       </div>
       ${facts.length ? `<ul class="facts">${facts.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
-      ${attention}
-      ${briefErrorBox(item)}
+      ${renderProblem(item)}
       ${reader ? `<p class="source-line">كتب الموجز: ${escapeHtml(reader.name)}${reader.model ? ` · ${escapeHtml(reader.model)}` : ""}</p>` : ""}
       <p class="source-line">المصادر: ${sources.map((source) => escapeHtml(source.domain || "—")).join(" · ")}</p>
       <div class="origin-block">

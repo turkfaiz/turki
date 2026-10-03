@@ -283,3 +283,6 @@ h1 {
   h1 { font-size: 24px; }
   .brief-body h2.headline { font-size: 22px; }
 }
+.brief-error p { margin: 6px 0 0; }
+.brief-error-meta { color: #7a271a; font-size: 12px; }
+.brief-error-advice { font-weight: 600; }
