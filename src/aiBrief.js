@@ -388,7 +388,7 @@ function resolveCallSlot(env, slot) {
  * نداء واحد فقط لكل استدعاء، والتراجع مفوَّض للطابور حتى لا ينام أي طلب.
  * الحجز يسبق الشبكة على ميزانية الفتحة نفسها، فإن لم تسمح لا يخرج النداء.
  */
-async function callProvider(env, slot, input, schema, fetcher, purpose = "brief") {
+async function callProvider(env, slot, input, schema, fetcher, purpose = "brief", { trip = true } = {}) {
   const resolved = resolveCallSlot(env, slot);
   if (!resolved) {
     throw new Error("ai_not_configured");
@@ -424,7 +424,8 @@ async function callProvider(env, slot, input, schema, fetcher, purpose = "brief"
     error.status = status;
     error.retryAfterSeconds = parseRetryDelaySeconds(response, payload);
     error.quotaScope = quotaScope(payload);
-    const cooldown = await noteAiFailure(env, error, resolved.id);
+    // اختبار يدوي لا يوقف النموذج: رفضه لا يعني بالضرورة أن الأخبار الحقيقية سترفض.
+    const cooldown = trip ? await noteAiFailure(env, error, resolved.id) : 0;
     if (cooldown) throw new AiDeferredError(error.message, cooldown, resolved.id);
     throw error;
   }
@@ -586,12 +587,13 @@ const PING_SCHEMA = {
 
 /**
  * اختبار حي لنموذج واحد: نداء صغير حقيقي بالمفتاح والطراز والعنوان المضبوطة، فيكشف
- * خطأ المفتاح أو الحساب غير المدفوع أو الشبكة. يُحتسب من حصة النموذج مثل أي نداء.
+ * خطأ المفتاح أو الحساب غير المدفوع أو الشبكة. يُحتسب من حصة النموذج مثل أي نداء،
+ * لكن فشله لا يفرض فترة تهدئة على النموذج، فلا يعطّل الاختبار الرصد الحقيقي.
  */
 export async function pingAiSlot(env, slot, fetcher = fetch) {
   const started = Date.now();
   try {
-    const out = await callProvider(env, slot, 'أعد JSON {"pong": true} فقط.', PING_SCHEMA, fetcher, "brief");
+    const out = await callProvider(env, slot, 'أعد JSON {"pong": true} فقط.', PING_SCHEMA, fetcher, "brief", { trip: false });
     const ok = out?.pong === true || out?.pong === "true";
     return { ok, ms: Date.now() - started, error: ok ? "" : "ai_unexpected_reply" };
   } catch (error) {

@@ -90,3 +90,17 @@ test("the AI live test sends one real call with the slot's own key and reports t
   assert.match(rejected.detail, /ai_http_403|ai_deferred/);
   assert.equal((await testTool(await envWith(), "ai:gemini")).ok, false);
 });
+
+test("a failed AI test never puts the model into cooldown, so it cannot disturb real searches", async () => {
+  const env = await envWith({ GEMINI_API_KEY: "k" });
+  const rejected = await testTool(env, "ai:gemini", {
+    fetcher: async () => ({ ok: false, status: 403, headers: { get: () => null }, async json() { return { error: { message: "bad" } }; } }),
+  });
+  assert.equal(rejected.ok, false);
+  const row = env.DB.one(`SELECT calls, blocked_until FROM ai_provider_budget WHERE provider = 'gemini'`);
+  assert.equal(row.calls, 1, "the test still counts as one call from the daily quota");
+  assert.equal(row.blocked_until, null, "no cooldown after a manual test");
+  // وبعد الاختبار الفاشل يبقى النموذج متاحًا للرصد الحقيقي
+  const view = await toolsOverview(env);
+  assert.equal(byId(view, "ai:gemini").state, "ok");
+});
