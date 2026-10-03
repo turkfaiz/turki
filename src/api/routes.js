@@ -15,9 +15,9 @@ import {
   currentVersion,
   decisionsFor,
   isReadyForApproval,
-  protectedItemsSql,
   recordDecision,
 } from "../versions.js";
+import { CLEAR_CONFIRMATION, clearUndecided } from "../db/items.js";
 import { json, readBody, reviewerOf } from "./http.js";
 import { handleSettingsApi } from "./settings.js";
 import {
@@ -256,30 +256,25 @@ export async function handleApi(request, env) {
 
   if (path === "/api/admin/reset" && method === "POST") {
     const body = await readBody(request);
-    if (body.confirm !== "احذف كل الأخبار") {
+    if (body.confirm !== CLEAR_CONFIRMATION) {
       return json(
         {
           error: "confirmation_required",
-          detail: 'أرسل confirm بالقيمة "احذف كل الأخبار" لتأكيد الحذف.',
+          detail: `أرسل confirm بالقيمة "${CLEAR_CONFIRMATION}" لتأكيد الحذف.`,
         },
         400,
       );
     }
     // القرارات المحفوظة أرشيف، فلا يمسّها إجراء تنظيف الأخبار.
-    const removed = await env.DB.prepare(
-      `DELETE FROM items WHERE NOT ${protectedItemsSql()}`,
-    ).run();
-    await env.DB.prepare(`DELETE FROM scans`).run();
-    await env.DB.prepare(`DELETE FROM search_job_tasks`).run();
-    await env.DB.prepare(`DELETE FROM search_jobs`).run();
-    return json({
-      ok: true,
-      removedItems: Number(removed?.meta?.changes) || 0,
-      keptDecided: Number(
-        (await env.DB.prepare(`SELECT COUNT(*) AS n FROM items`).first())?.n || 0,
-      ),
-      by: reviewerOf(request, env),
-    });
+    const result = await clearUndecided(env);
+    const by = reviewerOf(request, env);
+    await env.DB.prepare(
+      `INSERT INTO settings_audit (id, actor, action, source_id, mayor_id, before_json, after_json)
+       VALUES (?, ?, 'review_cleared', NULL, NULL, NULL, ?)`,
+    )
+      .bind(crypto.randomUUID(), by, JSON.stringify(result))
+      .run();
+    return json({ ok: true, removedItems: result.removed_items, removedCandidates: result.removed_candidates, keptDecided: result.kept_items, by });
   }
 
   if (path === "/api/briefs/drain" && method === "POST") {

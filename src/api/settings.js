@@ -13,6 +13,7 @@
  *   GET    /api/settings/audit               آخر التغييرات
  */
 import { ITEM_RETENTION_DAYS, ITEM_WINDOW_DAYS } from "../config.js";
+import { clearPreview } from "../db/items.js";
 import { insertCustomMayor, listMayors, mayorInputMessage, parseMayorInput } from "../mayors.js";
 import { deleteCustomMayor, updateCustomMayor } from "../mayorAdmin.js";
 import { addSite, checkSite, removeSite } from "../sourceAdmin.js";
@@ -246,6 +247,9 @@ export async function handleSettingsApi(request, env, path, method) {
   }
   if (path === "/api/settings/offices" && method === "GET") {
     return json({ offices: await settingsOffices(env) });
+  }
+  if (path === "/api/settings/clear-preview" && method === "GET") {
+    return json(await clearPreview(env));
   }
   if (path === "/api/settings/tools" && method === "GET") {
     return json(await toolsOverview(env));

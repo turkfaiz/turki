@@ -22,6 +22,51 @@ export async function pruneOldItems(env, days = ITEM_RETENTION_DAYS) {
   return Number(result?.meta?.changes) || 0;
 }
 
+/** الأخبار التي يمسحها «بدء من جديد»: كل ما لا يحمل قرارًا محفوظًا ولا اعتمادًا. */
+const UNDECIDED_SQL = `NOT ${protectedItemsSql()} AND status <> 'approved'`;
+
+export const CLEAR_CONFIRMATION = "احذف كل الأخبار";
+
+/** ما سيُمسح وما سيبقى، لتعرضه الواجهة قبل التأكيد. */
+export async function clearPreview(env) {
+  const row = await env.DB.prepare(
+    `SELECT SUM(CASE WHEN ${UNDECIDED_SQL} THEN 1 ELSE 0 END) AS removable,
+            SUM(CASE WHEN NOT (${UNDECIDED_SQL}) THEN 1 ELSE 0 END) AS kept
+     FROM items`,
+  ).first();
+  const candidates = await env.DB.prepare(`SELECT COUNT(*) AS n FROM candidates`).first();
+  return {
+    removable_items: Number(row?.removable) || 0,
+    kept_items: Number(row?.kept) || 0,
+    candidates: Number(candidates?.n) || 0,
+  };
+}
+
+/**
+ * يبدأ رصدًا جديدًا من الصفر: يمسح الأخبار غير المقررة وما يتصل بها، ويُبقي كل ما
+ * يحمل قرارًا. لا يمس المكاتب ولا المواقع ولا الإعدادات ولا حصص الذكاء.
+ *
+ * المرشحون يُمسحون أيضًا: رابط معروف سابقًا يُتجاهل عند الاكتشاف، فبقاؤهم يجعل
+ * الرصد الجديد لا يجد شيئًا. ونسخ الموجزات تُعلَّم متقادمة لا تُحذف، فلا يُدقَّق
+ * موجز خبر محذوف ولا تُهدر عليه نداءات.
+ */
+export async function clearUndecided(env) {
+  const before = await clearPreview(env);
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE brief_versions SET superseded_at = COALESCE(superseded_at, datetime('now'))
+       WHERE item_id IN (SELECT id FROM items WHERE ${UNDECIDED_SQL})`,
+    ),
+    env.DB.prepare(`DELETE FROM items WHERE ${UNDECIDED_SQL}`),
+    env.DB.prepare(`DELETE FROM candidates`),
+    env.DB.prepare(`DELETE FROM scan_sources`),
+    env.DB.prepare(`DELETE FROM search_job_tasks`),
+    env.DB.prepare(`DELETE FROM search_jobs`),
+    env.DB.prepare(`DELETE FROM scans`),
+  ]);
+  return { removed_items: before.removable_items, removed_candidates: before.candidates, kept_items: before.kept_items };
+}
+
 export async function recordSourceHealth(env, rows) {
   if (!rows?.length) return;
   const stmt = env.DB.prepare(
