@@ -184,7 +184,8 @@ test("AI cards show state, quota, the last error in words, and never a key", () 
   assert.match(html, /جيميني/);
   assert.match(html, /يعمل/);
   assert.match(html, /5%/);
-  assert.match(html, /العنوان لا يبدأ باسم العمدة/);
+  assert.match(html, /آخر موجز رُفض في التوثيق: العنوان لا يبدأ باسم العمدة — لا يعني عطلًا في النموذج/);
+  assert.doesNotMatch(html, /آخر خطأ: العنوان لا يبدأ/);
   assert.match(html, /موقوف من الإعداد/);
   assert.match(html, /GEMINI_API_KEY/);
   assert.doesNotMatch(html, /sk-|AIza/);
@@ -309,4 +310,24 @@ test("the expensive diagnostics call lives in one function that only the AI tab 
   assert.match(source, /if \(tab === "ai" && !state\.pipeline\) loadBriefPipeline\(\)/);
   const html = fs.readFileSync(new URL("../public/settings.html", import.meta.url), "utf8");
   for (const id of ["tab-tools", "panel-tools"]) assert.match(html, new RegExp(`id="${id}"`));
+});
+
+test("a content rejection is not shown as a model failure, but a provider error still is", async () => {
+  const { renderTools, lastErrorLabel, isContentRejection } = await import("../public/settings.js");
+  assert.equal(isContentRejection("ai_ungrounded_headline:quote_without_mayor"), true);
+  assert.equal(isContentRejection("ai_http_402"), false);
+  assert.match(lastErrorLabel("ai_ungrounded_headline:quote_without_mayor"), /لا يعني عطلًا في النموذج/);
+  assert.match(lastErrorLabel("ai_http_402"), /^آخر خطأ:/);
+  const view = toolsView();
+  view.tools.find((t) => t.id === "ai:gemini").last_error = { code: "ai_ungrounded_headline:quote_without_mayor" };
+  const html = renderTools(view);
+  assert.match(html, /لا يعني عطلًا في النموذج/);
+  assert.doesNotMatch(html, /st-tool-result is-bad">آخر موجز/);
+});
+
+test("raw API error codes are shown as sentences", async () => {
+  const { friendlyError } = await import("../public/settings.js");
+  assert.match(friendlyError("not_found"), /حدّث الصفحة بقوة/);
+  assert.match(friendlyError("Failed to fetch"), /تعذّر الاتصال/);
+  assert.equal(friendlyError("لا كلمة سر"), "لا كلمة سر");
 });

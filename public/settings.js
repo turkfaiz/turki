@@ -65,6 +65,23 @@ export function siteTone(platform) {
   return NEEDS_ATTENTION.has(code) ? "bad" : "warn";
 }
 
+/** رفض موجز بسبب التوثيق سلوك طبيعي للنظام، لا عطل في النموذج؛ فلا يُعرض كخطأ صحة. */
+export const isContentRejection = (code) => /ai_ungrounded|ai_has_no_grounded|not_supported|article_text_too_short/.test(String(code || ""));
+
+export function lastErrorLabel(code) {
+  return isContentRejection(code)
+    ? `آخر موجز رُفض في التوثيق: ${aiErrorReason(code)} — لا يعني عطلًا في النموذج`
+    : `آخر خطأ: ${aiErrorReason(code)}`;
+}
+
+/** رسائل أخطاء الواجهة البرمجية بكلمات مفهومة بدل الرموز الخام. */
+export function friendlyError(message) {
+  const raw = String(message || "");
+  if (raw === "not_found") return "المسار غير متاح في النسخة المنشورة. حدّث الصفحة بقوة (Command+Shift+R) أو أعد النشر.";
+  if (raw === "request_failed" || raw === "Failed to fetch") return "تعذّر الاتصال بالخادم.";
+  return raw;
+}
+
 export function aiErrorReason(code) {
   const raw = String(code || "");
   const rules = [
@@ -314,7 +331,7 @@ export function renderAi(view) {
         <p class="st-ai-model num">${esc(slot.model)}</p>
         <div class="st-meter" role="img" aria-label="${pct}% من الحصة مستهلك"><i style="width:${pct}%"></i></div>
         <p class="st-ai-nums"><b class="num">${num(b.used)}</b> مستهلك من <span class="num">${num(b.dailyLimit)}</span> · بقي <b class="num">${num(b.remaining)}</b> · فاصل <span class="num">${num(b.minIntervalMs)}</span>ms</p>
-        <p class="st-ai-err">${slot.lastError ? `آخر خطأ: ${esc(aiErrorReason(slot.lastError.code))} · ${esc(relTime(slot.lastError.at))}` : "لا أخطاء مسجلة"}</p>
+        <p class="st-ai-err">${slot.lastError ? `${esc(lastErrorLabel(slot.lastError.code))} · ${esc(relTime(slot.lastError.at))}` : "لا أخطاء مسجلة"}</p>
         <p class="st-ai-vars">المفتاح: ${slot.hasKey ? "موجود" : "غير موجود"} · يُضبط من <code dir="ltr">${esc(vars[0] || "")}</code></p>
       </article>`;
     })
@@ -416,7 +433,9 @@ export function renderTools(view, { results = {}, sweep = null, names = new Map(
           ? `<p class="st-tool-result is-${r.ok ? "ok" : "bad"}">${r.ok ? "✓" : "✕"} آخر اختبار ${esc(relTime(new Date(r.at).toISOString(), now, ""))}${r.ms ? ` · ${num(r.ms)}ms` : ""} — ${esc(r.detail)}</p>`
           : "";
         const beat = tool.last_at ? `<p class="st-tool-result">آخر نبضة مسجّلة: ${esc(relTime(tool.last_at, now, ""))}</p>` : "";
-        const err = tool.last_error ? `<p class="st-tool-result is-bad">آخر خطأ: ${esc(briefErrorReason(tool.last_error.code))}</p>` : "";
+        const err = tool.last_error
+          ? `<p class="st-tool-result${isContentRejection(tool.last_error.code) ? "" : " is-bad"}">${esc(isContentRejection(tool.last_error.code) ? `آخر موجز رُفض في التوثيق: ${briefErrorReason(tool.last_error.code)} — لا يعني عطلًا في النموذج` : `آخر خطأ: ${briefErrorReason(tool.last_error.code)}`)}</p>`
+          : "";
         let action = "";
         if (tool.id === "sources") {
           action = `<button type="button" class="st-btn st-btn-ghost" data-run-sweep ${sweep?.running ? "disabled" : ""}>${sweep?.running ? "يفحص…" : "فحص كل المواقع"}</button>`;
@@ -562,7 +581,7 @@ function init() {
         const r = await api(`/api/settings/tools/${encodeURIComponent(id)}/test`, { method: "POST" });
         state.toolResults[id] = { ...r, at: Date.now() };
       } catch (error) {
-        state.toolResults[id] = { ok: false, detail: error.message, at: Date.now() };
+        state.toolResults[id] = { ok: false, detail: friendlyError(error.message), at: Date.now() };
       }
       await loadTools();
     });
@@ -684,7 +703,7 @@ function init() {
             const r = await api(`/api/settings/tools/${encodeURIComponent(tool.id)}/test`, { method: "POST" });
             state.toolResults[tool.id] = { ...r, at: Date.now() };
           } catch (error) {
-            state.toolResults[tool.id] = { ok: false, detail: error.message, at: Date.now() };
+            state.toolResults[tool.id] = { ok: false, detail: friendlyError(error.message), at: Date.now() };
           }
         }
         await loadTools();

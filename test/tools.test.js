@@ -90,3 +90,44 @@ test("the AI live test sends one real call with the slot's own key and reports t
   assert.match(rejected.detail, /ai_http_403|ai_deferred/);
   assert.equal((await testTool(await envWith(), "ai:gemini")).ok, false);
 });
+
+test("a failed AI test never puts the model into cooldown, so it cannot disturb real searches", async () => {
+  const env = await envWith({ GEMINI_API_KEY: "k" });
+  const rejected = await testTool(env, "ai:gemini", {
+    fetcher: async () => ({ ok: false, status: 403, headers: { get: () => null }, async json() { return { error: { message: "bad" } }; } }),
+  });
+  assert.equal(rejected.ok, false);
+  const row = env.DB.one(`SELECT calls, blocked_until FROM ai_provider_budget WHERE provider = 'gemini'`);
+  assert.equal(row.calls, 1, "the test still counts as one call from the daily quota");
+  assert.equal(row.blocked_until, null, "no cooldown after a manual test");
+  // وبعد الاختبار الفاشل يبقى النموذج متاحًا للرصد الحقيقي
+  const view = await toolsOverview(env);
+  assert.equal(byId(view, "ai:gemini").state, "ok");
+});
+
+test("the HTTP route accepts an AI tool id exactly as the browser sends it, encoded or raw", async () => {
+  const env = await envWith({ GEMINI_API_KEY: "k", DASHBOARD_PASSWORD: "p" });
+  const post = (path) => worker.fetch(new Request(`https://mayor-watch.test${path}`, { method: "POST", headers: { Authorization: `Basic ${btoa("mayorwatch:p")}` } }), env);
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return { outputs: [{ type: "text", text: '{"pong": true}' }], candidates: [{ content: { parts: [{ text: '{"pong": true}' }] } }] };
+    },
+  });
+  try {
+    for (const id of ["ai%3Agemini", "ai:gemini"]) {
+      const res = await post(`/api/settings/tools/${id}/test`);
+      assert.equal(res.status, 200, id);
+      const body = await res.json();
+      assert.notEqual(body.error, "not_found", id);
+      assert.equal(typeof body.ok, "boolean", id);
+    }
+    const unknown = await post("/api/settings/tools/ai%3Anothing/test");
+    assert.equal(unknown.status, 200);
+    assert.equal((await unknown.json()).ok, false);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
