@@ -117,6 +117,11 @@ test("approval is offered only for a verified brief; excluded items can be resto
   assert.match(pending, /disabled title="لا يُعتمد موجز قبل اجتياز التدقيق الدلالي"/);
   assert.doesNotMatch(pending, /data-act="approved">/);
 
+  // لا موجز مدقَّق ولا ينتظر تدقيقًا (فشل الموجز): لا زر اعتماد يوحي بانتظار لن يأتي.
+  const failed = renderDetail(item({ verify_state: null, trans_engine: "brief-ai-error", desk_lane: "attention_required", attention_reason: "brief_error", brief_error: "ai_http_503" }));
+  assert.doesNotMatch(failed, /btn-good/);
+  assert.match(failed, /data-act="excluded"/);
+
   const excluded = renderDetail(item({ status: "excluded", exclude_reason: "لا يخص العمدة" }));
   assert.match(excluded, /data-act="inbox"/);
   assert.match(excluded, /سبب الاستبعاد: لا يخص العمدة/);
@@ -141,6 +146,8 @@ test("a failed brief shows one coherent box: the real reason, what to do, and a 
   assert.match(html, /جرّب النظام محاولتين على النماذج المربوطة ثم توقف/);
   assert.match(html, /الأنسب استبعاده/);
   assert.match(html, /data-act="retry-brief"/);
+  assert.match(html, /تعذّر التلخيص — يحتاج مراجعتك/);
+  assert.doesNotMatch(html, /ستُعاد المحاولة/);
   // لا «خطأ تشغيلي» عامًا يناقض السبب، ولا «المحاولة 2 من 5» وكأن إعادة تلقائية قادمة
   assert.doesNotMatch(html, /خطأ تشغيلي/);
   assert.doesNotMatch(html, /المحاولة 2 من 5/);

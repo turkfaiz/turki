@@ -70,7 +70,7 @@ export function briefBadge(item) {
   }
   if (engine === "brief-deferred") return "بانتظار حصة AI — يستأنف تلقائيًا";
   if (engine === "brief-working") return "يُقرأ الآن";
-  if (engine === "brief-ai-error") return "تعذر AI — ستُعاد المحاولة";
+  if (engine === "brief-ai-error") return "تعذّر التلخيص — يحتاج مراجعتك";
   return "بانتظار AI";
 }
 
@@ -290,7 +290,9 @@ export function renderDetail(item) {
         ${item.status !== "approved"
           ? canApprove
             ? `<button type="button" class="btn-good" data-act="approved">اعتماد</button>`
-            : `<button type="button" class="btn-good" disabled title="لا يُعتمد موجز قبل اجتياز التدقيق الدلالي">اعتماد — بانتظار التدقيق</button>`
+            : item.verify_state === "pending"
+              ? `<button type="button" class="btn-good" disabled title="لا يُعتمد موجز قبل اجتياز التدقيق الدلالي">اعتماد — بانتظار التدقيق</button>`
+              : ""
           : ""}
         ${item.status !== "excluded" ? `<button type="button" class="btn-bad" data-act="excluded">استبعاد يدوي</button>` : ""}
         ${item.status === "excluded" ? `<button type="button" data-act="inbox">استرجاع للوارد</button>` : ""}
